@@ -4,9 +4,13 @@ From today's state to every Home app live: the web app at `/app`, sign-in, Files
 Books, AI with live updates, and Home's power button; plus the host's encrypted DNS. It assumes
 the server is set up as in [RUNBOOK.md](../RUNBOOK.md) sections 1 to 10 (provisioned, the sites
 live through the tunnel, a verified release running `database`, `portfolio`, `hypernova`,
-`tunnel`, `ai` and `media`) and that Home has never been released: its stack needs four secrets
-that are not set yet (`HOME_DATA_KEY`, `HOME_SECRET_KEY`, `HOME_RESEND_API_KEY`,
-`HOME_TMDB_READ_TOKEN`).
+`tunnel`, `ai` and `media`) and Home's first release (2026-10-20). Home's secrets are already in
+the `production` environment and in 1Password (`HOME_DATA_KEY`, `HOME_SECRET_KEY`,
+`HOME_RESEND_API_KEY`, `HOME_TMDB_READ_TOKEN`, all set 2026-10-21); only `HOME_POWER_KEY` is new.
+
+> **Never generate new `HOME_DATA_KEY` or `HOME_SECRET_KEY` for a server that already ran Home.**
+> `HOME_DATA_KEY` seals every enrolled second factor and the AI chats: a new one locks everyone
+> out of their second step and makes the chats unreadable. Only a brand-new server gets new keys.
 
 Every step is an **Owner action**. Commands run on your laptop, on the tailnet, in a checkout of
 `master` with `gh` logged in to `somethim-home/infrastructure` and `op` signed in to 1Password,
@@ -126,8 +130,15 @@ item="infra production secrets"
 set_secret() { op item edit "$item" --vault "Home Server" "$1[password]=$2" >/dev/null && printf %s "$2" | gh secret set "$1" --env production -R somethim-home/infrastructure && echo "$1 set"; }
 ```
 
-**The two keys**, new and different (`HOME_DATA_KEY` also seals the AI chats and is the only
-key to every enrolled second factor; it is not in the backups, so 1Password is its only copy):
+**The two keys** are already set; check they are there (names only) and skip to the next secret:
+
+```bash
+gh secret list --env production -R somethim-home/infrastructure | grep -E 'HOME_(DATA|SECRET)_KEY'
+```
+
+Only on a **brand-new server** that never ran Home, make them, new and different (`HOME_DATA_KEY`
+seals the AI chats and every enrolled second factor; it is not in the backups, so 1Password is
+its only copy):
 
 ```bash
 set_secret HOME_SECRET_KEY "$(openssl rand -base64 32)"
