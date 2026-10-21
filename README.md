@@ -2,8 +2,8 @@
 
 Ansible playbooks, Docker Compose stacks and shell scripts that run one person's home server:
 a single Ubuntu PC on a home LAN that serves two public websites through a Cloudflare Tunnel
-and, over Tailscale only, the owner's own apps (Home, file storage, a status dashboard, a local
-LLM). Nothing on the box listens on the internet. This repository is the only thing that
+and, over Tailscale only, the owner's own apps (Home with its files, films, books and AI chat,
+file storage, a status dashboard, local LLMs). Nothing on the box listens on the internet. This repository is the only thing that
 configures it.
 
 It is published as a worked example, not as a product: the values are the owner's (see
@@ -33,7 +33,9 @@ flowchart LR
     portfolio --> pg[(PostgreSQL)]
     hypernova --> pg
     hypernova --> ollama[ai: Ollama on the GPU]
-    hometls[home-tls<br/>Traefik + Let's Encrypt] --> home[Home: home-server]
+    hometls[home-tls<br/>Traefik + Let's Encrypt] --> home[Home: home-server<br/>web app, Files, Media, Books, AI]
+    home -- internal home-llm --> llama[ai: llama-server on the GPU]
+    home --> library[(films and series<br/>on the media disk)]
     hometls --> media[media: Beszel, Garage S3, SFTPGo]
     wt[Watchtower]
     gate[deploy account<br/>forced command] --> apply[infra-apply]
@@ -78,10 +80,11 @@ one only runs their images.
   prune), `gpu` (NVIDIA driver and Container Toolkit), `host` (disks, swap, service accounts,
   Wake-on-LAN, the nightly backup, Home's power control), `quiet`, `edge` (Traefik and its socket
   proxy), `watchtower`, `autoheal`, `beszel` (the status dashboard's socket proxy) and
-  `snowflake` (a Tor Snowflake proxy). See [docs/host.md](docs/host.md) and
+  `snowflake` (a Tor Snowflake proxy); `host` also points the host's DNS at Cloudflare and
+  Quad9 over TLS. See [docs/host.md](docs/host.md) and
   [docs/agents.md](docs/agents.md).
 - **Stacks** (`stack/`, started by a release in this order): `database` (the shared
-  PostgreSQL), `portfolio`, `hypernova`, `tunnel` (`cloudflared`), `ai` (Ollama), `media`
+  PostgreSQL), `portfolio`, `hypernova`, `tunnel` (`cloudflared`), `ai` (Ollama and llama-server), `media`
   (`home-tls`, Beszel, Garage, SFTPGo) and `home`. See [docs/stacks.md](docs/stacks.md),
   [docs/database.md](docs/database.md) and [docs/edge.md](docs/edge.md).
 - **Release flow.** Actions → Deploy renders a bundle from the `production` Environment's
@@ -93,8 +96,9 @@ one only runs their images.
   `:latest` again. See [docs/deploying.md](docs/deploying.md) and
   [docs/architecture.md](docs/architecture.md).
 - **Backups.** Every night `infra-backup` writes a dated, hard-linked snapshot to an external
-  USB disk: a `pg_dumpall`, the app volumes, Garage's objects and Home Files' ciphertext (never
-  Home's keys), keeping about two months. See [docs/operations.md](docs/operations.md#backups).
+  USB disk: a `pg_dumpall`, the app volumes, Garage's objects, Home Files' ciphertext and the
+  films' and series' metadata (never Home's keys, the videos or the AI models), keeping about
+  two months. See [docs/operations.md](docs/operations.md#backups).
 - **Quiet hours.** The server stands where people sleep, so between two wall-clock times a
   timer lowers the GPU's power limit and the CPU's top frequency, and restores both after. See
   [docs/host.md](docs/host.md#quiet-hours).
@@ -107,9 +111,12 @@ one only runs their images.
   to the origin untouched and only replaces Cloudflare's "tunnel error" with a 503 page of its
   own. Deployed by hand with wrangler; it has no secrets. See
   [docs/edge.md](docs/edge.md#the-down-page).
-- **Home** (`stack/home`): `home-server` behind `home-tls` on the tailnet only, its SQLite
-  database in a volume, Files' ciphertext on the media disk, and its keys written by a one-shot
-  container from the release's secrets. See [docs/stacks.md](docs/stacks.md#home).
+- **Home** (`stack/home`): `home-server` behind `home-tls` on the tailnet only: the web app at
+  `/app`, Files, Media (the film and series library on the media disk, NVENC on the GPU, TMDB),
+  Books (Project Gutenberg), AI (llama-server over an internal network) and live updates over
+  Server-Sent Events. Its SQLite databases in a volume, Files' ciphertext on the media disk, and
+  its keys written by a one-shot container from the release's secrets. See
+  [docs/stacks.md](docs/stacks.md#home); deploying it: [docs/deploy-home.md](docs/deploy-home.md).
 
 ## Running it
 
@@ -143,6 +150,7 @@ shows what provisioning would change.
    Watchtower pulls it and recreates the container.
 
 [RUNBOOK.md](RUNBOOK.md) goes from BIOS settings to the first release, and covers recovery.
+[docs/deploy-home.md](docs/deploy-home.md) takes a running server to every Home app live.
 
 ## Security model, in short
 
@@ -193,7 +201,8 @@ Ubuntu Server 26.04 LTS, with no port open to the internet. The public reaches t
 through a **Cloudflare Tunnel** the server dials out to; SSH works only over **Tailscale**. It
 provisions the host, runs the edge Traefik proxy and the autonomous agents, and releases every
 stack: the shared `database`, two applications, `portfolio` and `hypernova`, the `tunnel`, and
-for the owner alone, over the tailnet only, `ai` (Ollama on the GPU, for hypernova), `media`
+for the owner alone, over the tailnet only, `ai` (Ollama on the GPU for hypernova, and
+llama-server for Home's AI), `media`
 (the Beszel status dashboard, Garage S3 storage with the SFTPGo file manager on top, and
 `home-tls`, which serves each at its own https name under `home.arbikullakshi.com` on the
 tailnet) and `home` (Home, the owner's own app, at `https://home.arbikullakshi.com/`). It also
@@ -261,6 +270,7 @@ tasks/                 placeholder-guards · provision-checks · ssh-route
 ci/                    the release path, verify tasks and access/template rules, tested against fakes
 .github/workflows/     deploy.yml, the Deploy workflow; checks.yml, the deploy lint
 RUNBOOK.md             BIOS to first release, DNS switch-over, releases, rollback, recovery, GPU, AI, media, disks, restore
+docs/deploy-home.md    the owner's checklist from a running server to every Home app live
 docs/                  why any of it is the way it is
 cloudflare/down-page/  the "server is down" Worker (Rust, workers-rs), deployed by hand with wrangler
 production.example.yml production.yml with example values (read by nothing; for forks)
@@ -273,11 +283,12 @@ SECURITY.md            how to report a problem
 [`docs/`](docs/README.md) says why, and what breaks if you change it.
 
 - [architecture.md](docs/architecture.md) — the home server and the tunnel, access paths, stacks and their order, releases, env files, networks, public vs tailnet-only, no public ports
+- [deploy-home.md](docs/deploy-home.md) — **deploying Home**: provisioning tags, BIOS, the secrets, the AI models, the release, the first-run checks, the down page, rollback
 - [deploying.md](docs/deploying.md) — the Deploy workflow, every secret and variable, what the host checks, provisioning tags, adding a project
 - [database.md](docs/database.md) — the shared PostgreSQL
 - [stacks.md](docs/stacks.md) — what is peculiar about each application, the tailnet-only `ai`, `media` and `home` stacks, and the apps retired on 2026-10-20
 - [edge.md](docs/edge.md) — the Cloudflare Tunnel, Traefik, its socket proxy, client IPs, routing conventions, the "server is down" Worker
-- [host.md](docs/host.md) — Tailscale-only SSH, accounts and the LAN bootstrap, sshd, firewall, fail2ban, patching, power and Wake-on-LAN, quiet hours, Docker, the GPU, the disks
+- [host.md](docs/host.md) — Tailscale-only SSH, accounts and the LAN bootstrap, sshd, firewall, fail2ban, patching, power and Wake-on-LAN, quiet hours, encrypted DNS, Docker, the GPU, the disks
 - [agents.md](docs/agents.md) — Watchtower, autoheal, Beszel's socket proxy, the prune timer, re-pinning images
 - [operations.md](docs/operations.md) — short recipes outside the runbook, the nightly backup
 

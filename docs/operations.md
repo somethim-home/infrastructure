@@ -51,9 +51,10 @@ is audible; the owner keeps it there ([host.md](host.md#quiet-hours)). It writes
 | --- | --- |
 | `snapshots/<date>/postgres.sql.gz` | `pg_dumpall` of the shared PostgreSQL (every role and database), mode 0600 |
 | `snapshots/<date>/immich.sql.gz` | `pg_dumpall --clean --if-exists` of Immich's own PostgreSQL (`immich-postgres`), mode 0600, only while it runs; since Immich was retired its stopped data folder is copied as the volume `immich-pgdata` instead |
-| `snapshots/<date>/volumes/<volume>/` | `portfolio-media`, `hypernova_prizm-storage`, `beszel-data` (the dashboard's history and alerts), `garage-meta` (Garage's configuration and metadata), `sftpgo-data` (the file manager's database: share links, sessions), `home-data` (Home's SQLite database: accounts, sessions, factors, audit log), and the kept volumes of the apps retired on 2026-10-20 ([stacks.md](stacks.md#retired-apps-2026-10-20)): `jellyfin-config` (without logs, cache and transcodes), `audiobookshelf-config`, `audiobookshelf-metadata` (without its cache, logs, streams), `kavita-config` (without cache, temp, logs), `open-webui-data` (without its model cache) and `immich-pgdata`, as plain trees |
+| `snapshots/<date>/volumes/<volume>/` | `portfolio-media`, `hypernova_prizm-storage`, `beszel-data` (the dashboard's history and alerts), `garage-meta` (Garage's configuration and metadata), `sftpgo-data` (the file manager's database: share links, sessions), `home-data` (Home's SQLite databases: `home.db` with accounts, sessions, factors and the audit log, `media.db` with Media's catalogue, progress and lists, `ai.db` with the chats, sealed; and Books' library in `books/`: `books.db`, the EPUBs, covers; without `media-cache/`, Media's pictures, trickplay and HLS cache, and Books' `catalog-covers/` and `.tmp/`, which come back by themselves), and the kept volumes of the apps retired on 2026-10-20 ([stacks.md](stacks.md#retired-apps-2026-10-20)): `jellyfin-config` (without logs, cache and transcodes), `audiobookshelf-config`, `audiobookshelf-metadata` (without its cache, logs, streams), `kavita-config` (without cache, temp, logs), `open-webui-data` (without its model cache) and `immich-pgdata`, as plain trees |
 | `snapshots/<date>/media/s3/` | Garage's objects (`/srv/media/s3`), copied in the same stop of Garage as `garage-meta`, so the two match |
 | `snapshots/<date>/media/home-files/` | Home Files' ciphertext (`/srv/media/home-files`), copied in the same stop of `home-server` as `home-data`, so the two match. `home-keys` (Home's keys) is never copied: the keys stay out of the backups, in the GitHub secrets and 1Password |
+| `snapshots/<date>/media/{movies,shows}/` | Home's film and series library, **metadata only**: every folder, with the `.nfo` files, pictures (`jpg`, `jpeg`, `png`, `webp`, `tbn`) and subtitle files (`srt`, `ass`, `ssa`, `vtt`) Home and the owner keep next to the videos, never the videos themselves (they would not fit) nor Home's uploads in progress (`.home-uploads/`). The edits people made in Home (titles, matches, pictures) survive a lost disk; the films have to be copied in again |
 | `snapshots/<date>/media/{audiobooks,books,podcasts}/` | those library folders of the retired apps, kept |
 | `snapshots/<date>/media/photos/` | Immich's `/srv/media/photos`, kept (originals, profile pictures, Immich's own database dumps in `backups/`), without `thumbs/` and `encoded-video/` |
 | `snapshots/latest` | a symlink to the newest complete snapshot |
@@ -81,9 +82,10 @@ never linked against.
 it again; the old `media/` and `apps/` go once a complete snapshot exists, the old `postgres/`
 and `immich/` dumps once 14 snapshots exist.
 
-Not copied: the Ollama models (`ollama-models`; they download again), and of the retired apps'
-kept data `comfyui-data`, `immich-ml-cache` and `jellyfin-cache` (downloads and caches) and the
-`shows` and `movies` folders (they would not fit).
+Not copied: the AI models (`ollama-models` and Home's `llama-models`; they download again,
+[RUNBOOK.md](../RUNBOOK.md#homes-ai-models)), `home-keys` (Home's keys), the videos in `movies`
+and `shows` (they would not fit; their metadata is copied), and of the retired apps' kept data
+`comfyui-data`, `immich-ml-cache` and `jellyfin-cache` (downloads and caches).
 
 - **No disk, no writes.** If `/srv/backup` is not a mountpoint (the disk is unplugged, or
   `backup_disk_uuid` is empty) the script logs a warning and exits 0 without writing

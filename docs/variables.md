@@ -32,6 +32,9 @@ Read by both `provision.yml` and `release.yml`. No secrets.
 | `home_domain`, `home_hosts` | `home.example.com`, `{files: files, status: status, s3: s3}` | Tailnet-only https names served by `home-tls` |
 | `acme_email`, `status_owner_email` | `owner@example.com` | Let's Encrypt contact; the Beszel dashboard login |
 | `home_files_capacity`, `home_beszel_user` | `600G`, `""` | Home Files' storage pool; Home's read-only Beszel user |
+| `home_media_transcodes`, `home_media_transcodes_quiet` | `2`, `1` | Home's Media: HLS transcodes at once, by day and in quiet hours |
+| `home_ai_models` | `[{id: qwen3-8b, label: Qwen3 8B, about: …, file: Qwen3-8B-Q5_K_M.gguf, day_only: false}, …]` | Home's AI models: what Home lists (`HOME_AI_MODELS`) and the GGUF files llama-server serves (`LLAMA_MODELS`); the first is the default |
+| `dns_over_tls_enabled`, `dns_over_tls_servers` | `true`, `[1.1.1.1#cloudflare-dns.com, …]` | The host's encrypted DNS ([host.md](host.md#encrypted-dns)) |
 | `portfolio_image_repo`, `home_image_repo`, `hypernova_*_image_repo` | `ghcr.io/example/portfolio`, … | The app images Watchtower follows |
 | `snowflake_enabled` | `true` | The Tor Snowflake proxy ([host.md](host.md#snowflake)) |
 
@@ -68,7 +71,7 @@ Secrets: `SSH_PRIVATE_KEY`, `SSH_KNOWN_HOSTS`, `TS_OAUTH_SECRET`, `GHCR_TOKEN`,
 `HYPERNOVA_ADMIN_PASSWORD`, `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN`, `GARAGE_RPC_SECRET`,
 `GARAGE_ADMIN_TOKEN`, `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY`, `FILES_PASSWORD`,
 `HOME_SECRET_KEY`, `HOME_DATA_KEY`, `HOME_RESEND_API_KEY`, `HOME_POWER_KEY`,
-`HOME_BESZEL_PASSWORD`. [`ci/sample-extra-vars.json`](../ci/sample-extra-vars.json) shows each
+`HOME_TMDB_READ_TOKEN`, `HOME_BESZEL_PASSWORD`. [`ci/sample-extra-vars.json`](../ci/sample-extra-vars.json) shows each
 one's shape with fake values.
 
 ## Committed public keys

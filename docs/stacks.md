@@ -81,9 +81,9 @@ image and the stack entry are all gone.
 
 ## ai
 
-Ollama, for hypernova's provider and, later, the owner's own apps. Nothing in this stack is
-public or published: it is not on `edge`, has no Traefik label, publishes no port and is never
-behind the tunnel.
+Ollama, for hypernova's provider, and llama-server, the engine of Home's AI. Nothing in this
+stack is public or published: it is not on `edge`, has no Traefik label, publishes no port and
+is never behind the tunnel.
 
 - **`ollama`** serves models on `11434` inside Docker only: it publishes no port. It joins
   `ai` (a plain bridge, which it needs to download models) and `llm`, an **internal** network
@@ -98,36 +98,101 @@ behind the tunnel.
   `sudo docker logs ollama-pull` shows each pull and removal.
 
 To add a model: append it to `ollama_models` (`<model>:<tag>`, sized for 12 GB) and release.
-The 14B models in the list are kept for the owner's own apps.
+The 14B models in the list were kept for the owner's own apps; Home's AI uses llama-server
+instead, so they can go (about 18 GB of the SSD) once nothing else asks for them.
 
-**Hardening.** Both containers run as the `ai` account (`ai_uid:ai_gid` in `production.yml`,
+- **`llama`** is llama.cpp's `llama-server` (the official CUDA image, `server-cuda-b11429`,
+  pinned by digest; its CUDA build covers the RTX 2060's sm_75) in **router mode**: one server
+  that holds several models and loads the one a request names, at most one at a time
+  (`--models-max 1`), and unloads it after 5 idle minutes (`--sleep-idle-seconds 300`). Home's
+  `home-server` is its only client, at `http://llama:8080` over **`home-llm`**, an internal
+  network (no route out) whose only other member is `home-server`; `llama` joins nothing else,
+  so it can reach neither the internet nor Ollama, hypernova or the database. Its models are the
+  GGUF files `production.yml`'s `home_ai_models` names, in the `llama-models` volume (the `ai`
+  account's, mounted read-only at `/models`), which the owner downloads once
+  ([RUNBOOK.md](../RUNBOOK.md#homes-ai-models)); they are not backed up (they download again).
+  At every start the entrypoint writes the **preset** to tmpfs: the settings every model shares
+  (`PRESET` in the compose file: a 16k context in two slots of 8k, `HOME_AI_CONCURRENT` and
+  `HOME_AI_CONTEXT_TOKENS`; every layer on the GPU; flash attention and a q8_0 KV cache, half the
+  context's VRAM; the models' own chat templates; Qwen3's thinking kept apart from the answer),
+  then one section per model, named by the id Home asks for, from `LLAMA_MODELS` (`ai/.env`,
+  `<id>:<file>` pairs from `home_ai_models`). A file that is not there is named in the log
+  ("…is missing"); that model then fails to load and the others work. With no model loaded the
+  server still answers `/health`, which is its healthcheck and what Home's AI card asks.
+
+**Hardening.** Every container runs as the `ai` account (`ai_uid:ai_gid` in `production.yml`,
 `2001:2001`, created by `roles/host` with no login), never root, with `cap_drop: [ALL]`,
-`no-new-privileges`, a `mem_limit` and a read-only root filesystem (`ollama` with a tmpfs
-`/tmp`); the
-compose guard refuses the stack otherwise. `ollama-models` is created by provisioning with its
-root owned by that account (0700) and mounted with `nocopy`, so Docker never copies an image's
-root-owned directory over it.
+`no-new-privileges`, a `mem_limit` and a read-only root filesystem (`ollama` and `llama` with a
+tmpfs `/tmp`); the compose guard refuses the stack otherwise, and lets `llama` join `home-llm`
+alone. `ollama-models` and `llama-models` are created by provisioning with their root owned by
+that account (0700) and mounted with `nocopy`, so Docker never copies an image's root-owned
+directory over them.
 
 **hypernova.** The provider reaches Ollama on `llm` (`OLLAMA_HOST=http://ollama:11434`,
 `OLLAMA_MODEL` = `hypernova_ollama_model`, which must be in `ollama_models`;
 `AI_DISABLED=false` in `provider.env`). `prizm-web` is not on `llm`; the guard refuses it there.
 
-**The GPU.** The RTX 2060 has 12 GB of VRAM. Ollama keeps **one** model loaded
+**The GPU.** The RTX 2060 has 12 GB of VRAM, shared by Ollama, llama-server and Home's video
+work ([The GPU, shared](#the-gpu-shared)). Ollama keeps **one** model loaded
 (`OLLAMA_MAX_LOADED_MODELS=1`, one request at a time) and unloads it after **2 minutes** idle
 (`OLLAMA_KEEP_ALIVE=2m`), with flash attention and a q8_0 KV cache, so a 14B model and a 16k
 context take about 11 GB. The first request after 2 idle minutes waits a few seconds while the
-model loads again. `ollama` reserves the GPU (`deploy.resources.reservations.devices`, driver
-`nvidia`, `count: all`, `capabilities: [gpu]`); the guard allows that only to `ollama` and
-`beszel-agent` (in `media`). `gpu_enabled: false` makes the release refuse to render, since the
-stack could not start.
+model loads again. `ollama` and `llama` reserve the GPU (`deploy.resources.reservations.devices`,
+driver `nvidia`, `count: all`, `capabilities: [gpu]`; `llama` gets the `compute` and `utility`
+driver capabilities through `NVIDIA_DRIVER_CAPABILITIES`); the guard allows that only to them,
+`beszel-agent` (in `media`) and `home-server` (in `home`). `gpu_enabled: false` makes the release
+refuse to render, since the stacks could not start.
 
-**Memory.** `mem_limit`: `ollama` 8 GiB (the model sits in VRAM; RAM covers the runner and what
-does not fit), `ollama-pull` 128 MiB.
+**Memory.** `mem_limit`: `ollama` 8 GiB, `llama` 6 GiB (the weights sit in VRAM; RAM covers the
+runner, a model's mapped file while it loads and whatever does not fit on the card),
+`ollama-pull` 128 MiB.
 
 **Updates.** The images are pinned `<tag>@sha256:<digest>` and carry no Watchtower label, on
-purpose: Ollama changes its model format now and then and should not change unattended. Move it
-with a re-pin and a release ([agents.md](agents.md#re-pinning-third-party-images)); `autoheal`
-restarts it if it turns unhealthy.
+purpose: Ollama and llama.cpp change their model handling and flags now and then and should not
+change unattended. Move them with a re-pin and a release
+([agents.md](agents.md#re-pinning-third-party-images)); for llama.cpp read the release notes
+for the router-mode flags (`--models-preset`, `--models-max`, `--sleep-idle-seconds`) and the
+preset keys first. `autoheal` restarts either if it turns unhealthy.
+
+### The GPU, shared
+
+One RTX 2060 with 12 GB (12288 MiB; each process that uses it also takes about 0.3 GB of its
+own) serves four containers. What each holds, about:
+
+| Who | Holds | When |
+| --- | --- | --- |
+| `llama`, `qwen3-8b` (Q5_K_M), 2 × 8k q8_0 context | 5.9 GB weights + 1.2 GB context + 0.5 GB work ≈ **7.6 GB** | from Home's first question until 5 idle minutes later |
+| `llama`, `gemma-3-12b` (QAT q4_0) | 8.1 + ~1.5 + 0.5 ≈ **10 GB** | the same |
+| `llama`, `qwen3-14b` (Q4_K_M), by day only | 9.0 + 1.3 + 0.5 ≈ **10.8 GB** | the same; never in quiet hours |
+| `ollama`, `qwen3:4b` (hypernova) | ≈ **3.5 GB** | from a hypernova AI request until 2 idle minutes later |
+| `ollama`, a 14B model | ≈ 11 GB | only if something asks for one (nothing does now) |
+| `home-server`, NVENC/NVDEC | ≈ **0.3 GB** per transcode (`home_media_transcodes`: 2 by day, 1 at night) | while someone watches a film the browser cannot play as it is, and briefly for previews and trickplay |
+| `beszel-agent` | 0 (NVML readings only) | always |
+
+**The rules that keep it inside 12 GB.** llama-server holds **one** model at a time
+(`--models-max 1`: asking for another unloads the first) and lets it go after 5 idle minutes;
+Ollama holds one and lets it go after 2. So the usual day is one Home model plus, now and then,
+hypernova's 3.5 GB and a transcode or two: `qwen3-8b` (7.6) + `qwen3:4b` (3.5) + one transcode
+(0.3) is about 11.4 GB and fits. The two larger Home models do not fit beside Ollama's: while
+`gemma-3-12b` or `qwen3-14b` is loaded and hypernova asks Ollama, Ollama puts what does not fit
+on the CPU (slower, but it answers), and while Ollama's model is loaded, loading a large Home
+model can fail (Home then says the model is offline for that answer; asked again two minutes
+later it loads). A transcode that finds no room falls back to the CPU (x264) by itself
+(`HOME_MEDIA_HWACCEL=auto`). That is why `qwen3-8b` is Home's default, `qwen3-14b` is day-only,
+and the 14B Ollama models are best dropped. `nvidia-smi` on the host shows who holds what.
+
+**Quiet hours** (23:00 to 08:00 Berlin time, `quiet_hours_*`): the host caps the whole card at
+130 W ([host.md](host.md#quiet-hours)), which slows every one of them, and no container can
+lift the cap. Home asks for less in the same hours on its own: AI answers one question at a
+time with a 4k context and 1k-token answers and leaves out `qwen3-14b` (`HOME_AI_QUIET_*`), and
+Media runs one transcode instead of two (`home_media_transcodes_quiet`). The CPU's 70 % cap
+slows a CPU transcode too.
+
+**RAM.** The memory limits of every container add up to about 17 GiB, more than the host's
+16 GB, on purpose: they are ceilings against a runaway, not reservations, and the two engines
+use little RAM while their models are on the card (their mapped model files are page cache,
+which the kernel reclaims). Should the host run short, `ollama` (8 GiB) is the first to lower,
+once its 14B models are gone. `docker stats` shows what each uses.
 
 ## media
 
@@ -224,7 +289,16 @@ container over `media`: the apex to `home-server:8080` (stack `home`; `/dav` to 
 and `/files.html` to `home:80`), and `files.` (with `/dav`), `status.` and `s3.` to SFTPGo,
 Beszel and Garage. The entrypoint has no read or write timeout (idle
 connections close after 10 minutes) and no buffering or compression, so multi-gigabyte uploads
-and websockets pass. Beszel, which knows its own address, is told it: its `APP_URL` is the https
+and websockets pass, and so do Home's two long-lived kinds of response: the live updates stream
+(`/api/events`, Server-Sent Events: one response that stays open, a heartbeat every 20 s) and an
+AI answer streamed token by token. Traefik flushes a `text/event-stream` response as it comes
+and no middleware is defined at all (no buffering, compression, header or prefix rewriting), so
+Home's own headers reach the browser as Home sent them: the web app at `/app` keeps its
+`Cache-Control` (`no-cache` for `index.html`, a year and `immutable` for its content-hashed
+files) and its CSP. `ci/check_templates.py` (rule 10) fails the checks if a deadline, a
+middleware or another route for `/app` or `/api` on Home's name appears, and a release's verify
+asks for `/app/` through `home-tls`. Home is never behind the Cloudflare Tunnel (it is
+tailnet-only), so Cloudflare's 100-second idle limit does not apply to it. Beszel, which knows its own address, is told it: its `APP_URL` is the https
 name. It has no Docker socket: its
 static and dynamic configuration are `HOME_TLS_STATIC` and `HOME_TLS_DYNAMIC` in the compose file,
 written to tmpfs at start. One certificate, for `home.` and `*.home.`, comes from Let's Encrypt by DNS-01 through
@@ -240,7 +314,7 @@ apex, and 2xx, 3xx, 401 or 403 from each service (a 404 is a missing route, a 50
 apps' own databases are in volumes on the SSD. Garage mounts only `/srv/media/s3` and the
 Beszel agent only the empty `/srv/media/.beszel`, each at a fixed path,
 `bind.create_host_path: false`, and the compose guard allows no other bind mount in any stack
-but Home's `/srv/media/home-files` and `/run/home-power` ([home](#home)):
+but Home's `/srv/media/home-files`, `/run/home-power`, `/srv/media/movies` and `/srv/media/shows` ([home](#home)):
 not `/srv/media` as a whole, not a folder at another path, not read-write where it says
 read-only. With the media disk missing the folders do not exist (the mountpoint stays empty and
 immutable), so the containers fail to start instead of writing to the SSD; Docker also starts
@@ -255,12 +329,14 @@ uid and gid, Home's https name, each service's https name (`HOST_*`), the ACME c
 the dashboard's login name.
 
 **GPU.** `beszel-agent` reserves the GPU to read its state through NVML; it uses none of the
-GPU's memory. The guard allows a GPU reservation to exactly `ollama` and `beszel-agent`.
+GPU's memory. The guard allows a GPU reservation to exactly `ollama`, `llama`, `beszel-agent` and
+`home-server`.
 
 **Memory.** `garage` 512 MiB, `sftpgo` 256 MiB, `beszel` 192 MiB, `beszel-agent` 128 MiB,
-`home-tls` 128 MiB, `home` 32 MiB, the one-shots 16–32 MiB (and `home-server` 384 MiB in the
-`home` stack). With `ollama` at 8 GiB, the stacks
-fit a 16 GB machine with the swap file as a buffer; give Ollama less if the server has less RAM.
+`home-tls` 128 MiB, `home` 32 MiB, the one-shots 16–32 MiB (and `home-server` 1.5 GiB in the
+`home` stack). With `ollama` at 8 GiB and `llama` at 6 GiB the limits add up to more than a 16 GB
+machine, on purpose ([The GPU, shared](#the-gpu-shared), "RAM"); give Ollama less if the server
+has less RAM.
 
 **Updates and backups.** Pinned images, no Watchtower label, as in `ai`. Re-pin, read the
 release notes, make sure last night's backup ran, then release. The nightly backup copies each
@@ -271,9 +347,11 @@ own data is copied) and mirrors Garage's `s3` in the same stop as its metadata, 
 ## home
 
 Home, the owner's own app (`ghcr.io/somethim-home/home-server`, built by the `somethim-home/home`
-repository), over the tailnet only: its web pages, sign-in
-(`/setup`, `/sign-in`, `/auth/…`), the dashboard API and Home Files (`/api/files`), the
-family's end-to-end encrypted storage. The Tailscale policy grants 443 to the owner's devices
+repository), over the tailnet only: its web pages and the web app (`/app`), sign-in
+(`/setup`, `/sign-in`, `/auth/…`), the dashboard API, Home Files (`/api/files`, the family's
+end-to-end encrypted storage), Media (`/api/media`, the family's films and series), Books
+(`/api/books`), AI (`/api/ai`, answered by llama-server in the `ai` stack) and the live updates
+stream (`/api/events`). Deploying all of it: [deploy-home.md](deploy-home.md). The Tailscale policy grants 443 to the owner's devices
 alone (`autogroup:admin`); a family member needs a grant of their own. It took over `https://home.arbikullakshi.com/` from the
 links page. Its own stack rather than a service in `media`: it is an app image that follows
 `:latest` with Watchtower and rolls back by digest like the portfolio, while `media` holds
@@ -283,16 +361,19 @@ not the media account.
 | Container | Port | Bind mount | Its data (volume, SSD) |
 | --- | --- | --- | --- |
 | `home-keys` | none (one-shot) | none | writes the key and password files into `home-keys` |
-| `home-server` | none: `home-tls` reaches it on `media`, port 8080 | `/srv/media/home-files` → `/files`, read-write (Home Files' ciphertext); `/run/home-power` → `/run/power`, read-write (power requests to the host) | `home-data` (`/data`: the SQLite database `home.db` and its WAL files); `home-keys` read-only at `/run/keys` |
+| `home-server` | none: `home-tls` reaches it on `media`, port 8080 | `/srv/media/home-files` → `/files`, read-write (Home Files' ciphertext); `/run/home-power` → `/run/power`, read-write (power requests to the host); `/srv/media/movies` → `/data/media/films` and `/srv/media/shows` → `/data/media/series`, read-write (the film and series library) | `home-data` (`/data`: the SQLite databases `home.db`, `media.db` and `ai.db` with their WAL files, Books' library in `books/`, Media's cache in `media-cache/`); `home-keys` read-only at `/run/keys` |
 
-**Networks.** `home-server` and `home-keys` join `media` alone (the compose guard refuses any
-other): `home-tls` reaches `home-server` there, and so would `beszel:8090` for the Status card.
-`media` is a plain bridge, which is also how `home-server` reaches `smtp.resend.com:465`. No
-port is published, no edge or data network, no Traefik label: nothing public.
+**Networks.** `home-keys` joins `media` alone, `home-server` `media` and `home-llm` (the compose
+guard refuses any other): `home-tls` reaches `home-server` on `media`, and so would
+`beszel:8090` for the Status card; `home-llm` is internal, its line to `llama:8080` and nothing
+else. `media` is a plain bridge, which is how `home-server` reaches the internet: Resend's
+`smtp.resend.com:465`, TMDB's `api.themoviedb.org` and `image.tmdb.org` and Wikidata for Media,
+`www.gutenberg.org` for Books, all over TLS. No port is published, no edge or data network, no
+Traefik label: nothing public.
 
 **Keys and mail.** The image (`FROM scratch`, no shell) reads its keys and passwords only from
 files (`HOME_SECRET_KEY_FILE`, `HOME_DATA_KEY_FILE`, `HOME_SMTP_PASSWORD_FILE`,
-`HOME_BESZEL_PASSWORD_FILE`, `HOME_POWER_KEY_FILE`), and the bundle's files are root's, 0600, and cannot be bind-mounted
+`HOME_BESZEL_PASSWORD_FILE`, `HOME_POWER_KEY_FILE`, `HOME_TMDB_READ_TOKEN_FILE`), and the bundle's files are root's, 0600, and cannot be bind-mounted
 (the release directory changes every time). So `home-keys` (busybox, as 65532, read-only, no
 capability) runs on every release, reads `home-keys.env` (the only container that does) and
 writes each value into its own file in the `home-keys` volume, 0400, replacing it atomically; an
@@ -311,7 +392,49 @@ are bound to its host: changing it means re-enrolling them), `HOME_OWNER_EMAIL` 
 `HOME_OWNER_EMAIL` repository variable (setup links only go there), `HOME_DATABASE_PATH=/data/home.db`,
 `HOME_TRUST_FORWARDED_FOR=1` (the client address is the last `X-Forwarded-For` entry, which
 `home-tls` sets; it accepts none from clients), `HOME_FILES_ROOT=/files` and
-`HOME_FILES_CAPACITY` from `home_files_capacity`.
+`HOME_FILES_CAPACITY` from `home_files_capacity`, and Media's, Books' and AI's below.
+`HOME_WEB_APP_DIR` is not set here: Home's image sets it to `/app`, where it carries the web app.
+
+**The web app** (`/app`) is the same Slint app as the desktop and Android ones, built to wasm in
+Home's image. `home-server` serves it with its own headers (`index.html` `no-cache` with a CSP
+that pins the loader by hash, content-hashed files cached for a year and `immutable`);
+`home-tls` passes them through untouched ([media](#media), `home-tls`), and a release's verify
+requires `/app/` to answer 200 through `home-tls`.
+
+**Live updates.** Every signed-in app holds one Server-Sent Events stream, `GET /api/events`, a
+response that never ends (a `ping` every 20 s). `home-tls` has no read or write deadline, buffers
+nothing and compresses nothing, so events arrive at once and the stream is never cut; Home
+itself sends `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`.
+
+**Media.** The films and series are the media disk's `movies` and `shows` folders (owned
+`media:media`, `2775`), bound read-write at `/data/media/films` and `/data/media/series`
+(`HOME_MEDIA_FILMS`, `HOME_MEDIA_SERIES`); `home-server` (65532) joins the `media` group
+(`group_add`, the gid from `home/.env`'s `MEDIA_GID`; the guard allows that group to
+`home-server` alone) so it can file added films there and write `.nfo` files and pictures next
+to the videos. The catalogue is `/data/media.db`, the cache (pictures, trickplay, HLS sessions,
+uploads in progress) `/data/media-cache`, both in `home-data`. Online details come from TMDB with
+`HOME_TMDB_READ_TOKEN` (written by `home-keys` to `/run/keys/tmdb_read_token`; empty: Wikidata
+only, no pictures). Transcodes: `home_media_transcodes` (2) at once, `home_media_transcodes_quiet`
+(1) in quiet hours (`HOME_MEDIA_QUIET_HOURS` and `_TIMEZONE` from `quiet_hours_*`). The GPU is
+reserved for `home-server` (`count: all`, `capabilities: [gpu]`, the guard's one shape) with
+`NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`, so the NVIDIA runtime mounts NVENC, NVDEC and
+CUDA into it; `HOME_MEDIA_HWACCEL=auto` uses NVENC when a test encode works. **ffmpeg is Home's
+side**: the image is `FROM scratch` and must carry an ffmpeg and ffprobe (for NVENC a
+glibc-linked build with its loader, `HOME_MEDIA_FFMPEG` pointing at it); until it does, Media
+lists and plays files as they are, without probing, pictures, remuxes or transcodes.
+
+**Books.** `HOME_BOOKS_LIBRARY=/data/books` in `home-data`: `books.db` (the Gutenberg catalog, the
+family's books, shelves and reading places), the EPUBs by hash, covers; backed up with the rest of
+`home-data`, without the catalog's covers cache and downloads in progress. The catalog
+(`pg_catalog.csv.gz`) and each added book come from `www.gutenberg.org` over https, a few hundred
+MB at most for the catalog and its index.
+
+**AI.** `HOME_AI_URL=http://llama:8080` over `home-llm`; `HOME_AI_MODELS` and
+`HOME_AI_DAY_ONLY_MODELS` from `production.yml`'s `home_ai_models` (the same list that names
+llama-server's files, so the two cannot disagree); two answers at once with an 8k context by
+day, one with 4k in quiet hours (`HOME_AI_QUIET_HOURS`, `HOME_AI_TIMEZONE` from
+`quiet_hours_*`). The chats are `/data/ai.db`, their titles and messages sealed with
+`HOME_DATA_KEY`.
 
 **Home Files' pool.** `home_files_capacity` (`production.yml`, `600G` by default) is the storage
 Files hands out as allocations. It is set explicitly because the media disk (1 TB) also holds
@@ -335,9 +458,11 @@ Home offers no power control. A release refuses a `HOME_POWER_KEY` that is not t
 step in Beszel's admin pages ([RUNBOOK.md](../RUNBOOK.md#home)).
 
 **Hardening.** Both containers run as `65532:65532` (`home_uid`/`home_gid`, the `home-server`
-account `roles/host` creates and `/etc/infra/host.env` names as `HOME_USER`), with a read-only
-root filesystem (a tmpfs `/tmp` for `home-server`), `cap_drop: [ALL]`, `no-new-privileges` and
-a `mem_limit` (`home-server` 384 MiB, `home-keys` 16 MiB); the guard refuses the stack otherwise.
+account `roles/host` creates and `/etc/infra/host.env` names as `HOME_USER`; `home-server` with
+the `media` group added), with a read-only root filesystem (a tmpfs `/tmp` for `home-server`),
+`cap_drop: [ALL]`, `no-new-privileges` and a `mem_limit` (`home-server` 1.5 GiB, which covers the
+server, an ffmpeg remux or a 1080p transcode, an EPUB being checked and an AI answer's history;
+`home-keys` 16 MiB); the guard refuses the stack otherwise.
 `home-data` and `home-keys` are created by provisioning, owned by 65532 (0700), and mounted
 with `nocopy`. The healthcheck is the image's own `/home-server healthcheck`.
 
@@ -346,9 +471,12 @@ with `nocopy`. The healthcheck is the image's own `/home-server healthcheck`.
 `:latest`, so the Deploy workflow's `home` rollback input takes `previous`, `current`, `latest`
 or a digest.
 
-**Backups.** The nightly backup stops `home-server` only while it copies `home-data` and
-`/srv/media/home-files` into the same snapshot (SQLite must not change mid-copy, and the Files
-records must match the database), then starts it again; Home is unreachable for those minutes.
+**Backups.** The nightly backup stops `home-server` only while it copies `home-data` (all of
+Home's databases and Books' library, without `media-cache` and Books' catalog covers and
+downloads in progress) and `/srv/media/home-files` into the same snapshot (SQLite must not change
+mid-copy, and the Files records must match the database), then starts it again; Home is
+unreachable for those minutes. The films' and series' `.nfo` files, pictures and subtitle files
+are copied too, never the videos ([operations.md](operations.md#backups)).
 The image has no shell, so `sqlite3 .backup` is not an option. `home-keys` is not copied.
 Watchtower revives stopped labelled containers, so an update published in that window could
 start `home-server` again mid-copy.
@@ -377,8 +505,8 @@ Their data is kept until the owner has audited it:
   `kavita-config` and `immich-pgdata` (now as a stopped data folder instead of a database
   dump); `comfyui-data`, `jellyfin-cache` and `immich-ml-cache` hold downloads and caches and
   were never copied.
-- **Library folders** under `/srv/media`: `shows`, `movies`, `audiobooks`, `podcasts`, `books`
-  and `photos`, still created by provisioning. The backup still mirrors `audiobooks`, `books`,
-  `podcasts` and `photos`; `shows` and `movies` were never copied.
+- **Library folders** under `/srv/media`: `audiobooks`, `podcasts`, `books` and `photos`, still
+  created by provisioning and mirrored by the backup. `shows` and `movies` are Home's film and
+  series library now ([home](#home)); their videos are not backed up, their metadata is.
 
 Nothing deletes them: no stack mounts them any more, and removing them is a manual decision.

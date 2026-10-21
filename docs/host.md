@@ -94,7 +94,9 @@ ufw denies inbound by default and allows only **22 and the tailnet-only ports (8
 8090, 8091) on `tailscale0`** (`ufw_allowed`). The rules for the ports of the apps retired on
 2026-10-20 (2283, 5000, 8080, 8096, 13378) are deleted on every run (`ufw_retired`). There is no public web port (80 and 443 are the tailnet-only redirect page and `home-tls`, which serves Home and every tailnet service's https name; Home itself publishes no port): the Cloudflare Tunnel is an outbound
 connection. Outbound is unrestricted (image pulls,
-Cloudflare, Resend, Tailscale, NTP). The router forwards no port to the host, so even LAN 22
+Cloudflare, Resend, Tailscale, NTP, and for Home: TMDB's `api.themoviedb.org` and
+`image.tmdb.org`, Wikidata, and `www.gutenberg.org` for Books, all https on 443, from
+`home-server` on the `media` bridge; DNS-over-TLS on 853 from the host). The router forwards no port to the host, so even LAN 22
 is unreachable from the internet.
 
 LAN 22 is lockout-safe: a run that did not come in over the tailnet (the bootstrap, over the
@@ -140,9 +142,13 @@ Home's image runs as, so not a choice), no login shell, no home and a locked pas
 writes them to `host.env` (`AI_USER=2001:2001`, `MEDIA_USER=2000:2000`,
 `HOME_USER=65532:65532`); the compose guard refuses an `ai`, `media` or `home` service that runs
 as anything else. `admin` is in the `media` group, so it can copy
-files into the folders on the media disk.
+files into the folders on the media disk. The `home-server` account is not; its container gets
+the `media` group added by the release instead (`group_add`, which the guard allows to
+`home-server` alone and only with `MEDIA_USER`'s gid), so Home can write into the film and
+series library and nowhere else that group reaches.
 
-Their data lives in volumes provisioning creates (`ollama-models`, `home-tls-acme`,
+Their data lives in volumes provisioning creates (`ollama-models`, `llama-models` (Home's AI
+models, the `ai` account's, filled by the owner: [RUNBOOK.md](../RUNBOOK.md#homes-ai-models)), `home-tls-acme`,
 `beszel-data`, `beszel-agent-data`, `garage-meta`, `sftpgo-data`, Home's `home-data` and
 `home-keys`, and the volumes of the apps
 retired on 2026-10-20, which no stack mounts but which are kept until the owner has audited
@@ -157,7 +163,7 @@ an empty volume the first time it is mounted.
 | Disk | Mounted at | `production.yml` | Holds |
 | --- | --- | --- | --- |
 | 225 GB SSD | `/` | — | Ubuntu, Docker's data root (images, every volume: PostgreSQL, app configs, Ollama's models), swap |
-| 1 TB internal HDD | `/srv/media` | `media_disk_uuid` | Garage's objects (`s3`), Home Files' ciphertext (`home-files`, at most `home_files_capacity` of it), and the retired apps' library folders, kept: `shows`, `movies`, `audiobooks`, `podcasts`, `books`, `photos` |
+| 1 TB internal HDD | `/srv/media` | `media_disk_uuid` | Garage's objects (`s3`), Home Files' ciphertext (`home-files`, at most `home_files_capacity` of it), Home's film and series library (`movies`, `shows`), and the retired apps' library folders, kept: `audiobooks`, `podcasts`, `books`, `photos` |
 | 1 TB external USB HDD | `/srv/backup` | `backup_disk_uuid` | the nightly backup ([operations.md](operations.md#backups)) |
 
 `roles/host/tasks/disks.yml` mounts each HDD by its **filesystem UUID** (never `/dev/sdX`,
@@ -264,7 +270,7 @@ How to test it is in [RUNBOOK.md](../RUNBOOK.md#wake-on-lan).
 ### Power requests from Home
 
 Home (the owner's app, [stacks.md](stacks.md#home)) can switch the server off or restart it:
-an admin asks, Home's own 60-second countdown runs, and only then does home-server hand the
+an admin asks, Home's own 10-second countdown runs (with Cancel), and only then does home-server hand the
 host **one signed request**. There is no socket, no API and no command channel: home-server
 writes a small file, and a host service decides whether to act on it. The host acts on exactly
 two things, `systemctl poweroff` and `systemctl reboot`; nothing in a request is ever executed
@@ -382,7 +388,12 @@ summer time; every other time on this host is UTC) the fans have less heat to mo
   A GPU without persistence mode gets it first (`nvidia-smi -pm 1`): without it the driver
   unloads when the GPU is idle and drops the limit. At the end the limit goes back to the
   card's `power.default_limit`; persistence mode stays on. Skipped where `nvidia-smi` does not
-  exist. Ollama (hypernova's AI answers) is slower in those hours.
+  exist. The cap is the whole card's, so everything on it is slower in those hours: Ollama
+  (hypernova's AI answers), llama-server (Home's AI) and home-server's NVENC transcodes. No
+  container can raise it (none has the rights `nvidia-smi -pl` needs); Home asks for less on its
+  own in the same hours (`HOME_AI_QUIET_HOURS`, `HOME_MEDIA_QUIET_HOURS`, both from
+  `quiet_hours_*`: one answer at a time with a 4k context and no day-only model, one transcode
+  instead of two; [stacks.md](stacks.md#the-gpu-shared)).
 - **The CPU** gets a top frequency of `quiet_cpu_max_percent` (`70`) of each cpufreq policy's
   `cpuinfo_max_freq` (never below `cpuinfo_min_freq`), written to `scaling_max_freq`; at the end
   `cpuinfo_max_freq` again. Skipped where cpufreq does not exist.
@@ -401,6 +412,51 @@ Family streams are not throttled by any of this: nothing here touches the networ
 container. The backup runs inside quiet hours ([backup_time](operations.md#backups), 02:30 UTC)
 and the USB disk it writes to is audible while it seeks; that is the owner's choice and
 `backup_time` stays where it is. The 04:00 UTC reboot also falls inside them.
+
+## Encrypted DNS
+
+The home connection's ISP resolver blocks some sites by name, so the host does not use it.
+`roles/host/tasks/dns.yml` (on when `production.yml`'s `dns_over_tls_enabled`) makes
+`systemd-resolved`, Ubuntu's own resolver behind `/etc/resolv.conf` (`127.0.0.53`), ask only
+`dns_over_tls_servers` (Cloudflare `1.1.1.1` and `1.0.0.1`, then Quad9 `9.9.9.9` and
+`149.112.112.112`), over DNS-over-TLS only, for every name:
+
+- `/etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf`: `DNS=` the four, each as
+  `<address>#<name>` so resolved checks the server's certificate against `cloudflare-dns.com`
+  or `dns.quad9.net`; `DNSOverTLS=yes` (strict: no fallback to plain DNS, so a resolver that
+  cannot be reached over TLS fails rather than leaks); `Domains=~.` (these servers for every
+  name); `FallbackDNS=` empty (never systemd's built-in list). Applied at once by restarting
+  resolved, which cuts no connection.
+- `/etc/systemd/network/10-netplan-<id>.network.d/60-infra-dns.conf`, a drop-in for the network
+  file netplan writes for `lan_interface`: `DNS=` empty and `UseDNS=no` for DHCPv4, DHCPv6 and
+  router advertisements, so the LAN interface brings no resolver of its own. Read at the next
+  boot (like Wake-on-LAN, nothing is re-applied to the network the run came in over); until
+  then provisioning says a reboot is due, and verify forgives the router's resolver on that
+  interface (the flag `/run/infra-dns-reboot-pending`, gone at boot).
+
+Right after the restart provisioning looks up `www.gutenberg.org` (three tries). If it fails,
+port 853 is blocked on the way out or the servers are unreachable: it removes both drop-ins,
+restarts resolved on the previous settings and stops with the reason, so a run never leaves a
+host that resolves nothing. Verify (every `--tags host`) requires resolved active, `Global: yes`
+from `resolvectl dnsovertls`, exactly the four servers as the global ones, no server on the LAN
+interface (after the reboot) or on `tailscale0`, and a lookup that answers.
+
+**Tailscale.** The server joins the tailnet with `--accept-dns=false` (roles/tailscale, on every
+run): it never used MagicDNS, `tailscale0` carries no DNS server, and nothing here applies to it;
+the owner's devices keep MagicDNS as before. Were Tailscale DNS ever accepted, resolved would
+have to reach `100.100.100.100` over TLS, which it cannot; verify fails on that, and the next
+provisioning sets `--accept-dns=false` again.
+
+**Containers.** Docker's embedded DNS forwards to the servers in
+`/run/systemd/resolve/resolv.conf`, which are now the four above, in plain DNS on port 53
+(Docker cannot speak TLS to them, and resolved's stub listens on the host's loopback only). So
+containers never ask the ISP's resolver either; their queries are unencrypted to Cloudflare and
+Quad9, which is enough against a resolver that blocks names. The DNS-01 challenge of `home-tls`
+asks `1.1.1.1` and `8.8.8.8` itself, as before.
+
+**Rollback**: `dns_over_tls_enabled: false`, provision with `--tags host` (both drop-ins go,
+resolved restarts), then reboot (the LAN interface takes the router's resolver again). By hand:
+[RUNBOOK.md](../RUNBOOK.md#encrypted-dns).
 
 ## journald and swap
 

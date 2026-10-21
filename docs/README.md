@@ -7,11 +7,12 @@ Why this server is built the way it is. The code says *what* happens; these file
 | Document | Covers |
 | --- | --- |
 | [architecture.md](architecture.md) | The deployment model: the home server behind a Cloudflare Tunnel, one deployer, three access paths, provision vs release, the stacks and their order, the releases directory, env files, networks, public vs tailnet-only services, why no port is public, host keys |
-| [deploying.md](deploying.md) | The Deploy workflow and its inputs, every secret and variable, where each secret lands, what `infra-apply` checks, provisioning tags, adding a project |
-| [stacks.md](stacks.md) | What is peculiar about hypernova and portfolio individually, the tailnet-only `ai` (Ollama) and `media` (`home-tls`, status dashboard, S3 and file manager) and `home` (Home, the owner's app) stacks: hardening, bind mounts, VRAM; the apps retired on 2026-10-20 |
+| [deploy-home.md](deploy-home.md) | **Deploying Home**, as a checklist: from a running server to the web app, Files, Media, Books, AI, live updates and power control live; provisioning tags, BIOS, the secrets, the AI models, the release, first-run checks, the down page, rollback |
+| [deploying.md](deploying.md) | The Deploy workflow and its inputs, every secret and variable (and where production keeps each), where each secret lands, what `infra-apply` checks, provisioning tags, adding a project |
+| [stacks.md](stacks.md) | What is peculiar about hypernova and portfolio individually, the tailnet-only `ai` (Ollama, llama-server) and `media` (`home-tls`, status dashboard, S3 and file manager) and `home` (Home, the owner's app: web app, Files, Media, Books, AI, live updates) stacks: hardening, bind mounts, the GPU shared and its VRAM budget; the apps retired on 2026-10-20 |
 | [database.md](database.md) | The shared PostgreSQL — the volume, the superuser, how roles and databases are provisioned at release time, upgrades |
 | [edge.md](edge.md) | The Cloudflare Tunnel and Traefik: why the tunnel is a release stack, its Public Hostnames, how only the tunnel reaches Traefik, client IPs, TLS at Cloudflare, routing by label, the conventions an app stack has to follow, the "server is down" Worker |
-| [host.md](host.md) | The home server: Tailscale-only SSH, the accounts and the LAN bootstrap, sshd policy, firewall, fail2ban, patching, time, power and Wake-on-LAN, quiet hours, journald, swap, the Docker daemon, the GPU, service accounts, the disks, memory limits |
+| [host.md](host.md) | The home server: Tailscale-only SSH, the accounts and the LAN bootstrap, sshd policy, firewall, fail2ban, patching, time, power and Wake-on-LAN, quiet hours, encrypted DNS, journald, swap, the Docker daemon, the GPU, service accounts, the disks, memory limits |
 | [agents.md](agents.md) | The three things that act on their own: Watchtower, autoheal, the prune timer; re-pinning third-party images |
 | [operations.md](operations.md) | Short recipes: PostgreSQL access, disk, the nightly backup, a major upgrade, Watchtower, the tunnel, a hung site |
 | [variables.md](variables.md) | Every value specific to the owner's setup (`production.yml`, `inventory/hosts`, the GitHub Environment, values written into templates) with example values; [`production.example.yml`](../production.example.yml) |
@@ -21,7 +22,7 @@ Why this server is built the way it is. The code says *what* happens; these file
 | File | Covers |
 | --- | --- |
 | [README.md](../README.md) | What this is, the architecture diagram, how home, home-crypto, latchkey and infra fit, running the checks, the security model in short, what is owner-specific |
-| [RUNBOOK.md](../RUNBOOK.md) | What to do, in order: 1 what you need · 2 BIOS · 3 install Ubuntu · 4 Tailscale · 5 first provision over the LAN · 6 Cloudflare Tunnel · 7 the production Environment · 8 second provision · 9 first release · 10 DNS switch-over · 11 day-2 operations (releases and rollback, rotating a secret, locked out, Wake-on-LAN, the down page, restoring from the backup disk) · 12 GPU, AI and media (disks, Tailscale grants, the links page, Files, Home, Home's power control) · 13 retired CI runners · 14 Snowflake |
+| [RUNBOOK.md](../RUNBOOK.md) | What to do, in order: 1 what you need · 2 BIOS · 3 install Ubuntu · 4 Tailscale · 5 first provision over the LAN · 6 Cloudflare Tunnel · 7 the production Environment · 8 second provision · 9 first release · 10 DNS switch-over · 11 day-2 operations (releases and rollback, rotating a secret, encrypted DNS, locked out, Wake-on-LAN, the down page, restoring from the backup disk) · 12 GPU, AI and media (disks, Tailscale grants, Home's AI models, the links page, Files, Home, Home's power control) · 13 retired CI runners · 14 Snowflake |
 | [SECURITY.md](../SECURITY.md) | Reporting a problem, scope, and the settings a public copy of this repository needs |
 | [cloudflare/down-page/](../cloudflare/down-page/) | The "server is down" Worker: `src/decision.rs` (what it answers), `src/page.html`, `wrangler.toml` (routes); explained in [edge.md](edge.md#the-down-page) |
 | [ci/](../ci/) | The test harnesses CI runs against fakes: release, rollback, backup, quiet hours, power requests, verify tasks, template and access rules |
@@ -34,6 +35,8 @@ format and [threat model](https://github.com/somethim-home/home-crypto/blob/mast
 ## Reading order
 
 New to the repo: [architecture.md](architecture.md), then [deploying.md](deploying.md).
+
+Deploying Home on the running server: [deploy-home.md](deploy-home.md).
 
 Reusing it for your own server: [variables.md](variables.md).
 

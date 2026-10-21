@@ -36,6 +36,12 @@ for the account the Ubuntu installer creates; use yours.
 Restoring anything from the backup disk is in
 [Restoring from the backup disk](#restoring-from-the-backup-disk) (section 11).
 
+**Deploying Home** (its web app, Files, Media, Books, AI, live updates and power control, and the
+host's encrypted DNS) from a server set up by sections 1 to 10 is one checklist of its own:
+[docs/deploy-home.md](docs/deploy-home.md). It uses [Home](#home), [Home's AI
+models](#homes-ai-models), [Home's power control](#homes-power-control) and [Encrypted
+DNS](#encrypted-dns) below.
+
 Tailscale (4) comes before the first provision (5) because that run joins the server to the
 tailnet and asks for the auth key made in 4.
 
@@ -343,9 +349,9 @@ gh secret set HYPERNOVA_SESSION_SECRET --env production --body "$(openssl rand -
 # The status dashboard and S3 storage: run the block in section 12, "The status dashboard and
 # S3 secrets" (it keeps the values in 1Password: the dashboard password and the S3 key are yours to use)
 # HOME_TLS_CF_DNS_TOKEN: a Cloudflare API token, created as in "The links page" (section 12)
-# Home: its owner variable, two keys and the Resend key, as in "Home" (section 12); its power
-# key (HOME_POWER_KEY, optional) is a copy of one provisioning makes on the server, so it comes
-# later, as in "Home's power control" (section 12)
+# Home: its owner variable, two keys, the Resend key and the TMDB token, as in "Home" (section 12)
+# and docs/deploy-home.md; its power key (HOME_POWER_KEY, optional) is a copy of one provisioning
+# makes on the server, so it comes later, as in "Home's power control" (section 12)
 
 # Apps: the two operator passwords you will log in with; store each in your password manager first
 portfolio_admin="$(openssl rand -hex 16)"; echo "portfolio admin: $portfolio_admin"
@@ -408,9 +414,9 @@ infra-apply: compose model accepted: 1 service(s) in the database stack, ...
 infra-apply: compose model accepted: 1 service(s) in the portfolio stack, ...
 infra-apply: compose model accepted: 2 service(s) in the hypernova stack, ...
 infra-apply: compose model accepted: 1 service(s) in the tunnel stack, ...
-infra-apply: compose model accepted: 2 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, ...
+infra-apply: compose model accepted: 3 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, ...
 infra-apply: compose model accepted: 9 service(s) in the media stack, no privileged settings, no host port but beszel 100.x.y.z:8090, garage 100.x.y.z:3900, home 100.x.y.z:80, home-tls 100.x.y.z:443, sftpgo 100.x.y.z:8091 on the tailnet, ...
-infra-apply: compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, ...
+infra-apply: compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, ...
 infra-apply: bundle accepted: 29 files, manifest checksums match
 infra-apply: Watchtower is stopped until the app stacks are up
 infra-apply: pulling images
@@ -427,7 +433,7 @@ infra-apply: every container is running and healthy, and has run for at least 30
 infra-apply: Traefik routes arbikullakshi.com/api/health www.arbikullakshi.com/ hypernova.arbikullakshi.com/ hypernova.arbikullakshi.com/api/health to their apps
 infra-apply: the Cloudflare Tunnel is connected (cloudflared /ready answers 200)
 infra-apply: the tailnet-only ports home:80 home-tls:443 beszel:8090 garage:3900 sftpgo:8091 are bound to 100.x.y.z alone
-infra-apply: home-tls serves https with a trusted certificate on 100.x.y.z for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com
+infra-apply: home-tls serves https with a trusted certificate on 100.x.y.z for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/
 infra-apply: beszel-pair garage-setup home-keys finished: the dashboard's agent is paired, S3 has its layout, the owner's key and the files bucket, Home has its key files
 infra-apply: Traefik, Watchtower, autoheal and Beszel's agent reach Docker through their socket proxies with no refused calls
 infra-apply: RELEASE OK: <id> is current, following :latest, auto-updates on
@@ -623,8 +629,13 @@ most values:
   client addresses Home stores, so older audit entries no longer match new ones; nothing else
   changes.
 - **`HOME_DATA_KEY`**: never rotate it casually. It encrypts every enrolled TOTP secret and
-  passkey; home-server refuses to start with a key that does not open them. Only with
-  `reset-owner` and every family member re-enrolling (see [Home](#home)).
+  passkey, and the AI chats' titles and messages; home-server refuses to start with a key that
+  does not open them. Only with `reset-owner` and every family member re-enrolling (see
+  [Home](#home)); the chats are lost with the old key.
+- **`HOME_TMDB_READ_TOKEN`**: on themoviedb.org, Settings → API, regenerate the API Read Access
+  Token, set it ([docs/deploy-home.md](docs/deploy-home.md#5-the-secrets) has the command),
+  `release` (`home-keys` rewrites `/run/keys/tmdb_read_token`, home-server reads it at its
+  restart). Deleting the secret turns TMDB off: Media falls back to Wikidata, without pictures.
 - **`HOME_BESZEL_PASSWORD`**: change the Beszel user's password in Beszel first, then here, then
   `release`.
 - **`HOME_POWER_KEY`** is a copy of the host's `/etc/infra/home-power.key`, never generated here:
@@ -650,6 +661,42 @@ ansible-playbook -u admin --ask-become-pass provision.yml --tags edge     # one 
 ```
 
 Run it when a role changes on `master`. It never touches the app stacks or their data.
+
+### Encrypted DNS
+
+The host resolves names through `systemd-resolved` over DNS-over-TLS only, to Cloudflare
+(`1.1.1.1`, `1.0.0.1`) and then Quad9 (`9.9.9.9`, `149.112.112.112`), never through the resolver
+the home router announces (the ISP's, which blocks some sites). `production.yml`'s
+`dns_over_tls_enabled` and `dns_over_tls_servers`; `roles/host/tasks/dns.yml`; why and how in
+[docs/host.md](docs/host.md#encrypted-dns).
+
+**Turn it on** (or apply a change of the servers): provision with `--tags host`. The run looks a
+name up over TLS right away and, if that fails, takes the setting out again and stops, so the host
+never ends up resolving nothing. The LAN interface stops using the router's resolver at the next
+boot; the run says so ("needs a reboot"). Then:
+
+```bash
+ssh -t admin@infra-host sudo reboot
+ansible-playbook -u admin --ask-become-pass provision.yml --tags host   # verify: TLS on, the four servers, no LAN or tailnet resolver
+ssh admin@infra-host resolvectl dnsovertls                              # Global: yes
+ssh admin@infra-host resolvectl dns                                     # Global: the four servers; enp8s0 and tailscale0: none
+ssh admin@infra-host resolvectl query www.gutenberg.org                 # an address, "Data was acquired via local or encrypted transport: yes"
+```
+
+**MagicDNS** is not affected: the server runs Tailscale with `--accept-dns=false`, so it never
+used MagicDNS, and your devices keep theirs. Verify fails if `tailscale0` ever gets a DNS server
+(someone ran `tailscale set --accept-dns=true`): DNS-over-TLS to Tailscale's `100.100.100.100`
+cannot work; provisioning sets it back.
+
+**Rollback**: set `dns_over_tls_enabled: false` in `production.yml` (through `master`), provision
+with `--tags host` and reboot: the host uses the router's resolver again. Without a working DNS
+(no provisioning, no `apt`, no image pulls), at the console or over SSH by address:
+
+```bash
+sudo rm /etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf /etc/systemd/network/10-netplan-*.network.d/60-infra-dns.conf
+sudo systemctl restart systemd-resolved          # the host resolves again at once, through the router
+sudo reboot                                      # the LAN interface takes the router's resolver again
+```
 
 ### Locked out
 
@@ -796,16 +843,24 @@ snapshots/<date>/volumes/<volume>/     the apps' volumes as plain trees: portfol
                                        audiobookshelf-config, audiobookshelf-metadata, kavita-config,
                                        open-webui-data, immich-pgdata)
 snapshots/<date>/media/<name>/         s3 (Garage's objects, the Files bucket), home-files (Home Files'
-                                       ciphertext), and the retired
-                                       apps' kept folders audiobooks, books, podcasts and photos
+                                       ciphertext), movies and shows (the films' and series'
+                                       .nfo files, pictures and subtitle files only, never the
+                                       videos), and the retired apps' kept folders audiobooks,
+                                       books, podcasts and photos
 ```
+
+`home-data` holds all of Home's own state: `home.db` (accounts, sessions, factors), `media.db`
+(Media's catalogue, progress, lists), `ai.db` (the chats, sealed) and `books/` (Books' library,
+shelves and places); its `media-cache` (pictures, trickplay, HLS) and Books' catalog covers are
+left out and come back by themselves.
 
 Snapshots from before 2026-10-20 also hold `immich.sql.gz`, Immich's own database dump.
 
 Kept: the last 14 nights, plus the first night of each of the last 8 weeks, so anything
 deleted within about two months is still in an older snapshot. Unchanged files are hard links
-between snapshots, so each night only costs what changed. Movies, shows and the Ollama models
-are not backed up. Check last night's run with
+between snapshots, so each night only costs what changed. The films' and series' videos and the
+AI models (Ollama's and Home's `llama-models`) are not backed up: the videos would not fit, the
+models download again ([Home's AI models](#homes-ai-models)). Check last night's run with
 `ssh admin@infra-host journalctl -u infra-backup.service --since yesterday`; a failed one also
 logs "the nightly backup FAILED" at error priority, and its unfinished
 `snapshots/.<date>.partial` stays until the next run.
@@ -896,6 +951,14 @@ sudo rsync -a --delete --numeric-ids /srv/backup/snapshots/<date>/media/home-fil
 sudo docker start home-server watchtower
 ```
 
+`--delete` empties Media's cache, which Home rebuilds. The films' and series' metadata (their
+`.nfo` files and pictures) goes back without touching the videos, with no `--delete`:
+
+```bash
+sudo rsync -a --numeric-ids /srv/backup/snapshots/<date>/media/movies/ /srv/media/movies/
+sudo rsync -a --numeric-ids /srv/backup/snapshots/<date>/media/shows/ /srv/media/shows/
+```
+
 **The database**, all roles and databases at once, into the running cluster (a dump of the
 whole cluster; restoring it over existing databases fails on objects that exist, so for one
 app drop its database first, or restore into a fresh `pgdata-v18` after a reinstall):
@@ -933,8 +996,9 @@ in [docs/operations.md](docs/operations.md).
 ## 12. GPU, AI and media
 
 **Owner action.** Turns on what the rest of the hardware is for: Ollama on the RTX 2060 (for
-hypernova), the status dashboard, Files (S3 storage on the 1 TB internal HDD) behind a links
-page, and a nightly backup to the 1 TB external USB HDD. None of it is public: it is reachable
+hypernova), llama-server for Home's AI on the same card, the status dashboard, Files (S3 storage
+on the 1 TB internal HDD) behind a links page, Home's film and series library, and a nightly
+backup to the 1 TB external USB HDD. None of it is public: it is reachable
 only over the tailnet, on the server's Tailscale address, and only by the Tailscale accounts the
 policy names (you). Do the steps in this order; each one says how to check it.
 
@@ -990,8 +1054,10 @@ Provisioning (below) mounts them by UUID at `/srv/media` and `/srv/backup`
 (`nofail,x-systemd.device-timeout=10s`, so the server still boots in seconds with the external
 disk unplugged), creates Garage's `s3` folder (the `media` account's alone), keeps the retired
 apps' folders `shows`, `movies`, `audiobooks`, `podcasts` and `books` (owned by the `media`
-account, setgid, group-writable) and `photos` ([Retired apps](#retired-apps-2026-10-20)),
-creates Home's `home-files` (the `home-server` account's alone, uid 65532), and
+account, setgid, group-writable; `movies` and `shows` are Home's film and series library now,
+which home-server writes into as a member of the `media` group) and `photos` ([Retired
+apps](#retired-apps-2026-10-20)), creates Home's `home-files` (the `home-server` account's alone,
+uid 65532), and
 keeps the backup disk root-only. While a configured disk is missing its mountpoint stays empty and unwritable, so
 nothing lands on the SSD in its place. Check after provisioning:
 
@@ -1076,7 +1142,82 @@ ssh admin@infra-host sudo docker ps --format '{{.Names}} {{.Ports}}'   # ports o
 ```
 
 hypernova's AI features use the same Ollama over the internal `llm` network from this release
-on.
+on. `llama` (llama-server, Home's AI) starts with no model loaded and answers `/health`; it
+loads a model only when Home asks, from the files of [Home's AI models](#homes-ai-models):
+
+```bash
+ssh -t admin@infra-host sudo docker logs llama 2>&1 | grep -i missing   # nothing once the models are downloaded
+```
+
+### Home's AI models
+
+llama-server (`stack/ai`, [docs/stacks.md](docs/stacks.md#ai)) serves the GGUF files that
+`production.yml`'s `home_ai_models` names, from the `llama-models` volume, which provisioning
+creates for the `ai` account. It has no route to the internet, so the owner downloads them
+once, here, into the volume (about 23 GB on the SSD):
+
+| Model id | File | Bytes | SHA-256 (Hugging Face's, of the file) | From |
+| --- | --- | --- | --- | --- |
+| `qwen3-8b` (the default) | `Qwen3-8B-Q5_K_M.gguf` | 5851112224 | `068bae163faa96ad48032daf4e071a6a28fe67d8dcc95367609c2ff165e52738` | [Qwen/Qwen3-8B-GGUF](https://huggingface.co/Qwen/Qwen3-8B-GGUF), Apache-2.0 |
+| `gemma-3-12b` | `gemma-3-12b-it-q4_0.gguf` | 8074473920 | shown only after the licence is accepted (below) | [google/gemma-3-12b-it-qat-q4_0-gguf](https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-gguf), Gemma Terms of Use |
+| `qwen3-14b` (by day only) | `Qwen3-14B-Q4_K_M.gguf` | 9001752960 | `500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0` | [Qwen/Qwen3-14B-GGUF](https://huggingface.co/Qwen/Qwen3-14B-GGUF), Apache-2.0 |
+
+**Gemma needs its licence accepted first**: sign in to Hugging Face, open the Gemma repository
+above and accept the Gemma Terms of Use, then create a **read** access token (Settings → Access
+Tokens) and keep it in 1Password ("infra production secrets", field `HF_TOKEN`). The Qwen files
+are public.
+
+On the server (`ssh -t admin@infra-host`), this function downloads one file as the `ai` account
+into the volume through a throwaway, read-only curl container (the same pinned image the media
+stack uses), resumes an interrupted download, checks the SHA-256 and only then gives the file
+its name; with `-` instead of a checksum it prints the file's SHA-256 for you to compare:
+
+```bash
+get_model() {  # <file> <url> <sha256, or - to print it>
+  sudo docker run --rm --user 2001:2001 --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+    -e HF_TOKEN -e FILE="$1" -e URL="$2" -e SHA="$3" -v llama-models:/models --entrypoint sh \
+    curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777 -c '
+      set -eu
+      cd /models
+      if [ -n "${HF_TOKEN:-}" ]; then printf "Authorization: Bearer %s\n" "$HF_TOKEN" >/tmp/auth; else : >/tmp/auth; fi
+      [ -f "$FILE" ] && { echo "$FILE is already there"; exit 0; }
+      if [ -f "$FILE.part" ] && [ "$SHA" != - ] && echo "$SHA  $FILE.part" | sha256sum -c - >/dev/null 2>&1; then
+        mv "$FILE.part" "$FILE"; echo "$FILE is in place"; exit 0
+      fi
+      curl -fL --retry 5 --retry-delay 10 -C - -H @/tmp/auth -o "$FILE.part" "$URL"
+      if [ "$SHA" = - ]; then sha256sum "$FILE.part"; echo "compare this with the SHA-256 on the file page, then: mv $FILE.part $FILE (or run again with the checksum)"; exit 0; fi
+      echo "$SHA  $FILE.part" | sha256sum -c -
+      mv "$FILE.part" "$FILE"
+      echo "$FILE is in place"'
+}
+hf=https://huggingface.co
+get_model Qwen3-8B-Q5_K_M.gguf $hf/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q5_K_M.gguf 068bae163faa96ad48032daf4e071a6a28fe67d8dcc95367609c2ff165e52738
+get_model Qwen3-14B-Q4_K_M.gguf $hf/Qwen/Qwen3-14B-GGUF/resolve/main/Qwen3-14B-Q4_K_M.gguf 500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0
+read -rsp 'Hugging Face token (1Password, HF_TOKEN): ' HF_TOKEN; echo; export HF_TOKEN
+get_model gemma-3-12b-it-q4_0.gguf $hf/google/gemma-3-12b-it-qat-q4_0-gguf/resolve/main/gemma-3-12b-it-q4_0.gguf -
+unset HF_TOKEN
+```
+
+Gemma's last line prints its SHA-256: compare it with the one on its file page
+(<https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-gguf/blob/main/gemma-3-12b-it-q4_0.gguf>,
+"SHA256", visible once the licence is accepted), then run `get_model` again with that checksum
+instead of `-` (the downloaded `.part` is reused, so nothing is fetched twice), and add it to the
+table above. The token goes into the container only as an environment variable and a file in its
+tmpfs, never onto the command line.
+
+Each file is 6 to 9 GB: about 10 minutes at 100 Mbit/s. Nothing needs restarting: llama-server
+opens a file when Home first asks for its model. Check:
+
+```bash
+sudo ls -l "$(sudo docker volume inspect llama-models --format '{{.Mountpoint}}')"   # the three files, owned by ai, no .part
+sudo docker logs llama 2>&1 | tail                                                  # no "is missing" after the next start
+```
+
+**Another model**: add it to `home_ai_models` in `production.yml` (an id, the label and line
+Home's picker shows, its file, and whether it is day-only), download its file the same way, and
+release (`LLAMA_MODELS` and `HOME_AI_MODELS` both follow the list). It must fit the 12 GB card
+with its context ([docs/stacks.md](docs/stacks.md#the-gpu-shared)). **Removing** one: take it out
+of the list, release, then `sudo rm` its file from the volume.
 
 ### First logins
 
@@ -1276,7 +1417,9 @@ end-to-end encrypted storage. One container, `home-server`, behind `home-tls`; i
 `:latest` with Watchtower like the portfolio. What it is made of is in
 [docs/stacks.md](docs/stacks.md#home).
 
-**First deploy**, in this order:
+**First deploy**: [docs/deploy-home.md](docs/deploy-home.md) is the whole checklist (provisioning,
+the secrets, the AI models, the release and the first-run checks of every app). The steps for
+Home's own settings, in this order:
 
 1. **The owner's address**, a repository variable (not in the `production` Environment): setup
    and recovery links only ever go there, and a release refuses to render without it.
@@ -1297,7 +1440,7 @@ end-to-end encrypted storage. One container, `home-server`, behind `home-tls`; i
    ```
 
 3. **The two keys**, new, different, kept in 1Password (`HOME_DATA_KEY` is the only copy of the
-   key to every enrolled second factor; it is not in the backups):
+   key to every enrolled second factor and to the AI chats; it is not in the backups):
 
    ```bash
    item="infra production secrets"
@@ -1307,14 +1450,25 @@ end-to-end encrypted storage. One container, `home-server`, behind `home-tls`; i
    unset -f set_secret; unset item
    ```
 
+   And **TMDB's API Read Access Token** for Media's online details (themoviedb.org → Settings →
+   API, the long `eyJ…` token, not the short API key), the same way as the Resend key:
+
+   ```bash
+   read -rsp 'TMDB API Read Access Token: ' k; echo
+   op item edit "infra production secrets" --vault "Home Server" "HOME_TMDB_READ_TOKEN[password]=$k" >/dev/null &&
+     printf %s "$k" | gh secret set HOME_TMDB_READ_TOKEN --env production -R somethim-home/infrastructure; unset k
+   ```
+
 4. **The GHCR token** must be able to read `ghcr.io/somethim-home/home-server` (a classic token
    with `read:packages` reads every package its account can; if `GHCR_USERNAME` is not a member
    of `somethim-home`, give it read access to the package).
 5. **Provision** (`ansible-playbook -u admin --ask-become-pass provision.yml`, or
-   `--tags host`): it adds `HOME_USER` and `HOME_IMAGE_REPO` to `/etc/infra/host.env`, creates the
-   `home-server` account (uid 65532, the image's), the `home-data` and `home-keys` volumes and
-   `/srv/media/home-files` (0700, 65532). A release before this is refused ("HOME_USER is not
-   …; run provisioning").
+   `--tags common,host`): it adds `HOME_USER` and `HOME_IMAGE_REPO` to `/etc/infra/host.env`, creates the
+   `home-server` account (uid 65532, the image's), the `home-data` and `home-keys` volumes,
+   `/srv/media/home-files` (0700, 65532), the internal `home-llm` network and the `llama-models`
+   volume, and installs the compose guard that lets home-server have the GPU, the film and series
+   library and the `media` group. A release before this is refused ("HOME_USER is not …; run
+   provisioning", or "service home-server sets group_add, which a release may not set").
 6. **Release** (Actions → Deploy). Expect "compose model accepted: 2 service(s) in the home
    stack …", "starting home", `home-keys` among the finished one-shots, and home-tls serving
    `home.arbikullakshi.com` (its `/healthz` from home-server).
@@ -1350,12 +1504,24 @@ Beszel's own admin pages:
    `HOME_BESZEL_PASSWORD` secret (and in 1Password), and release. home-server then reads
    `http://beszel:8090` over the media network.
 
+**Media** reads and writes the film and series library (`/srv/media/movies` and `/srv/media/shows`,
+at `/data/media/films` and `/data/media/series` in home-server): copy films in as `admin` (the
+folders are setgid `media` and group-writable; keep new folders group-writable, `mkdir -m 2775`,
+so Home can write its `.nfo` files and pictures next to the videos), as `Title (Year)/Title
+(Year).mkv` and `Show (Year)/Season 01/Show - S01E01 - Name.mkv`. A library copied in before
+Home may have folders only `media` can write; `sudo chmod -R g+w /srv/media/movies /srv/media/shows`
+lets Home write there too. **Books** keeps its library in `home-data` (`/data/books`) and fetches
+Project Gutenberg's catalog and books from `www.gutenberg.org` over https. **AI** answers through
+llama-server ([Home's AI models](#homes-ai-models)). What each needs and why:
+[docs/stacks.md](docs/stacks.md#home).
+
 **Logs**: `ssh admin@infra-host sudo docker logs home-server` (sign-ins, mail sent or refused by
-Resend), `sudo docker logs home-keys` ("the keys and passwords are in place").
+Resend, Media scans, Books' catalog, AI answers), `sudo docker logs home-keys` ("the keys and
+passwords are in place"), `sudo docker logs llama` (models loading and unloading).
 
 ### Home's power control
 
-Home can switch the server off or restart it (after its own countdown) by handing the host one
+Home can switch the server off or restart it (after its own 10-second countdown) by handing the host one
 signed request; the host checks it and runs `systemctl poweroff` or `reboot`, at most once per
 10 minutes ([docs/host.md](docs/host.md#power-requests-from-home)). The key the requests are
 signed with is made **on the server** by provisioning; the `HOME_POWER_KEY` secret is a copy of
@@ -1440,10 +1606,10 @@ when convenient.
 ### Retired apps (2026-10-20)
 
 Immich, the media engine, Audiobookshelf, Kavita, Open WebUI, SearXNG and ComfyUI no longer run;
-the owner's own apps will replace them. Their volumes and the folders under `/srv/media`
-(`shows`, `movies`, `audiobooks`, `podcasts`, `books`, `photos`) are kept, still created by
-provisioning and still backed up nightly (except caches and the films and series), and nothing
-deletes them. What is kept, and what the owner may clean up (the four unused secrets, the old
+the owner's own apps replace them: Home's Media now uses `shows` and `movies`, and Home's AI
+replaces Open WebUI. Their volumes and the other folders under `/srv/media` (`audiobooks`,
+`podcasts`, `books`, `photos`) are kept, still created by provisioning and still backed up
+nightly (except caches), and nothing deletes them. What is kept, and what the owner may clean up (the four unused secrets, the old
 Tailscale grants), is in [docs/stacks.md](docs/stacks.md#retired-apps-2026-10-20).
 
 ## 13. Retire the home CI runners

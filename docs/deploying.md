@@ -85,9 +85,10 @@ leading or trailing spaces, which Compose would rewrite.
 | `GARAGE_ADMIN_TOKEN` | Garage's admin API token (`openssl rand -hex 32`, at least 32 letters and digits). In `media/garage.env` and `media/garage-setup.env` |
 | `GARAGE_OWNER_ACCESS_KEY_ID` / `GARAGE_OWNER_SECRET_KEY` | The owner's S3 key (`GK` + `openssl rand -hex 12`; `openssl rand -hex 32`), imported by `garage-setup` (`media/garage-setup.env`) and used by `sftpgo` (`media/sftpgo.env`) for the files bucket. Rotate both together: Garage never reuses a deleted key ID |
 | `HOME_SECRET_KEY` | Home's key for the HMAC of client addresses (`openssl rand -base64 32`, base64 of 32 bytes). Only in `home/home-keys.env`; `home-keys` writes it to `/run/keys/secret_key` (0400) for `home-server` |
-| `HOME_DATA_KEY` | Home's key that encrypts TOTP secrets and passkey data at rest (`openssl rand -base64 32`, and different from `HOME_SECRET_KEY`). **Losing or rotating it makes every enrolled second factor unreadable**; home-server then refuses to start until the owner resets them (`reset-owner`). Kept out of the backups: 1Password and this secret are its only copies |
+| `HOME_DATA_KEY` | Home's key that encrypts TOTP secrets, passkey data and the AI chats' titles and messages at rest (`openssl rand -base64 32`, and different from `HOME_SECRET_KEY`). **Losing or rotating it makes every enrolled second factor and every chat unreadable**; home-server then refuses to start until the owner resets them (`reset-owner`). Kept out of the backups: 1Password and this secret are its only copies |
 | `HOME_RESEND_API_KEY` | The Resend API key Home sends its mail with (setup, sign-in and invite links), as the SMTP password of `smtp.resend.com:465` (user `resend`). Sending access is enough. The `From` domain must be verified in Resend |
 | `HOME_POWER_KEY` | *(optional)* The key Home signs its power requests to the host with: a **copy** of the host's `/etc/infra/home-power.key`, which provisioning makes once and never prints ([RUNBOOK.md](../RUNBOOK.md#homes-power-control) copies it without showing it). Base64 of 32 bytes, different from `HOME_SECRET_KEY` and `HOME_DATA_KEY`. Only in `home/home-keys.env`; `home-keys` writes it to `/run/keys/power_key`. `infra-apply` refuses a release whose value is not the host's. Empty: Home has no power control ([host.md](host.md#power-requests-from-home)) |
+| `HOME_TMDB_READ_TOKEN` | *(optional, set in production)* TMDB's **API Read Access Token** for Media's online details (themoviedb.org → Settings → API; the long JWT, `eyJ…` with two dots, not the 32-character API key, which a release refuses). Only in `home/home-keys.env`; `home-keys` writes it to `/run/keys/tmdb_read_token` and home-server gets `HOME_TMDB_READ_TOKEN_FILE`. Home sends it only as `Authorization: Bearer` to TMDB's API, never logs it. Empty: no token file, Media uses Wikidata only (no pictures) |
 | `HOME_BESZEL_PASSWORD` | *(optional)* The password of the read-only Beszel user `production.yml`'s `home_beszel_user` names (at least 16 letters and digits), for Home's Status card. Read only when that user is set ([RUNBOOK.md](../RUNBOOK.md#home)) |
 | `FILES_PASSWORD` | The owner's file manager (SFTPGo web client and WebDAV) password (`openssl rand -hex 16`, at least 16 letters and digits). Only in `media/sftpgo.env`, read by `sftpgo`, which reloads its user from it on every start |
 
@@ -96,7 +97,7 @@ and all different: they are written into `provision.sql` and the DSNs as literal
 them, and the hypernova session secret, with `openssl rand -hex 24`.
 `PORTFOLIO_TOTP_ENCRYPTION_KEY` must be base64 of 32 bytes (`[A-Za-z0-9+/]{43}=`).
 `CF_TUNNEL_TOKEN` must look like a token Cloudflare issues (`eyJ` and at least 40 more
-base64 characters). `HOME_TLS_CF_DNS_TOKEN` must be 40 or more letters, digits, `_` and `-`. The Beszel, Garage, file manager and Home secrets' formats are in their rows above; `HOME_RESEND_API_KEY` must be 16 or more letters, digits, `_` and `-`. [RUNBOOK.md](../RUNBOOK.md#7-the-production-environment) generates every
+base64 characters). `HOME_TLS_CF_DNS_TOKEN` must be 40 or more letters, digits, `_` and `-`. The Beszel, Garage, file manager and Home secrets' formats are in their rows above; `HOME_RESEND_API_KEY` must be 16 or more letters, digits, `_` and `-`; `HOME_TMDB_READ_TOKEN`, when set, `eyJ` and three dot-separated base64url parts. [RUNBOOK.md](../RUNBOOK.md#7-the-production-environment) generates every
 value. `WEBUI_SECRET_KEY`, `SEARXNG_SECRET`, `IMMICH_DB_PASSWORD` and `IMMICH_ADMIN_PASSWORD`
 belonged to the apps retired on 2026-10-20 and are no longer read; they can be deleted from the
 Environment ([stacks.md](stacks.md#retired-apps-2026-10-20)).
@@ -111,6 +112,39 @@ Environment ([stacks.md](stacks.md#retired-apps-2026-10-20)).
 | `SERVER_USER` | *(optional)* The forced-command account; defaults to `deploy`. The workflow refuses `root` and `admin` |
 | `PORTFOLIO_GOOGLE_CLIENT_ID` | *(optional)* The client ID half of the Google OAuth pair in the secrets table; a variable, not a secret |
 | `HOME_OWNER_EMAIL` | Home's owner account: setup and recovery links only ever go to this address. A **repository** variable (`gh variable set HOME_OWNER_EMAIL --body <address>`, no `--env`), which the workflow reads as `vars.HOME_OWNER_EMAIL` like the Environment's. A release refuses to render without it. Changing it later does not move an existing owner account |
+
+### Everything production needs, and where it lives
+
+As of 2026-10-21 (`gh secret list --env production`, `gh variable list`), with the four Home
+secrets that are not set yet marked **to set**. "1P" is the 1Password item; "infra" is the
+**"infra production secrets"** item in the **"Home Server"** vault, one field per secret, named
+like it. [deploy-home.md](deploy-home.md#5-the-secrets) sets the Home ones without printing them.
+
+| Name | Kind | Needed | State | Generate | 1P |
+| --- | --- | --- | --- | --- | --- |
+| `SSH_PRIVATE_KEY`, `SSH_KNOWN_HOSTS` | secret | yes | set | RUNBOOK section 5 | the key file `~/.ssh/infra-deploy` |
+| `TS_OAUTH_SECRET` / `TS_OAUTH_CLIENT_ID` | secret / variable | yes | set | Tailscale OAuth client, RUNBOOK section 4 | Tailscale |
+| `SERVER_SSH_HOST`, `GHCR_USERNAME` | variable | yes | set | `infra-host`; the GHCR account | – |
+| `GHCR_TOKEN` | secret | yes | set | classic token, `read:packages` | "GHCR read token (infra)" |
+| `CF_TUNNEL_TOKEN` | secret | yes | set | Cloudflare tunnel, RUNBOOK section 6 | "Cloudflare tunnel token (home-server)" |
+| `HOME_TLS_CF_DNS_TOKEN` | secret | yes | set | Cloudflare API token, DNS Edit on the zone | "Cloudflare DNS token (home TLS)" |
+| `POSTGRES_SUPERUSER_PASSWORD`, `PRIZM_DB_PASSWORD`, `PORTFOLIO_DB_PASSWORD` | secret | yes | set | `openssl rand -hex 24` each | none (nobody types them) |
+| `PORTFOLIO_TOTP_ENCRYPTION_KEY`, `HYPERNOVA_SESSION_SECRET` | secret | yes | set | `openssl rand -base64 32`, `openssl rand -hex 24` | none (generated straight into GitHub, RUNBOOK section 7) |
+| `PORTFOLIO_ADMIN_PASSWORD`, `HYPERNOVA_ADMIN_PASSWORD` | secret | yes | set | `openssl rand -hex 16` | your password manager |
+| `PORTFOLIO_RESEND_API_KEY`, `PORTFOLIO_GOOGLE_CLIENT_SECRET` / `PORTFOLIO_GOOGLE_CLIENT_ID` | secret / variable | optional | not set | Resend; Google Cloud OAuth client | where you keep them |
+| `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN` | secret | yes | set | `openssl rand -hex 16`, `-hex 24` | infra |
+| `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN` | secret | yes | set | `openssl rand -hex 32` each | infra |
+| `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY` | secret | yes | set | `GK$(openssl rand -hex 12)`, `openssl rand -hex 32` | infra |
+| `FILES_PASSWORD` | secret | yes | set | `openssl rand -hex 16` | infra |
+| `HOME_OWNER_EMAIL` | **repository** variable | yes | set | your address | – |
+| `HOME_SECRET_KEY` | secret | yes | **to set** | `openssl rand -base64 32` | infra |
+| `HOME_DATA_KEY` | secret | yes | **to set** | `openssl rand -base64 32`, unlike the one above | infra (its only copy besides GitHub) |
+| `HOME_RESEND_API_KEY` | secret | yes | **to set** | Resend → API Keys, sending access, "infra Home" | infra |
+| `HOME_TMDB_READ_TOKEN` | secret | optional (production sets it) | **to set** | themoviedb.org → Settings → API → API Read Access Token | infra |
+| `HOME_POWER_KEY` | secret | optional (production sets it) | not set | a copy of the host's `/etc/infra/home-power.key` after provisioning `--tags host` | infra |
+| `HOME_BESZEL_PASSWORD` | secret | optional | not set | `openssl rand -hex 16`, with `home_beszel_user` | infra |
+| `HF_TOKEN` | **not** a GitHub secret | for the Gemma download only | – | Hugging Face → Access Tokens, read, after accepting Gemma's licence | infra |
+| `IMMICH_ADMIN_PASSWORD`, `IMMICH_DB_PASSWORD`, `SEARXNG_SECRET`, `WEBUI_SECRET_KEY` | secret | no (retired apps) | set, unused | – | delete ([deploy-home.md](deploy-home.md#10-clean-up)) |
 
 The domains (including `home_hosts`, the tailnet services' https names under `home_domain`),
 the app image repositories, the `ai`, `media` and `home-server` accounts' uids and gids, the
@@ -138,10 +172,10 @@ mode 0644, the rest 0600:
 | `media/garage.env` | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN` | `garage` |
 | `media/garage-setup.env` | `GARAGE_ADMIN_TOKEN`, `OWNER_ACCESS_KEY_ID`, `OWNER_SECRET_ACCESS_KEY` | `garage-setup` |
 | `media/sftpgo.env` | `FILES_PASSWORD`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | `sftpgo` |
-| `home/home-keys.env` | `HOME_SECRET_KEY`, `HOME_DATA_KEY`, `HOME_SMTP_PASSWORD` (the Resend key), `HOME_BESZEL_PASSWORD`, `HOME_POWER_KEY` | `home-keys`, which writes each into its own file in the `home-keys` volume |
+| `home/home-keys.env` | `HOME_SECRET_KEY`, `HOME_DATA_KEY`, `HOME_SMTP_PASSWORD` (the Resend key), `HOME_BESZEL_PASSWORD`, `HOME_POWER_KEY`, `HOME_TMDB_READ_TOKEN` | `home-keys`, which writes each into its own file in the `home-keys` volume |
 | `home/home-server.env` | Home's settings and the owner's address; no secret, only the paths of the key files | `home-server` |
 | `ghcr.env` | GHCR login | `infra-apply`'s `docker login` |
-| `<stack>/.env` | image references, domains, the `ai`, `media` and `home-server` uids and gids, the Ollama models, the ACME contact and the dashboard's login name only | Compose interpolation |
+| `<stack>/.env` | image references, domains, the `ai`, `media` and `home-server` uids and gids (and the `media` gid home-server joins), the Ollama models and llama-server's model files, the ACME contact and the dashboard's login name only | Compose interpolation |
 | `release.env`, `manifest.sha256`, `<stack>/docker-compose.yml` | no secrets | `infra-apply` |
 
 See [architecture.md](architecture.md#env-files) for why the `.env` files carry no secrets.
@@ -168,15 +202,18 @@ anything changes ("…; the running release is untouched") unless all of this ho
 6. `docker compose config` of each stack passes
    [`infra-compose-guard`](../roles/common/files/infra-compose-guard): the stack's own project
    name, container names, volumes and existing networks only (and, where it says so, per
-   container: only hypernova's provider joins `llm`, `home-server` and `home-keys` only `media`); no privileged settings, added
+   container: only hypernova's provider joins `llm`, `llama` only `home-llm`, `home-server` only `media`
+   and `home-llm`, `home-keys` only `media`); no privileged settings, added
    capabilities, devices, host namespaces or Docker socket; no host port but the tailnet-only
    ones (`home` 80, `home-tls` 443, `beszel` 8090, `garage` 3900, `sftpgo` 8091), each
    written exactly `"${TAILSCALE_IP}:<port>:<port>"` and resolved to the address `host.env`
-   names; no bind mount but Garage's `/srv/media/s3`, Home's `/srv/media/home-files` and
-   `/run/home-power` (its power requests) and the two folders Beszel's agent sizes disks through,
-   each in its own container at its fixed path, read-only except Garage's objects and Home's two,
-   `create_host_path: false`; a GPU reservation only for `ollama` and
-   `beszel-agent`, and only the whole NVIDIA GPU; only the stack's own env files, each read by
+   names; no bind mount but Garage's `/srv/media/s3`, Home's `/srv/media/home-files`,
+   `/run/home-power` (its power requests), `/srv/media/movies` and `/srv/media/shows` (at
+   `/data/media/films` and `/data/media/series`) and the two folders Beszel's agent sizes disks
+   through, each in its own container at its fixed path, read-only except Garage's objects and
+   Home's four, `create_host_path: false`; a GPU reservation only for `ollama`, `llama`,
+   `beszel-agent` and `home-server`, and only the whole NVIDIA GPU; no extra group but the `media`
+   gid (`MEDIA_USER`) for `home-server`; only the stack's own env files, each read by
    its one container; in `ai`,
    `media` and `home`, every service is named after its container and runs as `AI_USER`,
    `MEDIA_USER` or `HOME_USER` with a `mem_limit`, `cap_drop: [ALL]` and `no-new-privileges`;
@@ -197,7 +234,8 @@ https`), answering `2xx` for `arbikullakshi.com/api/health`, `hypernova.arbikull
 its `/api/health`, and `301`/`308` for `www.arbikullakshi.com/`; `cloudflared`'s `/ready`
 answering `200` (the tunnel holds a connection to Cloudflare); `home-tls`, asked by name on the
 Tailscale address with a trusted certificate, answering `200` for `https://home.<domain>/healthz`
-(home-server behind it) and `2xx`, `3xx`, `401` or `403` for each service name; the one-shots
+(home-server behind it) and `/app/` (Home's web app, through `home-tls` untouched), and `2xx`,
+`3xx`, `401` or `403` for each service name; the one-shots
 `beszel-pair`, `garage-setup` and `home-keys` exited `0`; each tailnet-only port bound by
 Docker to the Tailscale address and nothing else (`docker inspect` of its `PortBindings`); and
 no refused call in any socket proxy's log ([edge.md](edge.md#verifying-it)). Only then does it record the running digests
@@ -225,7 +263,7 @@ a tag of its own:
 | `tailscale` | the tailnet join and its checks |
 | `docker` | the pinned Engine, `daemon.json` (with the `nvidia` runtime when `gpu_enabled`), the prune timer |
 | `gpu` | the NVIDIA server driver of `nvidia_driver_major`, the Container Toolkit, the read-back (`nvidia-smi`, `docker info`) |
-| `host` | `/etc/infra/host.env` (with the Tailscale IPv4), non-local binds, the `INFRA-PUBLIC` firewall and its tailnet hook, swap, no sleep, Wake-on-LAN on `lan_interface` (netplan, read back with `ethtool`), Home's power requests (the key `/etc/infra/home-power.key`, the `/run/home-power` tmpfs, `home-power.path` and its service), the `edge`, `data`, `ai`, `llm` and `media` networks (`llm` internal; the retired `immich` network is removed once nothing is attached), the `pgdata-v18` volume, the `ai`, `media` and `home-server` accounts and their volumes, the disks at `/srv/media` and `/srv/backup` (with Home's Files folder), the nightly backup timer, the published-port read-back |
+| `host` | `/etc/infra/host.env` (with the Tailscale IPv4), non-local binds, the `INFRA-PUBLIC` firewall and its tailnet hook, swap, no sleep, Wake-on-LAN on `lan_interface` (netplan, read back with `ethtool`), encrypted DNS (systemd-resolved over TLS to Cloudflare and Quad9, the LAN's resolver ignored from the next boot; [host.md](host.md#encrypted-dns)), Home's power requests (the key `/etc/infra/home-power.key`, the `/run/home-power` tmpfs, `home-power.path` and its service), the `edge`, `data`, `ai`, `llm`, `home-llm` and `media` networks (`llm` and `home-llm` internal; the retired `immich` network is removed once nothing is attached), the `pgdata-v18` volume, the `ai`, `media` and `home-server` accounts and their volumes (`llama-models` among them), the disks at `/srv/media` and `/srv/backup` (with Home's Files folder and the film and series library), the nightly backup timer, the published-port read-back |
 | `quiet` | quiet hours: `/usr/local/sbin/infra-quiet`, its settings, the start and end timers and the boot check, the state for this time of day, the read-back |
 | `edge` / `watchtower` / `autoheal` | that compose project and its verify tasks (Traefik: no published port) |
 

@@ -97,7 +97,9 @@ The tunnel goes after the apps so that by the time Cloudflare can send requests,
 behind Traefik are starting; its own failure cannot hold back the apps. `ai`, `media` and
 `home`, which nothing public depends on, come last: the sites are up before their large images
 start. `home` follows `media`, whose `home-tls` routes to it; `home-tls` answers 502 for Home's
-name for the seconds in between, and verify waits for both.
+name for the seconds in between, and verify waits for both. `ai` comes before `home` too, so
+llama-server is already answering on `home-llm` when home-server starts (Home's AI card would
+otherwise say "Unavailable" for its first health check).
 
 The order is load-bearing, and the reason is a limitation of Compose: `depends_on` is scoped
 to a single project, so nothing outside the `database` stack can declare a dependency on
@@ -149,12 +151,14 @@ refuses any env line that is not `KEY=value`.
 | `data` | `roles/host` | PostgreSQL, plus every container that talks to it |
 | `ai` | `roles/host` | Ollama, `ollama-pull` (a plain bridge: Ollama downloads models) |
 | `llm` | `roles/host`, `--internal` | Ollama and hypernova's `prizm-provider`, nothing else; no route out |
+| `home-llm` | `roles/host`, `--internal` | llama-server (`llama`, the `ai` stack) and Home's `home-server`, nothing else; no route out |
 | `media` | `roles/host` | `home`, `home-tls`, Beszel, Garage, SFTPGo (their tailnet ports, `home-tls`'s certificate), and `home-server` and `home-keys` of the `home` stack (`home-tls` reaches Home there; Home's mail goes out through it) |
 | `edge-socket`, `watchtower-socket`, `autoheal-socket` | their compose projects, `internal: true` | one agent and its socket proxy each |
 
 The stacks declare these networks `external: true`, and the compose guard refuses a release
 that adds or creates any other network, or puts a container on a network that is not its own
-(`hypernova`, `ai`, `media`, `home`). They are created by provisioning so they exist before any stack
+(`hypernova`, `ai`, `media`, `home`; `home-server` is the one container in two stacks' networks,
+`media` and `home-llm`). They are created by provisioning so they exist before any stack
 or the edge proxy starts.
 
 ## Public and tailnet-only
@@ -170,7 +174,7 @@ Two audiences, two ways in, and nothing else:
 | Beszel, the status dashboard (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8090) | `https://status.home.arbikullakshi.com` |
 | Garage, S3 storage (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 3900) | `https://s3.home.arbikullakshi.com` (S3, path-style, region `garage`) |
 | SFTPGo, the file manager on Garage's `files` bucket (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8091) | `https://files.home.arbikullakshi.com/web/client`, WebDAV at `/dav` |
-| Ollama, PostgreSQL, Traefik | containers only | Docker networks (`llm`, `data`, `edge`) | none on the host |
+| Ollama, llama-server, PostgreSQL, Traefik | containers only | Docker networks (`llm`, `home-llm`, `data`, `edge`) | none on the host |
 
 Each tailnet service's https name is `<label>.home.arbikullakshi.com` (`home_hosts` in
 `production.yml`), all on one Let's Encrypt certificate for `home.` and `*.home.` that `home-tls`
