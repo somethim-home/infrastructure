@@ -1,0 +1,22 @@
+[package]
+name = "down-page"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Cloudflare Worker: the public sites' \"server is down\" page when the home server cannot be reached"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Only the Worker itself needs the runtime; the decision logic and the page are
+# plain Rust, tested on the host with cargo test.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "=0.8.7"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+# No `strip`: wasm-bindgen reads the target_features section it would remove.

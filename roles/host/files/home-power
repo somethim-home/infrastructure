@@ -1,0 +1,283 @@
+#!/usr/bin/python3 -I
+"""Carry out a signed power request from Home (docs/host.md, "Power requests from Home").
+
+    home-power        run by home-power.service, which home-power.path starts
+                      whenever something changes in the request directory
+
+home-server (the Home app's container, uid 65532) writes one request into the
+request directory, /run/home-power, a 64 KiB tmpfs it alone may write (mounted
+into it at /run/power):
+
+    request.json   {"action": "poweroff" | "reboot", "requested_at": <Unix seconds>,
+                    "nonce": "<32-64 lowercase hex>", "hmac": "<64 lowercase hex>"}
+
+hmac is HMAC-SHA256, under the 32 bytes base64-decoded from the key, of
+"home-power/v1\\n<action>\\n<requested_at>\\n<nonce>". The key is
+/etc/infra/home-power.key (root, 0600), which provisioning made once on this
+host; the HOME_POWER_KEY secret holds a copy for home-server.
+
+Every entry in the directory is read once and removed, whatever it is: a
+request is carried out only when it is a regular file of at most 4 KiB that
+parses as exactly those four fields, its hmac matches, its action is poweroff or
+reboot, it was made at most two minutes ago and not in the future, its nonce has
+not been seen before, and no action was accepted in the last ten minutes. Then
+it logs, waits a few seconds (so home-server's answer reaches the browser) and
+runs `systemctl poweroff` or `systemctl reboot`; nothing else is ever executed.
+Entries whose names start with a dot are home-server's half-written files and
+are left alone for a few seconds. One log line per entry, never its content.
+State (the last accepted action, the nonces of the last ten minutes) is in
+/var/lib/home-power/state.json, root's alone. Exits 0 unless the key, the state
+or systemctl failed.
+"""
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+
+REQUEST_DIR = os.environ.get("HOME_POWER_DIR", "/run/home-power")
+KEY_FILE = os.environ.get("HOME_POWER_KEY_FILE", "/etc/infra/home-power.key")
+STATE_FILE = os.environ.get("HOME_POWER_STATE", "/var/lib/home-power/state.json")
+SYSTEMCTL = os.environ.get("HOME_POWER_SYSTEMCTL", "/usr/bin/systemctl")
+DELAY_SECONDS = float(os.environ.get("HOME_POWER_DELAY", "5"))
+
+REQUEST_NAME = "request.json"
+ACTIONS = ("poweroff", "reboot")
+MAX_AGE_SECONDS = 120
+RATE_LIMIT_SECONDS = 600
+NONCE_MEMORY_SECONDS = RATE_LIMIT_SECONDS
+MAX_NONCES = 1000
+MAX_REQUEST_BYTES = 4096
+TEMP_GRACE_SECONDS = 10
+# How long one run keeps looking: it waits out a half-written dot file it saw
+# rather than exit and be started again at once (home-power.path starts the
+# service again whenever the directory is not empty when it exits).
+RUN_SECONDS = 15
+POLL_SECONDS = 0.2
+FIELDS = {"action", "requested_at", "nonce", "hmac"}
+NONCE = re.compile(r"^[0-9a-f]{32,64}$")
+HMAC_HEX = re.compile(r"^[0-9a-f]{64}$")
+ACTION = re.compile(r"^[a-z]{1,16}$")
+KEY_TEXT = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+
+
+class Refused(Exception):
+    """A request that is not carried out; the message is the log line's reason."""
+
+
+def log(message):
+    print(f"home-power: {message}", flush=True)
+
+
+def now():
+    return int(os.environ.get("HOME_POWER_NOW") or time.time())
+
+
+def printable(name):
+    shown = "".join(c if c.isprintable() and c not in "\\'" else "?" for c in name[:64])
+    return f"'{shown}'" + ("..." if len(name) > 64 else "")
+
+
+def load_key():
+    """The 32-byte key, from a root-owned file no one else can read or write."""
+    fd = os.open(KEY_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("is not a regular file")
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("is not private to root (owner root, mode 0600)")
+        text = os.read(fd, 256).decode("ascii", "replace").strip()
+    finally:
+        os.close(fd)
+    if not KEY_TEXT.match(text):
+        raise ValueError("does not hold base64 of 32 bytes")
+    return base64.b64decode(text, validate=True)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except FileNotFoundError:
+        return {"last_action_at": None, "nonces": {}}
+    if (not isinstance(state, dict) or set(state) != {"last_action_at", "nonces"}
+            or not (state["last_action_at"] is None or type(state["last_action_at"]) is int)
+            or not isinstance(state["nonces"], dict)
+            or not all(NONCE.match(k) and type(v) is int for k, v in state["nonces"].items())):
+        raise ValueError("is not a state this script wrote")
+    return state
+
+
+def save_state(state, at):
+    state["nonces"] = dict(sorted(((n, t) for n, t in state["nonces"].items() if t > at - NONCE_MEMORY_SECONDS),
+                                  key=lambda item: item[1])[-MAX_NONCES:])
+    directory = os.path.dirname(STATE_FILE)
+    temp = os.path.join(directory, ".state.json.tmp")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, STATE_FILE)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def remove(dir_fd, name, is_dir):
+    try:
+        if is_dir:
+            # Opened through dir_fd and never following a link: rmtree's fd-based walk.
+            shutil.rmtree(name, dir_fd=dir_fd)
+        else:
+            os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+
+
+def read_request(dir_fd, name):
+    """The entry's bytes when it is a small regular file; never follows a link or blocks on a pipe."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError as error:
+        raise Refused(f"cannot be opened as a file ({error.strerror})") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused("is not a regular file")
+        if info.st_size > MAX_REQUEST_BYTES:
+            raise Refused(f"is {info.st_size} bytes, more than {MAX_REQUEST_BYTES}")
+        data = os.read(fd, MAX_REQUEST_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_REQUEST_BYTES:
+        raise Refused(f"is more than {MAX_REQUEST_BYTES} bytes")
+    return data
+
+
+def check(data, key, state, at):
+    """The action of a request that may be carried out now; Refused otherwise.
+
+    Records the nonce of every request with a valid signature, so none can be replayed."""
+    try:
+        request = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise Refused("is not JSON") from None
+    if not isinstance(request, dict) or set(request) != FIELDS:
+        raise Refused("does not have exactly the fields action, requested_at, nonce and hmac")
+    action, requested_at, nonce, mac = (request[f] for f in ("action", "requested_at", "nonce", "hmac"))
+    if not isinstance(action, str) or not ACTION.match(action):
+        raise Refused("has an action that is not a lowercase word")
+    if type(requested_at) is not int or not 0 < requested_at < 2**40:
+        raise Refused("has a requested_at that is not Unix seconds")
+    if not isinstance(nonce, str) or not NONCE.match(nonce):
+        raise Refused("has a nonce that is not 32 to 64 lowercase hex digits")
+    if not isinstance(mac, str) or not HMAC_HEX.match(mac):
+        raise Refused("has an hmac that is not 64 lowercase hex digits")
+    message = f"home-power/v1\n{action}\n{requested_at}\n{nonce}".encode("ascii")
+    if not hmac.compare_digest(hmac.new(key, message, hashlib.sha256).hexdigest(), mac):
+        raise Refused("is not signed with the power key (wrong hmac)")
+    if nonce in state["nonces"]:
+        raise Refused(f"replays nonce {nonce[:8]}..., seen before")
+    # Remembered from the later of now and requested_at, so a request dated in
+    # the future is still known when that time comes.
+    state["nonces"][nonce] = max(at, requested_at)
+    if action not in ACTIONS:
+        raise Refused(f"asks for {action}, which is neither poweroff nor reboot")
+    if requested_at > at:
+        raise Refused(f"was made {requested_at - at} s in the future")
+    if at - requested_at > MAX_AGE_SECONDS:
+        raise Refused(f"was made {at - requested_at} s ago, more than {MAX_AGE_SECONDS} s")
+    last = state["last_action_at"]
+    if last is not None and at - last < RATE_LIMIT_SECONDS:
+        raise Refused(f"comes {at - last} s after the last accepted action; the next is allowed in {RATE_LIMIT_SECONDS - (at - last)} s")
+    return action, at - requested_at
+
+
+def main():
+    if len(sys.argv) != 1:
+        print("usage: home-power (run by home-power.service)", file=sys.stderr)
+        return 64
+    try:
+        dir_fd = os.open(REQUEST_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        log(f"FAILED: the request directory {REQUEST_DIR} cannot be opened ({error.strerror}); provision with --tags host")
+        return 1
+    key = state = None
+    try:
+        key = load_key()
+    except (OSError, ValueError, binascii.Error) as error:
+        reason = f"cannot be read ({error.strerror})" if isinstance(error, OSError) else str(error)
+        log(f"FAILED: the power key {KEY_FILE} {reason}; every request is refused (provision with --tags host)")
+    try:
+        state = load_state()
+    except (OSError, ValueError) as error:
+        reason = f"cannot be read ({error.strerror})" if isinstance(error, OSError) else str(error)
+        log(f"FAILED: the state {STATE_FILE} {reason}; every request is refused (sudo rm it to start afresh)")
+    accepted = None
+    failed = key is None or state is None
+    deadline = time.monotonic() + RUN_SECONDS
+    try:
+        while True:
+            seen = pending = 0
+            for entry in sorted(os.scandir(dir_fd), key=lambda e: e.name):
+                name = entry.name
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                is_dir = stat.S_ISDIR(info.st_mode)
+                at = now()
+                if name.startswith(".") and stat.S_ISREG(info.st_mode) and at - int(info.st_mtime) < TEMP_GRACE_SECONDS:
+                    pending += 1
+                    continue
+                seen += 1
+                if name != REQUEST_NAME:
+                    remove(dir_fd, name, is_dir)
+                    log(f"removed {printable(name)}, which is not a request ({REQUEST_NAME} is the only name read)")
+                    continue
+                try:
+                    data = read_request(dir_fd, name)
+                    remove(dir_fd, name, is_dir)
+                    if failed:
+                        raise Refused("cannot be checked (see the FAILED line above)")
+                    action, age = check(data, key, state, at)
+                    if accepted:
+                        raise Refused(f"comes after a {accepted} accepted in this run")
+                    state["last_action_at"] = at
+                    accepted = action
+                    save_state(state, at)
+                    log(f"accepted {action}, requested {age} s ago; {action} in {DELAY_SECONDS:g} s")
+                except Refused as refusal:
+                    remove(dir_fd, name, is_dir)
+                    log(f"refused {REQUEST_NAME}: it {refusal}; removed")
+                    if not failed:
+                        save_state(state, at)
+            if (not seen and not pending) or time.monotonic() >= deadline:
+                break
+            if not seen:
+                time.sleep(POLL_SECONDS)
+    finally:
+        os.close(dir_fd)
+    if not accepted:
+        return 1 if failed else 0
+    time.sleep(DELAY_SECONDS)
+    result = subprocess.run([SYSTEMCTL, "--no-block", accepted], check=False)
+    if result.returncode != 0:
+        log(f"FAILED: systemctl {accepted} exited {result.returncode}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

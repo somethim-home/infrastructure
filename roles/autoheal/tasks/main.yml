@@ -1,0 +1,25 @@
+---
+# See docs/agents.md — Autoheal.
+- name: Create the autoheal deploy directory
+  ansible.builtin.file:
+    path: /opt/autoheal
+    state: directory
+    mode: "0755"
+
+- name: Ship the autoheal compose file
+  ansible.builtin.copy:
+    src: docker-compose.yml
+    dest: /opt/autoheal/docker-compose.yml
+    mode: "0644"
+
+- name: Bring up autoheal
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: /opt/autoheal
+  register: autoheal_up
+  changed_when: >-
+    'Started' in autoheal_up.stderr or 'Created' in autoheal_up.stderr
+    or 'Recreated' in autoheal_up.stderr
+
+- name: Verify autoheal can use the Docker API through its socket proxy
+  ansible.builtin.import_tasks: verify.yml

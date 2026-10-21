@@ -1,0 +1,61 @@
+---
+# The tailnet interface: the only one from which a new connection may reach a
+# Docker-published port (infra-firewall), and the only one ufw admits the
+# published ports on (roles/common/defaults/main.yml, ufw_allowed).
+tailnet_interface: tailscale0
+
+# Every port a container publishes, each bound to the host's Tailscale address
+# alone. The compose guard (TAILNET_PORTS) refuses any other before a release
+# starts it; verify.yml reads the bindings back from Docker.
+tailnet_ports:
+  - { container: home, port: 80 }
+  - { container: home-tls, port: 443 }
+  - { container: beszel, port: 8090 }
+  - { container: garage, port: 3900 }
+  - { container: sftpgo, port: 8091 }
+
+# Accounts the hardened stacks run as (no login, no home), and the external
+# volumes they own: provisioning creates each volume once and hands its root to
+# the account (0700), so the containers never need root to write their data.
+# home-server is the uid Home's image runs as; the account only names it.
+service_accounts:
+  - { name: ai, uid: "{{ ai_uid }}", gid: "{{ ai_gid }}" }
+  - { name: media, uid: "{{ media_uid }}", gid: "{{ media_gid }}" }
+  - { name: home-server, uid: "{{ home_uid }}", gid: "{{ home_gid }}" }
+# open-webui-data, comfyui-data, jellyfin-*, audiobookshelf-*, kavita-config and
+# immich-* belong to apps retired on 2026-10-20: no stack mounts them any more,
+# but they stay listed (and backed up) until the owner has audited their data.
+service_volumes:
+  - { name: ollama-models, account: ai }
+  - { name: open-webui-data, account: ai }
+  - { name: comfyui-data, account: ai }
+  - { name: jellyfin-config, account: media }
+  - { name: jellyfin-cache, account: media }
+  - { name: audiobookshelf-config, account: media }
+  - { name: audiobookshelf-metadata, account: media }
+  - { name: kavita-config, account: media }
+  - { name: home-tls-acme, account: media }
+  - { name: beszel-data, account: media }
+  - { name: beszel-agent-data, account: media }
+  - { name: garage-meta, account: media }
+  - { name: sftpgo-data, account: media }
+  - { name: home-data, account: home-server }
+  - { name: home-keys, account: home-server }
+  - { name: immich-pgdata, account: media }
+  - { name: immich-ml-cache, account: media }
+
+# The disks, by filesystem UUID (production.yml): the internal HDD with the
+# library, and the external USB HDD the nightly backup writes to. Mounted with
+# nofail and a 10 s device timeout, so a missing disk never holds up the boot.
+media_root: /srv/media
+backup_root: /srv/backup
+media_libraries: [shows, movies, audiobooks, podcasts, books]
+disk_mount_options: nofail,x-systemd.device-timeout=10s,noatime,nodev,nosuid,noexec
+
+# Power requests from Home (tasks/home_power.yml, docs/host.md "Power requests
+# from Home"): the directory home-server writes a signed request into (its own
+# small tmpfs, bound into the container at /run/power), and the key the
+# requests are signed with, made once on the host.
+home_power_dir: /run/home-power
+home_power_key_file: /etc/infra/home-power.key
+home_power_mount_options: "size=64k,nr_inodes=64,mode=0700,uid={{ home_uid }},gid={{ home_gid }},nosuid,nodev,noexec"

@@ -1,0 +1,100 @@
+---
+# The deploy user is the release path's only way in: its one key is forced to
+# /usr/local/sbin/infra-deploy-gate, which runs `sudo -n infra-apply release`
+# or `... status` and nothing else.
+- name: Create the deploy user with a locked password and no supplementary groups
+  ansible.builtin.user:
+    name: "{{ deploy_user }}"
+    shell: /bin/bash
+    create_home: true
+    password: "!"
+    update_password: always
+    groups: ""
+    append: false
+  register: deploy_account
+
+- name: Create the stack and release directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/infra
+    - /opt/infra/releases
+
+# copy does not create parent directories, and /usr/local/libexec may not exist.
+- name: Create the directory for the compose guard
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the release gate, the release script and the compose guard
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - { src: infra-deploy-gate, dest: /usr/local/sbin/infra-deploy-gate }
+    - { src: infra-apply, dest: /usr/local/sbin/infra-apply }
+    - { src: infra-compose-guard, dest: /usr/local/libexec/infra-compose-guard }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Allow the deploy user to run only the release script as root
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ deploy_user }}"
+    content: "{{ deploy_user }} ALL={{ deploy_sudo_rule }}\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Keep the deploy user's .ssh directory owned by root
+  ansible.builtin.file:
+    path: "{{ deploy_account.home }}/.ssh"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Trust only the CI deploy key for the deploy user, forced to the release gate
+  ansible.builtin.copy:
+    dest: "{{ deploy_account.home }}/.ssh/authorized_keys"
+    content: "restrict,command=\"/usr/local/sbin/infra-deploy-gate\" {{ ci_key_line }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the deploy user's authorized_keys file
+  ansible.builtin.stat:
+    path: "{{ deploy_account.home }}/.ssh/authorized_keys"
+  register: ci_authorized_keys_file
+
+- name: Read what the deploy user trusts
+  ansible.builtin.slurp:
+    src: "{{ deploy_account.home }}/.ssh/authorized_keys"
+  register: ci_authorized_keys
+
+- name: Require exactly the CI deploy key, forced to the release gate, in a file only root can change
+  vars:
+    ci_lines: "{{ (ci_authorized_keys.content | b64decode).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
+    ci_prefix: 'restrict,command="/usr/local/sbin/infra-deploy-gate" '
+  ansible.builtin.assert:
+    that:
+      - ci_lines | length == 1
+      - ci_lines[0].startswith(ci_prefix)
+      - ci_lines[0][ci_prefix | length:] is match(ssh_public_key_pattern)
+      - ci_lines[0][ci_prefix | length:] | regex_search('^[^ ]+ [^ ]+') == ci_key_line | regex_search('^[^ ]+ [^ ]+')
+      - ci_authorized_keys_file.stat.pw_name == 'root'
+      - not ci_authorized_keys_file.stat.woth and not ci_authorized_keys_file.stat.wgrp
+    fail_msg: >-
+      {{ deploy_account.home }}/.ssh/authorized_keys must be owned by root, writable only by root, and hold exactly one line:
+      {{ ci_prefix }}{{ ci_key_line }}.
+    quiet: true

@@ -1,0 +1,42 @@
+---
+# Runs one role's verify tasks on localhost against the fakes in
+# ci/verify-tasks.sh: ansible-playbook ... -e verify_role=<role>.
+- name: Role verify tasks against fakes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../production.yml
+    - ../roles/host/defaults/main.yml
+  tasks:
+    - name: Edge verify
+      ansible.builtin.import_tasks: ../roles/edge/tasks/verify.yml
+      when: verify_role == 'edge'
+    - name: Watchtower verify
+      ansible.builtin.import_tasks: ../roles/watchtower/tasks/verify.yml
+      when: verify_role == 'watchtower'
+    - name: Autoheal verify
+      ansible.builtin.import_tasks: ../roles/autoheal/tasks/verify.yml
+      when: verify_role == 'autoheal'
+    - name: Beszel verify
+      ansible.builtin.import_tasks: ../roles/beszel/tasks/verify.yml
+      when: verify_role == 'beszel'
+    - name: Docker verify
+      ansible.builtin.import_tasks: ../roles/docker/tasks/verify.yml
+      when: verify_role == 'docker'
+    - name: GPU verify
+      ansible.builtin.import_tasks: ../roles/gpu/tasks/verify.yml
+      when: verify_role == 'gpu'
+    - name: Host verify
+      ansible.builtin.import_tasks: ../roles/host/tasks/verify.yml
+      when: verify_role == 'host'
+    - name: Quiet hours verify
+      ansible.builtin.import_tasks: ../roles/quiet/tasks/verify.yml
+      when: verify_role == 'quiet'
+    - name: Provision SSH route
+      ansible.builtin.import_tasks: ../tasks/ssh-route.yml
+      when: verify_role == 'ssh_route'
+    - name: Report the SSH route
+      ansible.builtin.debug:
+        msg: "ssh_outside_tailnet={{ ssh_outside_tailnet }}"
+      when: verify_role == 'ssh_route'

@@ -1,0 +1,31 @@
+[Unit]
+Description=Carry out a signed power request from Home (poweroff or reboot, nothing else)
+Documentation=file:///usr/local/sbin/home-power
+RequiresMountsFor=/run/home-power
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/home-power
+SyslogIdentifier=home-power
+TimeoutStartSec=60
+UMask=0077
+# /var/lib/home-power: the last accepted action and the nonces seen, root's alone.
+StateDirectory=home-power
+StateDirectoryMode=0700
+# Reads and removes what home-server (uid 65532) wrote in its 0700 directory;
+# no other privilege. systemctl reaches systemd over its local socket.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/home-power
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+SystemCallArchitectures=native

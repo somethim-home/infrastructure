@@ -1,0 +1,375 @@
+#!/bin/bash
+# The nightly backup to the external USB disk, mounted at /srv/backup
+# (roles/host, infra-backup.timer). Writes nothing at all unless /srv/backup is
+# a mountpoint: with the disk unplugged or not configured it logs a warning and
+# exits 0, so a backup never fills the SSD. Then, as root, umask 077, it writes
+# one dated snapshot:
+#
+#   snapshots/<date>/postgres.sql.gz   pg_dumpall of the shared PostgreSQL, 0600
+#   snapshots/<date>/immich.sql.gz     pg_dumpall of Immich's own PostgreSQL (immich-postgres),
+#                                      0600, only while it runs (Immich is retired since
+#                                      2026-10-20: its stopped data folder is copied instead,
+#                                      as the volume immich-pgdata)
+#   snapshots/<date>/volumes/<volume>/ the apps' own data volumes (below); Beszel, Garage,
+#                                      SFTPGo and Home are each stopped only while their own are copied
+#                                      (SQLite must not change mid-copy) and started right after.
+#                                      The volumes of the apps retired on 2026-10-20 have no
+#                                      container any more and are copied as they are, until the
+#                                      owner has audited them
+#   snapshots/<date>/media/s3/         Garage's objects (/srv/media/s3), copied in the same stop
+#                                      as garage-meta, so the two match
+#   snapshots/<date>/media/home-files/ Home Files' ciphertext (/srv/media/home-files), copied in
+#                                      the same stop as home-data (Home's SQLite), so the two match
+#   snapshots/<date>/media/<name>/     /srv/media/{audiobooks,books,podcasts,photos}; photos
+#                                      without Immich's thumbs and encoded-video (it rebuilds them)
+#   snapshots/latest                   symlink to the newest complete snapshot
+#
+# Every tree is copied with rsync --link-dest against the previous complete
+# snapshot, so a file that did not change is a hard link to yesterday's copy and
+# costs no space; only new and changed files take room. A snapshot is built in
+# snapshots/.<date>.partial and becomes snapshots/<date> (with a .complete
+# marker, then the latest symlink) only when every step succeeded. A failed
+# night leaves its .partial for inspection; the next run deletes it and never
+# links against it.
+#
+# Retention, after a complete snapshot only: the newest 14 snapshots, plus the
+# oldest snapshot of each of the 8 newest ISO weeks (about two months). Before a
+# run, if less than INFRA_BACKUP_MIN_FREE_PERCENT (10) of the disk is free, the
+# oldest snapshots go first, never the newest 2; if that is not enough the run
+# fails without writing.
+#
+# The layout before snapshots (postgres/, immich/, apps/, media/) is migrated:
+# the first snapshot links against the old media/ mirror instead of copying it
+# again, media/ and apps/ are deleted once a complete snapshot exists, and the
+# old postgres/ and immich/ dumps once 14 complete snapshots exist.
+#
+# Every step runs even when an earlier one failed; the script exits 1 if any
+# did, which starts infra-backup-failed.service (an error line in the journal).
+# Never touches the ollama-models and comfyui-data volumes (models and the
+# Stable Diffusion checkpoint download again), Jellyfin's cache and transcodes,
+# or home-keys (Home's keys stay out of the backups; the release writes them
+# again from the GitHub secrets).
+# Restoring: RUNBOOK.md, "Restoring from the backup disk".
+set -euo pipefail
+umask 077
+
+readonly backup_root="${INFRA_BACKUP_ROOT:-/srv/backup}"
+readonly media_root="${INFRA_BACKUP_MEDIA_ROOT:-/srv/media}"
+readonly stamp="${INFRA_BACKUP_DATE:-$(date -u +%F)}"
+readonly min_free_percent="${INFRA_BACKUP_MIN_FREE_PERCENT:-10}"
+readonly snapshots="$backup_root/snapshots"
+readonly partial="$snapshots/.$stamp.partial"
+readonly keep_daily=14
+readonly keep_weekly=8
+readonly keep_minimum=2
+readonly stop_seconds=60
+readonly date_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+# Copied as they are: the retired apps have no container, and the public sites are never stopped.
+# <volume> [<path inside it to leave out>...]
+readonly app_volumes=(
+  "jellyfin-config log cache transcodes data/transcodes"
+  "audiobookshelf-config"
+  "audiobookshelf-metadata cache logs streams"
+  "kavita-config cache temp logs"
+  "open-webui-data cache"
+  "immich-pgdata"
+  "portfolio-media"
+  "hypernova_prizm-storage"
+)
+# <container> <volume or media/<folder>>...: the container is stopped only while
+# these are copied. Garage's objects (media/s3) must match its metadata copy,
+# Home's Files (media/home-files) its database.
+readonly service_data=(
+  "beszel beszel-data"
+  "garage garage-meta media/s3"
+  "sftpgo sftpgo-data"
+  "home-server home-data media/home-files"
+)
+# <folder> [<path inside it to leave out>...]
+readonly mirrored=(audiobooks books podcasts "photos thumbs encoded-video")
+
+failures=0
+stopped=()
+base=""
+
+log() {
+  printf 'infra-backup: %s\n' "$*"
+}
+
+failed() {
+  printf 'infra-backup: FAILED: %s\n' "$*" >&2
+  failures=$((failures + 1))
+}
+
+private_dir() {
+  mkdir -p "$1"
+  chmod 0700 "$1"
+}
+
+# The complete snapshots, oldest first, one date per line.
+complete_snapshots() {
+  local name
+  [ -d "$snapshots" ] || return 0
+  while IFS= read -r name; do
+    [[ "$name" =~ $date_pattern ]] && [ -f "$snapshots/$name/.complete" ] && printf '%s\n' "$name"
+  done < <(find "$snapshots" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort)
+  return 0
+}
+
+free_percent() {
+  local avail size
+  read -r avail size < <(df --output=avail,size -B1 "$backup_root" | tail -n 1)
+  [ "${size:-0}" -gt 0 ] || { echo 0; return; }
+  echo $((avail * 100 / size))
+}
+
+remove_snapshot() {
+  rm -rf -- "${snapshots:?}/$1"
+  log "removed the snapshot $1"
+}
+
+# Frees room before the run: the oldest complete snapshots go first, never the
+# newest $keep_minimum. Fails the run (exit 1, nothing written) if that is not enough.
+ensure_space() {
+  local -a done_list
+  local free
+  free="$(free_percent)"
+  while [ "$free" -lt "$min_free_percent" ]; do
+    mapfile -t done_list < <(complete_snapshots)
+    if [ "${#done_list[@]}" -le "$keep_minimum" ]; then
+      failed "only ${free}% of $backup_root is free (need ${min_free_percent}%) and only ${#done_list[@]} snapshot(s) are left to keep; nothing was written. Free space on the backup disk or use a bigger one"
+      exit 1
+    fi
+    log "only ${free}% of $backup_root is free (need ${min_free_percent}%): removing the oldest snapshot"
+    remove_snapshot "${done_list[0]}"
+    free="$(free_percent)"
+  done
+}
+
+# Keeps the newest $keep_daily snapshots and the oldest snapshot of each of the
+# $keep_weekly newest ISO weeks; removes the rest.
+prune_snapshots() {
+  local -a done_list weeks=()
+  local -A keep=() first_of_week=()
+  local name week i
+  mapfile -t done_list < <(complete_snapshots)
+  [ "${#done_list[@]}" -gt "$keep_minimum" ] || return 0
+  for ((i = ${#done_list[@]} - 1; i >= 0 && i >= ${#done_list[@]} - keep_daily; i--)); do
+    keep[${done_list[$i]}]=1
+  done
+  for name in "${done_list[@]}"; do
+    week="$(date -u -d "$name" +%G-%V)"
+    if [ -z "${first_of_week[$week]+set}" ]; then
+      first_of_week[$week]="$name"
+      weeks+=("$week")
+    fi
+  done
+  for ((i = ${#weeks[@]} - 1; i >= 0 && i >= ${#weeks[@]} - keep_weekly; i--)); do
+    keep[${first_of_week[${weeks[$i]}]}]=1
+  done
+  for name in "${done_list[@]}"; do
+    [ -n "${keep[$name]+set}" ] || remove_snapshot "$name"
+  done
+}
+
+# Removes the layout from before snapshots once snapshots supersede it.
+retire_old_layout() {
+  local count name
+  count="$(complete_snapshots | wc -l)"
+  [ "$count" -ge 1 ] || return 0
+  for name in media apps; do
+    if [ -d "$backup_root/$name" ]; then
+      rm -rf -- "${backup_root:?}/$name"
+      log "removed the pre-snapshot $backup_root/$name (the snapshots hold it now)"
+    fi
+  done
+  [ "$count" -ge "$keep_daily" ] || return 0
+  for name in postgres immich; do
+    if [ -d "$backup_root/$name" ]; then
+      rm -rf -- "${backup_root:?}/$name"
+      log "removed the pre-snapshot dumps in $backup_root/$name"
+    fi
+  done
+}
+
+start_stopped() {
+  local name
+  for name in "${stopped[@]}"; do
+    docker start "$name" >/dev/null 2>&1 || failed "$name could not be started again; sudo docker start $name"
+  done
+  stopped=()
+}
+
+# dump <container> <file> <what> [pg_dumpall options...]
+dump() {
+  local container="$1" file="$partial/$2" what="$3"
+  shift 3
+  if docker exec "$container" pg_dumpall "$@" -U postgres | gzip -c >"$file.tmp" &&
+    [ "$(gzip -cd "$file.tmp" | head -c 64 | wc -c)" -gt 0 ]; then
+    chmod 0600 "$file.tmp"
+    mv -f "$file.tmp" "$file"
+    log "$what dumped"
+  else
+    rm -f "$file.tmp"
+    failed "pg_dumpall of the $container container failed"
+  fi
+}
+
+backup_postgres() {
+  dump postgresql postgres.sql.gz PostgreSQL
+}
+
+# Immich kept its own database (not the shared one). Dumped only while it runs;
+# since its retirement the stopped data folder is copied as the volume
+# immich-pgdata instead. A dump that fails while it runs fails the backup.
+backup_immich() {
+  if [ "$(docker container inspect --format '{{.State.Running}}' immich-postgres 2>/dev/null || true)" != true ]; then
+    log "immich-postgres is not running (Immich is retired); its data folder is copied as the volume immich-pgdata"
+    return 0
+  fi
+  dump immich-postgres immich.sql.gz "Immich's database" --clean --if-exists
+}
+
+# copy_tree <source> <target> <link-dest or empty> [<path to leave out>...]
+copy_tree() {
+  local source="$1" target="$2" link="$3" exclude
+  local -a options=(--archive --delete --delete-excluded --numeric-ids)
+  shift 3
+  for exclude in "$@"; do
+    options+=("--exclude=/$exclude/")
+  done
+  [ -z "$link" ] || [ ! -d "$link" ] || options+=("--link-dest=$link")
+  mkdir -p "$target"
+  rsync "${options[@]}" "$source/" "$target/"
+}
+
+# stop_one <container>: stops it if it runs; start_stopped starts it again.
+stop_one() {
+  local name="$1"
+  [ "$(docker container inspect --format '{{.State.Running}}' "$name" 2>/dev/null || true)" = true ] || return 0
+  if docker stop --time "$stop_seconds" "$name" >/dev/null 2>&1; then
+    stopped+=("$name")
+  else
+    failed "$name could not be stopped; its data is copied while it runs"
+  fi
+}
+
+# copy_volume <volume> [<path inside it to leave out>...]
+copy_volume() {
+  local volume="$1" path
+  shift
+  if ! path="$(docker volume inspect --format '{{.Mountpoint}}' "$volume" 2>/dev/null)" || [ ! -d "$path" ]; then
+    log "the volume $volume does not exist yet; skipped"
+    return 0
+  fi
+  if copy_tree "$path" "$partial/volumes/$volume" "${base:+$snapshots/$base/volumes/$volume}" "$@"; then
+    log "copied the volume $volume"
+  else
+    failed "rsync of the volume $volume failed"
+  fi
+}
+
+backup_apps() {
+  local spec name item
+  local -a parts
+  private_dir "$partial/volumes"
+  for spec in "${app_volumes[@]}"; do
+    read -r -a parts <<<"$spec"
+    copy_volume "${parts[@]}"
+  done
+  for spec in "${service_data[@]}"; do
+    read -r -a parts <<<"$spec"
+    name="${parts[0]}"
+    stop_one "$name"
+    for item in "${parts[@]:1}"; do
+      if [[ "$item" == media/* ]]; then
+        mirror_one "${item#media/}"
+      else
+        copy_volume "$item"
+      fi
+    done
+    start_stopped
+  done
+}
+
+# mirror_one <name> [<path inside it to leave out>...]: copies /srv/media/<name>
+# into the snapshot, linked against the previous snapshot (or, before the first
+# snapshot, the old media/ mirror).
+mirror_one() {
+  local name="$1" source previous=""
+  shift
+  source="$media_root/$name"
+  private_dir "$partial/media"
+  if [ -n "$base" ]; then
+    previous="$snapshots/$base/media/$name"
+  elif [ -d "$backup_root/media/$name" ]; then
+    previous="$backup_root/media/$name"
+  fi
+  if [ ! -d "$source" ]; then
+    failed "$source does not exist (is the media disk mounted?); not copied"
+    return 0
+  fi
+  # An empty library where the last backup had files is almost always a missing disk, not a deletion.
+  if [ -z "$(find "$source" -mindepth 1 -print -quit)" ] && [ -n "$previous" ] && [ -n "$(find "$previous" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+    failed "$source is empty but the last backup of it is not; not backing up an empty library (if it really is empty, delete $previous by hand)"
+    return 0
+  fi
+  if copy_tree "$source" "$partial/media/$name" "$previous" "$@"; then
+    log "copied $source"
+  else
+    failed "rsync of $source failed"
+  fi
+}
+
+mirror_media() {
+  local spec
+  local -a parts
+  for spec in "${mirrored[@]}"; do
+    read -r -a parts <<<"$spec"
+    mirror_one "${parts[@]}"
+  done
+}
+
+finish() {
+  if [ "$failures" -gt 0 ]; then
+    log "the incomplete snapshot is kept in $partial for inspection; the next run deletes it"
+    return 0
+  fi
+  touch "$partial/.complete"
+  rm -rf -- "${snapshots:?}/$stamp"
+  mv -T "$partial" "$snapshots/$stamp"
+  ln -sfn "$stamp" "$snapshots/.latest.tmp"
+  mv -T "$snapshots/.latest.tmp" "$snapshots/latest"
+  log "snapshot $snapshots/$stamp is complete"
+  prune_snapshots
+  retire_old_layout
+}
+
+if ! mountpoint -q "$backup_root"; then
+  log "WARNING: $backup_root is not a mountpoint (the backup disk is unplugged, or backup_disk_uuid is not set): nothing was written"
+  exit 0
+fi
+exec 9>"$backup_root/.lock"
+flock -n 9 || { failed "another backup is running"; exit 1; }
+trap start_stopped EXIT
+chmod 0700 "$backup_root"
+private_dir "$snapshots"
+
+# A failed night's .partial is never a base, and goes now.
+find "$snapshots" -mindepth 1 -maxdepth 1 -name '.*.partial' -exec rm -rf {} +
+ensure_space
+# The newest complete snapshot (today's, on a second run the same day).
+base="$(complete_snapshots | tail -n 1)"
+private_dir "$partial"
+
+backup_postgres
+backup_immich
+backup_apps
+mirror_media
+finish
+
+if [ "$failures" -gt 0 ]; then
+  printf 'infra-backup: FAILED: %s step(s) failed; see the lines above\n' "$failures" >&2
+  exit 1
+fi
+log "backup OK: $stamp"

@@ -1,0 +1,100 @@
+---
+# Wake-on-LAN (docs/host.md, "Wake-on-LAN"): the wired NIC (lan_interface) wakes
+# the powered-off server on a magic packet from another device on the LAN. The
+# firmware must keep the NIC powered while off (RUNBOOK.md, "BIOS"); this makes
+# the NIC listen. Ubuntu Server configures the LAN through netplan, so the
+# setting goes in a netplan file of its own, merged into the installer's
+# definition of the interface: netplan writes it into the link settings udev
+# applies at every boot. ethtool turns it on now, without touching the network.
+- name: Install ethtool
+  ansible.builtin.apt:
+    name: ethtool
+    state: present
+
+- name: Require the LAN interface production.yml names
+  ansible.builtin.assert:
+    that:
+      - lan_interface is string and lan_interface is match('^[A-Za-z0-9_.-]{1,15}$')
+      - lan_interface in ansible_facts['interfaces']
+    fail_msg: >-
+      production.yml lan_interface is {{ lan_interface }}, which this host does not have
+      (it has {{ ansible_facts['interfaces'] | sort | join(', ') }}; ip -br link names the wired one).
+    quiet: true
+
+- name: Read the ethernet interfaces netplan configures
+  ansible.builtin.command: netplan get ethernets
+  register: netplan_ethernets
+  changed_when: false
+  check_mode: false
+
+# The installer names the definition after the interface, or matches the NIC
+# and renames it with set-name; either way the override must use that id.
+- name: Find netplan's definition of the LAN interface
+  vars:
+    ethernets: "{{ netplan_ethernets.stdout | from_yaml or {} }}"
+  ansible.builtin.set_fact:
+    lan_netplan_ids: >-
+      {{ ethernets | dict2items
+         | selectattr('key', 'equalto', lan_interface)
+         | map(attribute='key') | list
+         + (ethernets | dict2items | rejectattr('key', 'equalto', lan_interface)
+            | selectattr('value.set-name', 'defined') | selectattr('value.set-name', 'equalto', lan_interface)
+            | map(attribute='key') | list) }}
+
+- name: Require netplan to configure the LAN interface exactly once
+  ansible.builtin.assert:
+    that:
+      - lan_netplan_ids | length == 1
+    fail_msg: >-
+      netplan configures {{ lan_interface }} {{ lan_netplan_ids | length }} times (netplan get ethernets:
+      {{ netplan_ethernets.stdout | trim }}). Wake-on-LAN is set as a netplan override of the installer's
+      definition; with none (another network manager) or several, set it by hand (docs/host.md, "Wake-on-LAN").
+    quiet: true
+
+- name: Turn on magic-packet wake for the LAN interface at every boot
+  ansible.builtin.copy:
+    dest: /etc/netplan/60-infra-wake-on-lan.yaml
+    content: |
+      # Managed by Ansible (roles/host/tasks/wake.yml). See docs/host.md, "Wake-on-LAN".
+      network:
+        version: 2
+        ethernets:
+          {{ lan_netplan_ids[0] }}:
+            wakeonlan: true
+    owner: root
+    group: root
+    mode: "0600"
+  register: wake_netplan
+
+# Writes the link settings udev applies at boot; nothing is re-applied now.
+- name: Let netplan write the boot-time link settings
+  ansible.builtin.command: netplan generate
+  when: wake_netplan is changed
+  changed_when: true
+
+- name: Read back what netplan will set
+  ansible.builtin.command:
+    argv: [netplan, get, "ethernets.{{ lan_netplan_ids[0] }}.wakeonlan"]
+  register: wake_netplan_value
+  changed_when: false
+  check_mode: false
+
+- name: Require netplan to keep magic-packet wake on
+  ansible.builtin.assert:
+    that:
+      - wake_netplan_value.stdout | trim == 'true'
+    fail_msg: >-
+      netplan get ethernets.{{ lan_netplan_ids[0] }}.wakeonlan says {{ wake_netplan_value.stdout | trim }}:
+      a later file in /etc/netplan turns it off again.
+    quiet: true
+
+- name: Listen for the magic packet now
+  ansible.builtin.shell: |
+    set -eu
+    if ethtool {{ lan_interface | quote }} | grep -Eq '^[[:space:]]*Wake-on:[[:space:]]*[a-z]*g'; then exit 0; fi
+    ethtool -s {{ lan_interface | quote }} wol g
+    echo turned-on
+  args:
+    executable: /bin/bash
+  register: wake_now
+  changed_when: "'turned-on' in wake_now.stdout"

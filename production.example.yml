@@ -1,0 +1,139 @@
+---
+# EXAMPLE values for production.yml, for readers and forks. Nothing reads this
+# file: provision.yml and release.yml load production.yml, which holds the
+# owner's real values. To run this repository on your own server, copy this
+# file over production.yml and edit it (docs/variables.md lists every value
+# that is specific to one setup, and where else such values live).
+# Facts about the one production host, a dedicated home server on the owner's
+# LAN, shared by provision.yml and release.yml. No secrets here: app secrets and
+# the Cloudflare Tunnel token live in the GitHub production Environment and
+# never reach provisioning.
+
+# Tailnet hostname of the server; provisioning names the node after it.
+server_name: infra-host
+tailscale_server_tag: "tag:infra-server"
+tailscale_ci_tag: "tag:infra-ci"
+
+# Confirm both on the host before provisioning (RUNBOOK.md, "Confirm the host's
+# facts"): lsb_release -cs, and the major of docker version's Server.Version.
+# provision-checks refuses to run when either differs.
+ubuntu_release: resolute
+docker_engine_major: 29
+
+reboot_time: "04:00"
+
+# The NVIDIA RTX 2060 (12 GB). roles/gpu installs Ubuntu's server driver of
+# this branch (ubuntu-drivers --gpgpu, signed modules) and the NVIDIA Container
+# Toolkit, and roles/docker adds the nvidia runtime. Confirm the branch on the
+# host with `ubuntu-drivers list --gpgpu` (RUNBOOK.md, "GPU, AI and media").
+# false: provisioning skips the GPU (a host without the card), and a release
+# refuses, since Ollama reserves it.
+gpu_enabled: true
+nvidia_driver_major: 580
+
+# The ai stack (Ollama) runs as this account,
+# which roles/host creates; its volumes belong to it.
+ai_uid: 2001
+ai_gid: 2001
+# The models ollama-pull fetches on every release, in this order (the small one
+# first, so "Quick" answers soonest after a fresh volume). Once every pull
+# succeeded it removes any model not listed here, so the volume does not grow
+# with models nobody uses. Each fits the RTX 2060's 12 GB. The 14B models are
+# kept for the owner's own apps (Open WebUI, which used them, is retired).
+# Names are <model>:<tag>, never a bare name.
+ollama_models:
+  - qwen3:4b
+  - qwen2.5-coder:14b
+  - qwen3:14b
+# The model hypernova's provider asks Ollama for; it must be in ollama_models.
+hypernova_ollama_model: qwen3:4b
+
+# The media stack (links page, status dashboard, S3 and file manager) runs as this account,
+# which roles/host creates and which owns the library; admin is in its group.
+media_uid: 2000
+media_gid: 2000
+# Filesystem UUIDs (sudo blkid, RUNBOOK.md, "Disks"): the internal 1 TB HDD
+# mounted at /srv/media, and the external 1 TB USB HDD at /srv/backup. Empty:
+# not mounted (provisioning says so); the library then lives on the SSD and
+# the nightly backup writes nothing.
+media_disk_uuid: "00000000-0000-4000-8000-000000000001"
+backup_disk_uuid: "00000000-0000-4000-8000-000000000002"
+# UTC, at least an hour before reboot_time (provisioning checks). It falls inside
+# the quiet hours below, and the backup disk is audible: kept there by the
+# owner's choice (docs/host.md, "Quiet hours").
+backup_time: "02:30"
+
+# Quiet hours (roles/quiet, docs/host.md "Quiet hours"): the server stands in a
+# room people sleep in. From start to end, wall clock in the zone below (not UTC, so
+# the edges follow summer time), the GPU's power limit drops to
+# quiet_gpu_power_limit_w (the card's default is about 184 W; nvidia-smi -q -d
+# POWER shows its range, and a value outside it is moved to the nearest end)
+# and the CPU's top frequency to quiet_cpu_max_percent of its maximum. At the
+# end both go back to the card's and the CPU's defaults. false: provisioning
+# turns the timers off and restores the defaults.
+quiet_hours_enabled: true
+quiet_hours_start: "23:00"
+quiet_hours_end: "08:00"
+quiet_hours_timezone: Europe/London
+quiet_gpu_power_limit_w: 130
+quiet_cpu_max_percent: 70
+
+swap_size: 2G
+# The wired LAN interface (the board's Realtek NIC; ip -br link shows its MAC).
+# roles/host makes it wake the powered-off server on a magic packet from the
+# LAN (a netplan override, wakeonlan: true) and reads back Wake-on: g with
+# ethtool; the firmware must keep it powered while off (RUNBOOK.md, "BIOS";
+# docs/host.md, "Wake-on-LAN"). ip -br link names it.
+lan_interface: enp8s0
+# Docker-published ports the LAN-facing interface may reach. None: the public
+# arrives only through the Cloudflare Tunnel, which dials out, so every new
+# inbound connection to a published port is dropped (roles/host).
+public_ports: []
+
+apex_domain: example.com
+www_domain: www.example.com
+hypernova_domain: hypernova.example.com
+# The tailnet-only links page's https name, and under it one https name per
+# tailnet service (<label>.<home_domain>), all on one Let's Encrypt
+# certificate (home_domain and *.home_domain) that home-tls serves on the
+# Tailscale address. DNS: unproxied A records home and *.home to the server's
+# Tailscale address (RUNBOOK.md, "The links page"). The keys are fixed (the
+# stacks refer to them); the values are the names' first labels. acme_email
+# is the contact Let's Encrypt has for the certificate.
+home_domain: home.example.com
+home_hosts:
+  files: files            # SFTPGo, the file manager (and WebDAV at /dav)
+  status: status          # Beszel
+  s3: s3                  # Garage's S3 API (path-style, region garage)
+acme_email: owner@example.com
+# The owner's login on the Beszel status dashboard (https://status.<home_domain>);
+# its password is the BESZEL_PASSWORD secret.
+status_owner_email: owner@example.com
+
+# Home (stack/home, https://<home_domain>) runs as its image's account, 65532,
+# which roles/host creates as home-server and which owns home-data, home-keys
+# and the Files folder on the media disk. Not a choice: the image is built for it.
+home_uid: 65532
+home_gid: 65532
+# The storage pool Home Files hands out (HOME_FILES_CAPACITY: bytes, or with
+# K, M, G or T, binary). Set on purpose: the media disk (1 TB) is shared with
+# Garage's objects and the kept library folders, so Home's own default (the
+# disk's free space at start) would promise space others use. Raise it as the
+# disk allows (docs/stacks.md, "home").
+home_files_capacity: 600G
+# The read-only Beszel user home-server signs in as for its Status card
+# (HOME_BESZEL_USER), its password the HOME_BESZEL_PASSWORD secret. Empty: no
+# Status card. The owner creates the user in Beszel first (RUNBOOK.md, "Home").
+home_beszel_user: ""
+
+portfolio_image_repo: ghcr.io/example/portfolio
+home_image_repo: ghcr.io/example/home-server
+hypernova_provider_image_repo: ghcr.io/example/hypernova-provider
+hypernova_web_image_repo: ghcr.io/example/hypernova-web
+
+
+# Tor Snowflake standalone proxy (roles/snowflake, docs/host.md "Snowflake"): relays
+# up to 10 censored users at once to Tor's Snowflake bridge over WebRTC. Host
+# network, fenced by uid off every local and private address. false stops and
+# removes it at the next provisioning run (--tags snowflake).
+snowflake_enabled: true

@@ -1,0 +1,30 @@
+---
+# Root never logs in: the first run uses the account the Ubuntu installer
+# created, every later run the admin user (docs/host.md, "Accounts").
+ssh_permit_root_login: "no"
+admin_user: admin
+deploy_user: deploy
+# The only inbound rules, all on the tailnet: SSH, and the tailnet-only ports
+# (roles/host/defaults/main.yml, tailnet_ports: the http://infra-host/ redirect
+# on 80 and home-tls on 443, the https front of Home and every service, the Beszel status dashboard on 8090, Garage's S3 API
+# on 3900 and the SFTPGo file manager on 8091). LAN 22 is added or
+# removed separately in firewall.yml (ssh_outside_tailnet). No public web port:
+# the public arrives through the Cloudflare Tunnel, which dials out.
+ufw_allowed:
+  - in on tailscale0 proto tcp to any port 22
+  - in on tailscale0 proto tcp to any port 80
+  - in on tailscale0 proto tcp to any port 443
+  - in on tailscale0 proto tcp to any port 3900
+  - in on tailscale0 proto tcp to any port 8090
+  - in on tailscale0 proto tcp to any port 8091
+# Ports of the apps retired on 2026-10-20 (Immich 2283, Kavita 5000, Open WebUI
+# 8080, the media engine 8096, Audiobookshelf 13378): their rules are deleted.
+ufw_retired:
+  - in on tailscale0 proto tcp to any port 2283
+  - in on tailscale0 proto tcp to any port 5000
+  - in on tailscale0 proto tcp to any port 8080
+  - in on tailscale0 proto tcp to any port 8096
+  - in on tailscale0 proto tcp to any port 13378
+ssh_public_key_pattern: '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh[.]com|sk-ecdsa-sha2-nistp256@openssh[.]com) [A-Za-z0-9+/]+={0,3}( .*)?$'
+deploy_sudo_rule: "(root) NOPASSWD: /usr/local/sbin/infra-apply release, /usr/local/sbin/infra-apply status"
+deploy_ssh_public_key_file: "{{ role_path }}/files/deploy_key.pub"

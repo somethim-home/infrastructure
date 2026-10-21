@@ -1,0 +1,200 @@
+---
+# Host facts for the release script, the Docker firewall, swap, power (a home
+# server must never sleep, and wakes on a magic packet), the shared Docker networks and database volume
+# every stack uses as external, and the service accounts and volumes of the
+# hardened stacks.
+- name: Create the host configuration directory
+  ansible.builtin.file:
+    path: /etc/infra
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The address the tailnet-only ports are published on (roles/tailscale joined
+# the tailnet just before this role). It stays the node's address for as long
+# as the node exists; a re-joined node gets a new one, and this run plus a
+# release move the ports to it.
+- name: Read this host's Tailscale IPv4
+  ansible.builtin.command: tailscale ip -4
+  register: tailscale_ip_out
+  changed_when: false
+  check_mode: false
+
+- name: Require one Tailscale IPv4 in 100.64.0.0/10
+  vars:
+    tailscale_ipv4_pattern: '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+  ansible.builtin.assert:
+    that:
+      - tailscale_ip_out.stdout_lines | length == 1
+      - tailscale_ip_out.stdout | trim is match(tailscale_ipv4_pattern)
+    fail_msg: "tailscale ip -4 printed {{ tailscale_ip_out.stdout_lines }}, not one address in 100.64.0.0/10; is the host on the tailnet (tailscale status)?"
+    quiet: true
+
+- name: Note the Tailscale IPv4
+  ansible.builtin.set_fact:
+    tailscale_ipv4: "{{ tailscale_ip_out.stdout | trim }}"
+
+# Docker binds a tailnet-only port to the Tailscale address, which exists only
+# once tailscaled is up; at boot Docker may start first. Non-local binds let the
+# bind succeed regardless (the DNAT rule needs no local address at all).
+- name: Let services bind the Tailscale address before tailscaled has brought it up
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/62-infra-tailnet-bind.conf
+    content: "net.ipv4.ip_nonlocal_bind = 1\n"
+    owner: root
+    group: root
+    mode: "0644"
+  register: nonlocal_bind
+
+- name: Apply the bind setting now
+  ansible.builtin.command: sysctl --load /etc/sysctl.d/62-infra-tailnet-bind.conf
+  when: nonlocal_bind is changed
+  changed_when: true
+
+- name: Tell the release script and the firewall about this host
+  ansible.builtin.copy:
+    dest: /etc/infra/host.env
+    content: |
+      PUBLIC_INTERFACE={{ ansible_facts['default_ipv4']['interface'] }}
+      PUBLIC_PORTS={{ public_ports | join(',') }}
+      TAILNET_INTERFACE={{ tailnet_interface }}
+      TAILSCALE_IP={{ tailscale_ipv4 }}
+      AI_USER={{ ai_uid }}:{{ ai_gid }}
+      MEDIA_USER={{ media_uid }}:{{ media_gid }}
+      HOME_USER={{ home_uid }}:{{ home_gid }}
+      PORTFOLIO_IMAGE_REPO={{ portfolio_image_repo }}
+      HYPERNOVA_PROVIDER_IMAGE_REPO={{ hypernova_provider_image_repo }}
+      HYPERNOVA_WEB_IMAGE_REPO={{ hypernova_web_image_repo }}
+      HOME_IMAGE_REPO={{ home_image_repo }}
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply the Docker firewall
+
+- name: Install the Docker firewall
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: infra-firewall, dest: /usr/local/sbin/infra-firewall, mode: "0755" }
+    - { src: infra-firewall.service, dest: /etc/systemd/system/infra-firewall.service, mode: "0644" }
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Apply the Docker firewall
+
+- name: Keep the Docker firewall on after every boot and Docker restart
+  ansible.builtin.systemd:
+    name: infra-firewall.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply the firewall before anything checks it
+  ansible.builtin.meta: flush_handlers
+
+- name: Read the Docker firewall
+  ansible.builtin.command: iptables -S INFRA-PUBLIC
+  register: public_rules
+  changed_when: false
+  check_mode: false
+
+- name: Require the LAN-facing interface to reach only this host's public ports (none)
+  ansible.builtin.assert:
+    that:
+      - public_rules.stdout_lines | select('search', '-j RETURN$') | map('regex_replace', '^.*--ctorigdstport ([0-9]+) -j RETURN$', '\\1') | list == public_ports | map('string') | list
+      - "'-A INFRA-PUBLIC -j DROP' in public_rules.stdout_lines"
+    fail_msg: "INFRA-PUBLIC does not admit exactly {{ public_ports }}: {{ public_rules.stdout_lines }}"
+    quiet: true
+
+- name: Make sure the host has swap for memory spikes
+  ansible.builtin.import_tasks: swap.yml
+
+- name: Keep the server awake and running
+  ansible.builtin.import_tasks: power.yml
+
+- name: Let a magic packet on the LAN switch the server on
+  ansible.builtin.import_tasks: wake.yml
+
+# Moved here from roles/edge so they exist before any stack or the edge starts.
+# ai carries Ollama's model downloads; llm is internal (no route out) and joins
+# only Ollama and hypernova's provider; media carries the links page, the status
+# dashboard, S3 and the file manager, and their ports.
+- name: Create shared Docker networks
+  ansible.builtin.shell: "docker network inspect {{ item.name }} >/dev/null 2>&1 || docker network create {{ '--internal ' if item.internal else '' }}{{ item.name }}"
+  loop:
+    - { name: edge, internal: false }
+    - { name: data, internal: false }
+    - { name: ai, internal: false }
+    - { name: llm, internal: true }
+    - { name: media, internal: false }
+  loop_control:
+    label: "{{ item.name }}"
+  register: network_create
+  changed_when: "network_create.stdout | length > 0"
+
+# The immich network belonged to the photo library retired on 2026-10-20.
+- name: Remove the retired immich network once nothing is attached to it
+  ansible.builtin.shell: |
+    set -eu
+    docker network inspect immich >/dev/null 2>&1 || exit 0
+    if [ -n "$(docker network inspect --format '{{ '{{' }}range .Containers{{ '}}' }}x{{ '{{' }}end{{ '}}' }}' immich)" ]; then
+      echo "immich still has containers attached; release first so they are removed"
+      exit 0
+    fi
+    docker network rm immich >/dev/null && echo removed
+  register: immich_network
+  changed_when: "'removed' in immich_network.stdout"
+
+- name: Read whether llm is internal
+  ansible.builtin.command:
+    argv: [docker, network, inspect, --format, "{{ '{{' }}.Internal{{ '}}' }}", "{{ item }}"]
+  loop: [llm]
+  register: internal_networks
+  changed_when: false
+  check_mode: false
+
+- name: Require llm to have no route out
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim == 'true'
+    fail_msg: "The {{ item.item }} network exists but is not internal; with every stack that joins it stopped, docker network rm {{ item.item }} and provision again."
+    quiet: true
+  loop: "{{ internal_networks.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# The database volume is external to its stack, so a release can never create
+# an empty one in its place. Created empty on a fresh host (the first release
+# initialises it); never deleted or replaced once it exists.
+- name: Look for the database volume
+  ansible.builtin.command:
+    argv: [docker, volume, inspect, pgdata-v18]
+  register: pgdata_volume
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Create the database volume
+  ansible.builtin.command:
+    argv: [docker, volume, create, pgdata-v18]
+  when: pgdata_volume.rc != 0
+  changed_when: true
+
+- name: Create the service accounts and their volumes
+  ansible.builtin.import_tasks: accounts.yml
+
+- name: Mount the library and backup disks
+  ansible.builtin.import_tasks: disks.yml
+
+- name: Let Home ask for a poweroff or reboot
+  ansible.builtin.import_tasks: home_power.yml
+
+- name: Back up to the backup disk every night
+  ansible.builtin.import_tasks: backup.yml
+
+- name: Verify the Docker firewall, swap, power, Wake-on-LAN and power request settings
+  ansible.builtin.import_tasks: verify.yml

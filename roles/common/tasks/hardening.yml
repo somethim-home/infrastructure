@@ -1,0 +1,61 @@
+---
+# See docs/host.md — fail2ban, Patching. sshd's policy is owned by ssh_access.yml.
+- name: Install fail2ban
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+
+- name: Configure the fail2ban SSH jail
+  ansible.builtin.copy:
+    src: jail.local
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Ensure fail2ban is enabled and running
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+- name: Keep the clock on UTC, the clock the reboot time uses
+  ansible.builtin.shell: |
+    set -eu
+    if [ "$(timedatectl show --property=Timezone --value)" != Etc/UTC ]; then
+      timedatectl set-timezone Etc/UTC
+      echo changed
+    fi
+  register: utc_clock
+  changed_when: "'changed' in utc_clock.stdout"
+
+# chrony is Ubuntu's time daemon since 25.10 (it replaces systemd-timesyncd).
+- name: Keep the clock in sync with NTP
+  ansible.builtin.service:
+    name: chrony
+    state: started
+    enabled: true
+
+- name: Install security updates every day
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"
+    mode: "0644"
+
+- name: Reboot for kernel updates in the quiet hours
+  ansible.builtin.template:
+    src: 20auto-upgrades-reboot.j2
+    dest: /etc/apt/apt.conf.d/20auto-upgrades-reboot
+    mode: "0644"
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Cap the system journal so it cannot fill the disk or hold much memory
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/50-infra.conf
+    content: "[Journal]\nSystemMaxUse=500M\nSystemMaxFileSize=32M\nRuntimeMaxUse=32M\nMaxRetentionSec=1month\n"
+    mode: "0644"
+  notify: Restart journald

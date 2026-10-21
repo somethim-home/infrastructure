@@ -1,0 +1,56 @@
+# Provisions the one server, a dedicated home machine, from the owner's laptop.
+# Holds no app secrets. First run: over the LAN as the account the Ubuntu
+# installer created (-u <that account> --ask-become-pass, ansible_host = its
+# LAN address); every run after: -u admin --ask-become-pass over the tailnet
+# (RUNBOOK.md, "First provision over the LAN").
+- name: Provision the server from the owner's machine
+  hosts: server
+  become: true
+  # A failed run must still reload Docker and sshd for the config it already wrote.
+  force_handlers: true
+
+  vars_files:
+    - production.yml
+
+  vars:
+    # Ubuntu 26.04 makes `sudo` sudo-rs, whose password prompt Ansible does not recognise
+    # ("Timeout waiting for privilege escalation prompt"). The classic sudo still ships as sudo.ws.
+    ansible_become_exe: sudo.ws
+    # Also a role default, but pre_tasks run outside the role, where role_path is unset.
+    deploy_ssh_public_key_file: "{{ playbook_dir }}/roles/common/files/deploy_key.pub"
+
+  pre_tasks:
+    - name: Check the run, the login and the inventory
+      tags: [always]
+      ansible.builtin.import_tasks: tasks/provision-checks.yml
+
+  roles:
+    - role: common
+      tags: [common]
+    - role: tailscale
+      tags: [tailscale]
+    - role: docker
+      tags: [docker]
+    - role: gpu
+      tags: [gpu]
+    - role: host
+      tags: [host]
+    - role: quiet
+      tags: [quiet]
+    - role: edge
+      tags: [edge]
+    - role: watchtower
+      tags: [watchtower]
+    - role: autoheal
+      tags: [autoheal]
+    - role: beszel
+      tags: [beszel]
+    - role: snowflake
+      tags: [snowflake]
+
+  post_tasks:
+    - name: Check account access and set the SSH login policy
+      tags: [always]
+      ansible.builtin.import_role:
+        name: common
+        tasks_from: ssh_access

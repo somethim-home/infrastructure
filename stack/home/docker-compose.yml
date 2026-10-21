@@ -1,0 +1,122 @@
+# Home, the owner's own app: its web pages, sign-in, the dashboard API and
+# Home Files (end-to-end encrypted family storage), for the owner and his
+# family over the tailnet only. See docs/stacks.md. home-server publishes no
+# port: home-tls (the media stack) serves it at https://home.<domain> over the
+# media network, the only network it joins. It follows :latest with Watchtower
+# like the portfolio; a rollback pins it. It runs as 65532, the account its
+# image runs as, which owns home-data, home-keys, /srv/media/home-files and
+# /run/home-power, the directory it hands power requests to the host through.
+# .env (image, uid, gid) feeds interpolation only; home-server.env holds its
+# settings and no secret, home-keys.env the secrets home-keys writes into
+# files for it.
+# A literal dollar sign is written $$ (Compose would interpolate it).
+name: home
+
+services:
+  # One-shot on every release: the image has no shell and reads its keys and
+  # passwords only from files (HOME_*_FILE), so this writes each secret of
+  # home-keys.env into the home-keys volume, 0400, owned by 65532. An empty
+  # value removes its file. home-server starts only once it exited 0.
+  home-keys:
+    image: busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+    container_name: home-keys
+    user: "${HOME_UID}:${HOME_GID}"
+    mem_limit: 16m
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: home-keys.env
+    entrypoint: [/bin/sh, -c]
+    command:
+      - |
+        set -eu
+        umask 0277
+        write() {
+          rm -f "/keys/.$$1.tmp"
+          if [ -z "$$2" ]; then rm -f "/keys/$$1"; return 0; fi
+          printf '%s' "$$2" >"/keys/.$$1.tmp"
+          mv -f "/keys/.$$1.tmp" "/keys/$$1"
+        }
+        write secret_key "$$HOME_SECRET_KEY"
+        write data_key "$$HOME_DATA_KEY"
+        write smtp_password "$$HOME_SMTP_PASSWORD"
+        write beszel_password "$$HOME_BESZEL_PASSWORD"
+        write power_key "$$HOME_POWER_KEY"
+        echo "home-keys: the keys and passwords are in place"
+    volumes:
+      - type: volume
+        source: home-keys
+        target: /keys
+        volume:
+          nocopy: true
+    networks:
+      - media
+
+  home-server:
+    image: ${HOME_IMAGE}
+    container_name: home-server
+    user: "${HOME_UID}:${HOME_GID}"
+    mem_limit: 384m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: home-server.env
+    volumes:
+      # The SQLite database and its WAL files.
+      - type: volume
+        source: home-data
+        target: /data
+        volume:
+          nocopy: true
+      - type: volume
+        source: home-keys
+        target: /run/keys
+        read_only: true
+        volume:
+          nocopy: true
+      # Home Files: ciphertext only, on the media disk.
+      - type: bind
+        source: /srv/media/home-files
+        target: /files
+        bind:
+          create_host_path: false
+      # Power requests to the host: a signed poweroff or reboot that
+      # home-power.path reads (docs/host.md); a 64 KiB tmpfs of its own.
+      - type: bind
+        source: /run/home-power
+        target: /run/power
+        bind:
+          create_host_path: false
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "/home-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      home-keys:
+        condition: service_completed_successfully
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+      - autoheal=true
+
+networks:
+  media:
+    name: media
+    external: true
+
+volumes:
+  home-data:
+    name: home-data
+    external: true
+  home-keys:
+    name: home-keys
+    external: true

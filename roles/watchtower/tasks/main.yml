@@ -1,0 +1,24 @@
+---
+# See docs/agents.md — Watchtower. Provisioning holds no app secrets: the GHCR
+# login that writes /root/.docker/config.json happens on every release (plans/004).
+- name: Create the watchtower deploy directory
+  ansible.builtin.file:
+    path: /opt/watchtower
+    state: directory
+    mode: "0755"
+
+- name: Ship the watchtower compose file
+  ansible.builtin.copy:
+    src: docker-compose.yml
+    dest: /opt/watchtower/docker-compose.yml
+    mode: "0644"
+
+- name: Bring up watchtower
+  ansible.builtin.command: docker compose up -d --remove-orphans
+  args:
+    chdir: /opt/watchtower
+  register: wt_up
+  changed_when: "'Started' in wt_up.stderr or 'Created' in wt_up.stderr or 'Recreated' in wt_up.stderr"
+
+- name: Verify Watchtower can use the Docker API
+  ansible.builtin.import_tasks: verify.yml

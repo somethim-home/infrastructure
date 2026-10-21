@@ -1,0 +1,10 @@
+# Managed by Ansible (roles/quiet). See docs/host.md, "Quiet hours".
+[Unit]
+Description=Quiet hours begin at {{ quiet_hours_start }} ({{ quiet_hours_timezone }})
+
+[Timer]
+OnCalendar=*-*-* {{ quiet_hours_start }}:00 {{ quiet_hours_timezone }}
+# Not Persistent: infra-quiet-boot.service sets the right state at boot.
+
+[Install]
+WantedBy=timers.target

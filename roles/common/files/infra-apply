@@ -1,0 +1,914 @@
+#!/bin/bash
+# Host side of a release. The deploy user reaches it only through
+# infra-deploy-gate and sudo, with one of two verbs:
+#
+#   infra-apply release < bundle.tgz   validate, install, start and verify a release
+#   infra-apply status                 print the releases and the images that run
+#
+# A release is checked completely (size, file list, checksums, env files,
+# release.env, image references, the compose model of each stack) before
+# anything changes. It is then installed as /opt/infra/releases/<id>, the
+# stacks start in order database, provision.sql, portfolio, hypernova, tunnel,
+# ai, media, home, and the release is verified (containers healthy, Traefik routes each
+# domain to its app, the tunnel is connected, the tailnet-only ports are bound
+# to the Tailscale address alone, socket proxies) before it is marked
+# .verified. `previous` only ever points at a verified
+# release. Output lines start with "infra-apply: "; failures with
+# "infra-apply: FAILED: ". Never prints a secret.
+set -euo pipefail
+umask 077
+
+if [ -n "${SUDO_USER-}" ]; then
+  unset INFRA_APPLY_STACK_DIR INFRA_APPLY_EDGE_DIR INFRA_APPLY_HOST_FILE INFRA_APPLY_GUARD INFRA_APPLY_DOCKER_CONFIG INFRA_APPLY_POWER_KEY_FILE \
+    INFRA_APPLY_WAIT_SECONDS INFRA_APPLY_ROUTE_WAIT_SECONDS INFRA_APPLY_POLL_SECONDS INFRA_APPLY_SETTLE_SECONDS
+fi
+
+readonly stack_dir="${INFRA_APPLY_STACK_DIR:-/opt/infra}"
+readonly edge_dir="${INFRA_APPLY_EDGE_DIR:-/opt/edge}"
+readonly host_file="${INFRA_APPLY_HOST_FILE:-/etc/infra/host.env}"
+# The key Home signs power requests with, made by provisioning on this host;
+# HOME_POWER_KEY in the bundle must be the same (docs/host.md).
+readonly power_key_file="${INFRA_APPLY_POWER_KEY_FILE:-/etc/infra/home-power.key}"
+readonly guard="${INFRA_APPLY_GUARD:-/usr/local/libexec/infra-compose-guard}"
+readonly wait_seconds="${INFRA_APPLY_WAIT_SECONDS:-600}"
+readonly route_wait_seconds="${INFRA_APPLY_ROUTE_WAIT_SECONDS:-60}"
+readonly poll_seconds="${INFRA_APPLY_POLL_SECONDS:-5}"
+# How long verify waits for home-tls to hold a Let's Encrypt certificate
+# (DNS-01 through Cloudflare takes a minute or two on the first start).
+readonly home_tls_wait_seconds="${INFRA_APPLY_HOME_TLS_WAIT_SECONDS:-300}"
+# How long the public check waits for Cloudflare to serve the new release.
+readonly public_wait_seconds="${INFRA_APPLY_PUBLIC_WAIT_SECONDS:-300}"
+# A container counts as ready only once it has run this long without a
+# restart; "running" alone is one sample of a container that may crash-loop.
+readonly settle_seconds="${INFRA_APPLY_SETTLE_SECONDS:-30}"
+readonly max_bundle_bytes=1048576
+readonly max_file_bytes=262144
+readonly releases_dir="$stack_dir/releases"
+readonly release_id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$'
+readonly repo_pattern='^[a-z0-9.-]+(/[a-z0-9._-]+)+$'
+readonly stacks=(database portfolio hypernova tunnel ai media home)
+readonly bundle_files=(
+  manifest.sha256 release.env ghcr.env
+  database/docker-compose.yml database/postgres.env database/provision.sql
+  portfolio/docker-compose.yml portfolio/.env portfolio/portfolio.env
+  hypernova/docker-compose.yml hypernova/.env hypernova/provider.env
+  tunnel/docker-compose.yml tunnel/tunnel.env
+  ai/docker-compose.yml ai/.env
+  media/docker-compose.yml media/.env media/home-tls.env
+  media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
+  home/docker-compose.yml home/.env home/home-server.env home/home-keys.env
+)
+readonly env_files=(release.env ghcr.env database/postgres.env portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env
+  ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
+  home/.env home/home-server.env home/home-keys.env)
+readonly secret_files=(ghcr.env database/postgres.env database/provision.sql portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env
+  ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
+  home/.env home/home-server.env home/home-keys.env manifest.sha256)
+# The only published ports, "<container> <port>", each bound to the host's
+# Tailscale address alone (the compose guard's TAILNET_PORTS).
+readonly tailnet_ports=("home 80" "home-tls 443" "beszel 8090" "garage 3900" "sftpgo 8091")
+# One-shots whose work a release depends on: each must exit 0 (the dashboard's
+# pairing, Garage's layout, key and bucket, and Home's key files).
+readonly checked_one_shots=(beszel-pair garage-setup home-keys)
+readonly tailscale_ip_pattern='^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+readonly service_user_pattern='^[1-9][0-9]*:[1-9][0-9]*$'
+# Traefik and cloudflared, by container name, on the shared edge network.
+readonly traefik_container=edge-traefik
+readonly tunnel_container=cloudflared
+readonly tunnel_metrics_port=2000
+# image key, the env file that sets it, the host.env key naming its repository, its container
+readonly image_specs=(
+  "PORTFOLIO_IMAGE portfolio/.env PORTFOLIO_IMAGE_REPO portfolio"
+  "PROVIDER_IMAGE hypernova/.env HYPERNOVA_PROVIDER_IMAGE_REPO prizm-provider"
+  "WEB_IMAGE hypernova/.env HYPERNOVA_WEB_IMAGE_REPO prizm-web"
+  "HOME_IMAGE home/.env HOME_IMAGE_REPO home-server"
+)
+
+export DOCKER_CONFIG="${INFRA_APPLY_DOCKER_CONFIG:-/root/.docker}"
+
+declare -A repo_of=()
+tailscale_ip=""
+ai_user=""
+media_user=""
+home_user=""
+failure_hint=""
+work_dir=""
+watchtower_stopped=0
+# Watchtower may take this long to finish an update it is in the middle of.
+readonly watchtower_stop_seconds=120
+
+log() {
+  printf 'infra-apply: %s\n' "$*"
+}
+
+fail() {
+  printf 'infra-apply: FAILED: %s\n' "$*" >&2
+  if [ -n "$failure_hint" ]; then
+    printf 'infra-apply: %s\n' "$failure_hint" >&2
+  fi
+  exit 1
+}
+
+cleanup() {
+  if [ "$watchtower_stopped" = 1 ] && ! docker start watchtower >/dev/null 2>&1; then
+    printf 'infra-apply: FAILED: Watchtower could not be started again; run provisioning with --tags watchtower\n' >&2
+  fi
+  if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
+    rm -rf "$work_dir"
+  fi
+}
+
+usage() {
+  printf 'usage: infra-apply release|status\n' >&2
+  exit 64
+}
+
+require_root() {
+  if [ -z "${INFRA_APPLY_STACK_DIR-}" ] && [ "$(id -u)" -ne 0 ]; then
+    fail "infra-apply must run as root"
+  fi
+}
+
+take_lock() {
+  [ -d "$stack_dir" ] || fail "$stack_dir does not exist; run provisioning first"
+  exec 9>"$stack_dir/.lock"
+  flock -n 9 || fail "another release or status is running"
+}
+
+host_value() {
+  local key="$1"
+  [ "$(grep -c "^$key=" "$host_file" || true)" -le 1 ] || fail "$host_file sets $key more than once; run provisioning"
+  sed -n "s/^$key=//p" "$host_file"
+}
+
+load_host() {
+  local spec key file repo_key container repo
+  [ -f "$host_file" ] || fail "$host_file does not exist; run provisioning"
+  for spec in "${image_specs[@]}"; do
+    read -r key file repo_key container <<<"$spec"
+    repo="$(host_value "$repo_key")"
+    [[ "$repo" =~ $repo_pattern ]] || fail "$host_file $repo_key is not an image repository; run provisioning"
+    repo_of[$key]="$repo"
+  done
+  tailscale_ip="$(host_value TAILSCALE_IP)"
+  [[ "$tailscale_ip" =~ $tailscale_ip_pattern ]] || fail "$host_file TAILSCALE_IP is not this host's Tailscale IPv4 (100.64.0.0/10); run provisioning"
+  ai_user="$(host_value AI_USER)"
+  [[ "$ai_user" =~ $service_user_pattern ]] || fail "$host_file AI_USER is not the <uid>:<gid> of the ai account; run provisioning"
+  media_user="$(host_value MEDIA_USER)"
+  [[ "$media_user" =~ $service_user_pattern ]] || fail "$host_file MEDIA_USER is not the <uid>:<gid> of the media account; run provisioning"
+  home_user="$(host_value HOME_USER)"
+  [[ "$home_user" =~ $service_user_pattern ]] || fail "$host_file HOME_USER is not the <uid>:<gid> of the home-server account; run provisioning"
+}
+
+# TAILSCALE_IP feeds the "${TAILSCALE_IP}:<port>:<port>" bindings; the
+# environment wins over a stack's .env, and the guard checks the result.
+compose_in() {
+  local dir="$1"
+  shift
+  TAILSCALE_IP="$tailscale_ip" docker compose --file "$dir/docker-compose.yml" --project-directory "$dir" "$@"
+}
+
+allowed_name() {
+  local name="$1" wanted
+  for wanted in "${bundle_files[@]}"; do
+    [ "$name" != "$wanted" ] || return 0
+  done
+  return 1
+}
+
+untouched() {
+  fail "$1; the running release is untouched"
+}
+
+read_bundle() {
+  local dest="$1" size
+  head -c "$((max_bundle_bytes + 1))" >"$dest"
+  size="$(wc -c <"$dest")"
+  [ "$size" -gt 0 ] || untouched "no bundle arrived on stdin"
+  [ "$size" -le "$max_bundle_bytes" ] || untouched "the bundle is larger than $max_bundle_bytes bytes"
+}
+
+validate_listing() {
+  local bundle="$1" names="$2" types="$3" entry type name wanted
+  LC_ALL=C tar -tzf "$bundle" >"$names" 2>/dev/null || untouched "the bundle is not a gzip-compressed tar archive"
+  LC_ALL=C tar -tvzf "$bundle" 2>/dev/null | cut -c1 >"$types" || untouched "the bundle is not a gzip-compressed tar archive"
+  [ "$(wc -l <"$names")" -eq "$(wc -l <"$types")" ] || untouched "the bundle listing is inconsistent"
+  [ -z "$(LC_ALL=C sort "$names" | uniq -d)" ] || untouched "the bundle names an entry more than once"
+  while IFS= read -r entry; do
+    type="${entry:0:1}"
+    name="${entry:2}"
+    allowed_name "$name" || untouched "the bundle holds an unexpected entry: $(printf '%q' "$name")"
+    [ "$type" = - ] || untouched "the bundle entry $(printf '%q' "$name") is not a regular file"
+  done < <(paste -d ' ' "$types" "$names")
+  for wanted in "${bundle_files[@]}"; do
+    grep -qxF -- "$wanted" "$names" || untouched "the bundle is missing $wanted"
+  done
+}
+
+extract_bundle() {
+  local bundle="$1" dest="$2" expected="$3" found="$4" other
+  mkdir "$dest"
+  if ! (
+    ulimit -f "$((max_file_bytes / 1024))"
+    LC_ALL=C tar -xzf "$bundle" -C "$dest" --no-same-owner --no-same-permissions --keep-old-files
+  ) 2>/dev/null; then
+    untouched "the bundle did not extract cleanly"
+  fi
+  other="$(cd "$dest" && find . -mindepth 1 ! -type f ! \( -type d \( -path ./database -o -path ./portfolio -o -path ./hypernova -o -path ./tunnel -o -path ./ai -o -path ./media -o -path ./home \) \) -print -quit)"
+  [ -z "$other" ] || untouched "the bundle extracted to something other than regular files: $(printf '%q' "${other#./}")"
+  [ -z "$(find "$dest" -type f -size +"${max_file_bytes}c" -print -quit)" ] || untouched "a file in the bundle is larger than $max_file_bytes bytes"
+  (cd "$dest" && find . -mindepth 1 -type f -printf '%P\n' | LC_ALL=C sort) >"$found"
+  cmp -s "$expected" "$found" || untouched "the extracted files differ from the bundle listing"
+}
+
+validate_manifest() {
+  local dir="$1" found="$2" listed="$3" line path
+  : >"$listed"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[0-9a-f]{64}\ \ (.+)$ ]] || untouched "manifest.sha256 has a malformed line"
+    path="${BASH_REMATCH[1]}"
+    if [ "$path" = manifest.sha256 ] || ! allowed_name "$path"; then
+      untouched "manifest.sha256 names an unexpected file: $(printf '%q' "$path")"
+    fi
+    printf '%s\n' "$path" >>"$listed"
+  done <"$dir/manifest.sha256"
+  grep -vxF manifest.sha256 "$found" | cmp -s - <(LC_ALL=C sort "$listed") ||
+    untouched "manifest.sha256 does not list exactly the files in the bundle"
+  (cd "$dir" && LC_ALL=C sha256sum --check --strict --quiet manifest.sha256) >/dev/null 2>&1 ||
+    untouched "a file in the bundle does not match its manifest.sha256 checksum"
+}
+
+validate_env_files() {
+  local dir="$1" file line number
+  for file in "${env_files[@]}"; do
+    number=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      number=$((number + 1))
+      if [ -n "$line" ] && ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        untouched "$file line $number is not KEY=value"
+      fi
+    done <"$dir/$file"
+  done
+  if ! grep -qE '^GHCR_USERNAME=[^[:space:]]+$' "$dir/ghcr.env" || ! grep -qE '^GHCR_TOKEN=[^[:space:]]+$' "$dir/ghcr.env" ||
+    [ "$(grep -c . "$dir/ghcr.env")" -ne 2 ]; then
+    untouched "ghcr.env must set exactly GHCR_USERNAME and GHCR_TOKEN"
+  fi
+  if ! grep -qE '^TUNNEL_TOKEN=[A-Za-z0-9+/_=-]+$' "$dir/tunnel/tunnel.env" || [ "$(grep -c . "$dir/tunnel/tunnel.env")" -ne 1 ]; then
+    untouched "tunnel/tunnel.env must set exactly TUNNEL_TOKEN"
+  fi
+  if ! grep -qE '^CF_DNS_API_TOKEN=[A-Za-z0-9_-]{40,}$' "$dir/media/home-tls.env" || [ "$(grep -c . "$dir/media/home-tls.env")" -ne 1 ]; then
+    untouched "media/home-tls.env must set exactly CF_DNS_API_TOKEN"
+  fi
+  require_env "$dir" media/beszel.env '^BESZEL_HUB_USER_PASSWORD=[A-Za-z0-9]{16,}$'
+  require_env "$dir" media/beszel-pair.env '^OWNER_PASSWORD=[A-Za-z0-9]{16,}$' '^AGENT_TOKEN=[A-Za-z0-9-]{32,}$'
+  require_env "$dir" media/beszel-agent.env '^TOKEN=[A-Za-z0-9-]{32,}$'
+  require_env "$dir" media/garage.env '^GARAGE_RPC_SECRET=[0-9a-f]{64}$' '^GARAGE_ADMIN_TOKEN=[A-Za-z0-9]{32,}$'
+  require_env "$dir" media/garage-setup.env '^GARAGE_ADMIN_TOKEN=[A-Za-z0-9]{32,}$' '^OWNER_ACCESS_KEY_ID=GK[0-9a-f]{24}$' \
+    '^OWNER_SECRET_ACCESS_KEY=[0-9a-f]{64}$'
+  require_env "$dir" media/sftpgo.env '^FILES_PASSWORD=[A-Za-z0-9]{16,}$' '^S3_ACCESS_KEY_ID=GK[0-9a-f]{24}$' \
+    '^S3_SECRET_ACCESS_KEY=[0-9a-f]{64}$'
+  require_env "$dir" home/home-keys.env '^HOME_SECRET_KEY=[A-Za-z0-9+/]{43}=$' '^HOME_DATA_KEY=[A-Za-z0-9+/]{43}=$' \
+    '^HOME_SMTP_PASSWORD=[A-Za-z0-9_-]{16,}$' '^HOME_BESZEL_PASSWORD=([A-Za-z0-9]{16,})?$' '^HOME_POWER_KEY=([A-Za-z0-9+/]{43}=)?$'
+}
+
+# HOME_POWER_KEY, when set, must be the key home-power checks requests with,
+# which provisioning made on this host and the release never writes; otherwise
+# every request Home signs would be refused. Compared, never printed.
+validate_power_key() {
+  local dir="$1" bundle_key host_key=""
+  bundle_key="$(sed -n 's/^HOME_POWER_KEY=//p' "$dir/home/home-keys.env")"
+  [ -n "$bundle_key" ] || return 0
+  if [ ! -f "$power_key_file" ]; then
+    untouched "HOME_POWER_KEY is set, but this host has no $power_key_file yet; provision with --tags host first"
+  fi
+  host_key="$(head -n 1 -- "$power_key_file")"
+  [ "$bundle_key" = "$host_key" ] ||
+    untouched "HOME_POWER_KEY is not this host's power key ($power_key_file); set the secret to it (RUNBOOK.md, \"Home's power control\")"
+}
+
+# require_env <bundle dir> <file> <line pattern>...: the file holds exactly one
+# line per pattern, each matching it.
+require_env() {
+  local dir="$1" file="$2" pattern names
+  shift 2
+  names="$(printf '%s\n' "$@" | sed -E 's/^\^([A-Z_]+)=.*/\1/' | paste -sd ' ' -)"
+  for pattern in "$@"; do
+    grep -qE "$pattern" "$dir/$file" || untouched "$file must set exactly $names"
+  done
+  [ "$(grep -c . "$dir/$file")" -eq "$#" ] || untouched "$file must set exactly $names"
+}
+
+validate_release_env() {
+  local dir="$1" mode commit spec key file repo_key container value repo digests=0
+  if [ "$(grep -c . "$dir/release.env")" -ne 2 ] || [ "$(grep -cE '^RELEASE_(MODE|COMMIT)=' "$dir/release.env")" -ne 2 ] ||
+    [ "$(cut -d= -f1 "$dir/release.env" | grep . | LC_ALL=C sort -u | wc -l)" -ne 2 ]; then
+    untouched "release.env must set exactly RELEASE_MODE and RELEASE_COMMIT"
+  fi
+  mode="$(sed -n 's/^RELEASE_MODE=//p' "$dir/release.env")"
+  commit="$(sed -n 's/^RELEASE_COMMIT=//p' "$dir/release.env")"
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || untouched "release.env RELEASE_COMMIT is not a full commit sha"
+  case "$mode" in
+    latest | pinned) ;;
+    *) untouched "release.env RELEASE_MODE must be latest or pinned" ;;
+  esac
+  for spec in "${image_specs[@]}"; do
+    read -r key file repo_key container <<<"$spec"
+    repo="${repo_of[$key]}"
+    [ "$(grep -c "^$key=" "$dir/$file")" -eq 1 ] || untouched "$file must set $key exactly once"
+    value="$(sed -n "s/^$key=//p" "$dir/$file")"
+    if [ "$(image_repository "$value")" != "$repo" ]; then
+      untouched "$file $key runs $(printf '%q' "$value"), not an image of $repo (from $host_file)"
+    fi
+    if [ "$value" = "$repo:latest" ]; then
+      continue
+    fi
+    if [ "$mode" = latest ]; then
+      untouched "$file $key must be $repo:latest in a latest release"
+    fi
+    if ! [[ "$value" =~ ^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]]; then
+      untouched "$file $key must be $repo:latest or $repo:<tag>@sha256:<digest> in a pinned release"
+    fi
+    digests=$((digests + 1))
+  done
+  if [ "$mode" = pinned ] && [ "$digests" -eq 0 ]; then
+    untouched "a pinned release must pin at least one image to a digest"
+  fi
+}
+
+image_repository() {
+  local ref="${1%@*}"
+  if [[ "${ref##*/}" == *:* ]]; then
+    ref="${ref%:*}"
+  fi
+  printf '%s\n' "$ref"
+}
+
+stack_repos() {
+  case "$1" in
+    portfolio) printf '%s\n' "${repo_of[PORTFOLIO_IMAGE]}" ;;
+    hypernova) printf '%s\n' "${repo_of[PROVIDER_IMAGE]}" "${repo_of[WEB_IMAGE]}" ;;
+    home) printf '%s\n' "${repo_of[HOME_IMAGE]}" ;;
+  esac
+}
+
+guard_stacks() {
+  local dir="$1" stack guarded
+  local -a repos options
+  for stack in "${stacks[@]}"; do
+    if ! compose_in "$dir/$stack" config --no-env-resolution --format json >"$dir.$stack.json" 2>"$dir.$stack.err"; then
+      untouched "docker compose rejects $stack/docker-compose.yml: $(tail -n 3 "$dir.$stack.err" | tr '\n' ' ')"
+    fi
+    mapfile -t repos < <(stack_repos "$stack")
+    options=("--tailscale-ip=$tailscale_ip")
+    case "$stack" in
+      ai) options+=("--service-user=$ai_user") ;;
+      media) options+=("--service-user=$media_user") ;;
+      home) options+=("--service-user=$home_user") ;;
+    esac
+    if ! guarded="$(python3 -I "$guard" "$dir.$stack.json" "$dir/$stack" "$stack" "${options[@]}" "${repos[@]}")"; then
+      untouched "$stack/${guarded:-docker-compose.yml: the compose model could not be checked}"
+    fi
+    log "compose model accepted: $guarded"
+  done
+}
+
+registry_login() {
+  local dir="$1" user token
+  user="$(sed -n 's/^GHCR_USERNAME=//p' "$dir/ghcr.env")"
+  token="$(sed -n 's/^GHCR_TOKEN=//p' "$dir/ghcr.env")"
+  if ! printf '%s' "$token" | docker login ghcr.io --username "$user" --password-stdin >/dev/null 2>&1; then
+    untouched "docker login to ghcr.io was refused; check the GHCR_USERNAME variable and the GHCR_TOKEN secret"
+  fi
+}
+
+set_modes() {
+  local dir="$1" file
+  find "$dir" -type d -exec chmod 0755 {} +
+  find "$dir" -type f -exec chmod 0644 {} +
+  for file in "${secret_files[@]}"; do
+    chmod 0600 "$dir/$file"
+  done
+}
+
+prepare() {
+  local bundle="$1" dest="$2"
+  validate_listing "$bundle" "$dest.names" "$dest.types"
+  LC_ALL=C sort "$dest.names" >"$dest.expected"
+  extract_bundle "$bundle" "$dest" "$dest.expected" "$dest.found"
+  validate_manifest "$dest" "$dest.found" "$dest.listed"
+  validate_env_files "$dest"
+  validate_power_key "$dest"
+  validate_release_env "$dest"
+  set_modes "$dest"
+  guard_stacks "$dest"
+  log "bundle accepted: $(grep -c . "$dest.expected") files, manifest checksums match"
+}
+
+release_summary() {
+  local dir="$1" mode="" spec key file repo_key container
+  local -a pinned=()
+  [ -f "$dir/release.env" ] && mode="$(sed -n 's/^RELEASE_MODE=//p' "$dir/release.env")"
+  case "$mode" in
+    pinned)
+      for spec in "${image_specs[@]}"; do
+        read -r key file repo_key container <<<"$spec"
+        if grep -qE "^$key=.*@sha256:" "$dir/$file" 2>/dev/null; then
+          pinned+=("$key")
+        fi
+      done
+      printf 'pinned (%s), auto-updates paused for them\n' "${pinned[*]}"
+      ;;
+    latest) printf 'following :latest, auto-updates on\n' ;;
+    *) printf 'no release metadata\n' ;;
+  esac
+}
+
+link_release() {
+  local name="$1" id="$2"
+  ln -sfn "releases/$id" "$stack_dir/.$name.new"
+  mv -Tf "$stack_dir/.$name.new" "$stack_dir/$name"
+}
+
+linked_release() {
+  local name="$1" target id
+  [ -L "$stack_dir/$name" ] || return 0
+  target="$(readlink "$stack_dir/$name")"
+  id="${target#releases/}"
+  if ! [[ "$id" =~ $release_id_pattern ]] || [ ! -d "$releases_dir/$id" ]; then
+    fail "$stack_dir/$name points at $(printf '%q' "$target"), which is not a release"
+  fi
+  printf '%s\n' "$id"
+}
+
+prune_releases() {
+  local keep_current="$1" keep_previous="$2" dir id
+  for dir in "$releases_dir"/*; do
+    [ -d "$dir" ] || continue
+    id="${dir##*/}"
+    if [ "$id" != "$keep_current" ] && [ "$id" != "$keep_previous" ]; then
+      rm -rf "$dir"
+    fi
+  done
+}
+
+# Prints psql's error lines with every quoted literal masked, so a failed
+# ALTER ROLE never echoes a password.
+provision_errors() {
+  grep -E 'ERROR|FATAL|psql:' "$1" | sed -E "s/'[^']*'/'***'/g" | tail -n 3 | tr '\n' ' '
+}
+
+provision_database() {
+  local release="$1" out="$work_dir/provision.out"
+  if ! docker exec -i postgresql psql -v ON_ERROR_STOP=1 -U postgres -d postgres <"$release/database/provision.sql" >"$out" 2>&1; then
+    fail "before the app stacks changed, provision.sql failed (the database runs the new definition; portfolio and hypernova still run the previous one): $(provision_errors "$out")"
+  fi
+  log "database roles, passwords and grants are in place"
+}
+
+wait_for_stacks() {
+  local deadline=$((SECONDS + wait_seconds)) stack name status policy health restarts started started_at now uptime listed inspected seen
+  local -a ids pending
+  while :; do
+    pending=()
+    ids=()
+    # A stack whose containers cannot be listed, or a listed container that
+    # docker inspect no longer finds (Watchtower or autoheal recreated or
+    # removed it since compose ps), is pending: verify only passes on a poll
+    # that inspected every listed container.
+    for stack in "${stacks[@]}"; do
+      if listed="$(compose_in "$stack_dir/current/$stack" ps --all --quiet)"; then
+        [ -z "$listed" ] || mapfile -t -O "${#ids[@]}" ids <<<"$listed"
+      else
+        pending+=("docker compose ps failed for $stack")
+      fi
+    done
+    [ "${#ids[@]}" -gt 0 ] || [ "${#pending[@]}" -gt 0 ] || fail "the stacks have no containers"
+    now="$(date -u +%s)"
+    inspected=""
+    seen=0
+    if [ "${#ids[@]}" -gt 0 ]; then
+      inspected="$(docker inspect --format '{{.Name}} {{.State.Status}} {{.HostConfig.RestartPolicy.Name}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}} {{.State.StartedAt}}' "${ids[@]}")" || true
+    fi
+    # A restart resets StartedAt, so uptime >= settle_seconds means no restart
+    # in that window; RestartCount only explains a pending container.
+    while read -r name status policy health restarts started; do
+      [ -n "$name" ] || continue
+      seen=$((seen + 1))
+      name="${name#/}"
+      if [ "$policy" = no ] || [ -z "$policy" ]; then
+        continue
+      fi
+      if [ "$status" != running ]; then
+        pending+=("$name:$status")
+      elif [ "$health" != none ] && [ "$health" != healthy ]; then
+        pending+=("$name:$health")
+      elif ! started_at="$(date -u -d "$started" +%s 2>/dev/null)"; then
+        pending+=("$name:started at an unreadable time")
+      else
+        # now is sampled before the inspect, so a container that just started
+        # can look up to a second younger than zero.
+        uptime=$((now > started_at ? now - started_at : 0))
+        if [ "$uptime" -lt "$settle_seconds" ]; then
+          pending+=("$name:running for ${uptime}s of ${settle_seconds}s (restarted $restarts times)")
+        fi
+      fi
+    done <<<"$inspected"
+    if [ "$seen" -lt "${#ids[@]}" ]; then
+      pending+=("$((${#ids[@]} - seen)) of ${#ids[@]} listed containers could not be inspected (removed or recreated since docker compose ps)")
+    fi
+    if [ "${#pending[@]}" -eq 0 ]; then
+      log "every container is running and healthy, and has run for at least ${settle_seconds}s without a restart"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "not ready after ${wait_seconds}s: ${pending[*]}"
+    fi
+    sleep "$poll_seconds"
+  done
+}
+
+# Prints "<host> <path> <expected status pattern>" for every public route:
+# portfolio's health check, the www -> apex redirect, the hypernova web app and
+# its provider API behind /api.
+route_targets() {
+  local release="$1" apex www web
+  apex="$(sed -n 's/^APEX_DOMAIN=//p' "$release/portfolio/.env")"
+  www="$(sed -n 's/^WWW_DOMAIN=//p' "$release/portfolio/.env")"
+  web="$(sed -n 's/^WEB_DOMAIN=//p' "$release/hypernova/.env")"
+  printf '%s\n' "$apex /api/health ^2[0-9][0-9]$" "$www / ^30[18]$" "$web / ^[23][0-9][0-9]$" "$web /api/health ^2[0-9][0-9]$"
+}
+
+# Prints a container's IPv4 address on the edge network. Traefik and
+# cloudflared publish no port, so verify reaches them there, from the host.
+edge_address() {
+  local name="$1" address
+  address="$(docker container inspect --format '{{with index .NetworkSettings.Networks "edge"}}{{.IPAddress}}{{end}}' "$name" 2>/dev/null || true)"
+  [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "$name has no address on the edge network; run provisioning (Traefik) or check the tunnel stack (cloudflared)"
+  printf '%s\n' "$address"
+}
+
+# Asks Traefik for every route the way the tunnel does (the public Host, https
+# in X-Forwarded-Proto) and requires the status the app answers with.
+check_routes() {
+  local release="$1" target host path want code deadline traefik
+  local -a targets hosts=()
+  traefik="$(edge_address "$traefik_container")"
+  mapfile -t targets < <(route_targets "$release")
+  for target in "${targets[@]}"; do
+    read -r host path want <<<"$target"
+    [[ "$host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "unexpected host name $(printf '%q' "$host") in the release's .env files"
+    deadline=$((SECONDS + route_wait_seconds))
+    while :; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://$traefik:80$path" || true)"
+      if [[ "${code:-000}" =~ $want ]]; then
+        break
+      fi
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        fail "Traefik answered ${code:-000} for $host$path, expected $want (404: no router serves $host$path; 502, 503 or 504: the app behind it is unreachable)"
+      fi
+      sleep "$poll_seconds"
+    done
+    hosts+=("$host$path")
+  done
+  log "Traefik routes ${hosts[*]} to their apps"
+}
+
+# cloudflared's /ready answers 200 only while it holds at least one connection
+# to Cloudflare's edge, that is, while the public hostnames can reach Traefik.
+check_tunnel() {
+  local address code deadline=$((SECONDS + route_wait_seconds))
+  address="$(edge_address "$tunnel_container")"
+  while :; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$address:$tunnel_metrics_port/ready" || true)"
+    [ "$code" != 200 ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "cloudflared answered ${code:-000} on /ready: the tunnel holds no connection to Cloudflare (a revoked or wrong CF_TUNNEL_TOKEN, or no outbound internet); docker logs cloudflared on the host shows why"
+    fi
+    sleep "$poll_seconds"
+  done
+  log "the Cloudflare Tunnel is connected (cloudflared /ready answers 200)"
+}
+
+# Asks every public route the way a visitor does: from the host, by its public
+# name, through Cloudflare and the tunnel. From here, not from the CI runner,
+# because Cloudflare's bot protection answers data-centre addresses with 403.
+# It runs after the release is verified on the host, so a failure here leaves
+# a current, verified release and points at the Cloudflare side.
+check_public() {
+  local release="$1" target host path want code deadline url
+  local -a targets checked=()
+  mapfile -t targets < <(route_targets "$release")
+  targets+=("$(sed -n 's/^APEX_DOMAIN=//p' "$release/portfolio/.env") /api/health ^30[18]$ http")
+  for target in "${targets[@]}"; do
+    read -r host path want scheme <<<"$target"
+    [[ "$host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "unexpected host name $(printf '%q' "$host") in the release's .env files"
+    url="${scheme:-https}://$host$path"
+    deadline=$((SECONDS + public_wait_seconds))
+    while :; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || true)"
+      if [[ "${code:-000}" =~ $want ]]; then
+        break
+      fi
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        failure_hint=""
+        fail "$url answered ${code:-000} through Cloudflare, expected $want; the release itself is current and verified on the host (530 or error 1033: the tunnel has no Public Hostname for $host; 502: the tunnel cannot reach http://edge-traefik:80; 403: a Cloudflare security rule blocks the request; 000: no DNS record, or the record is not proxied)"
+      fi
+      sleep "$poll_seconds"
+    done
+    checked+=("$url")
+  done
+  log "Cloudflare serves ${checked[*]}"
+}
+
+# home-tls answers https on the Tailscale address for Home's name and every
+# tailnet service's name under it (media/.env: HOME_DOMAIN and the HOST_* lines
+# from production.yml's home_hosts), with a certificate curl trusts: Let's
+# Encrypt has issued it through Cloudflare's DNS. Each is asked by name, pinned
+# to the tailnet address, the way a tailnet browser reaches it; Home must
+# answer 200 on /healthz (home-server's own, so the route reaches it), a
+# service 2xx, 3xx, 401 or 403 on / (a login redirect, or 403 from S3 without a
+# key, proves the route reaches the app; a 404 is Traefik without a route).
+check_home_tls() {
+  local release="$1" name path code deadline want want_text
+  local -a names checked=()
+  mapfile -t names < <(sed -n -e 's/^HOME_DOMAIN=//p' -e 's/^HOST_[A-Z0-9]*=//p' "$release/media/.env")
+  [ "${#names[@]}" -ge 2 ] || fail "media/.env names no https hosts (HOME_DOMAIN and HOST_* from production.yml's home_hosts)"
+  for name in "${names[@]}"; do
+    [[ "$name" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "unexpected https name $(printf '%q' "$name") in media/.env"
+    path=/ want='^(2[0-9][0-9]|3[0-9][0-9]|401|403)$' want_text="2xx, 3xx, 401 or 403"
+    [ "$name" != "${names[0]}" ] || { path=/healthz; want='^200$'; want_text=200; }
+    deadline=$((SECONDS + home_tls_wait_seconds))
+    while :; do
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$name:443:$tailscale_ip" "https://$name$path" || true)"
+      [[ ! "${code:-000}" =~ $want ]] || break
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        fail "https://$name$path on $tailscale_ip answered ${code:-000}, expected $want_text with a trusted certificate (000: no certificate for it yet: HOME_TLS_CF_DNS_TOKEN must be a Cloudflare API token with Zone DNS Edit on the zone, and docker logs home-tls shows Let's Encrypt's answer; 404: home-tls has no route for the name; 502 or 504: home-tls cannot reach the container behind it)"
+      fi
+      sleep "$poll_seconds"
+    done
+    checked+=("$name")
+  done
+  log "home-tls serves https with a trusted certificate on $tailscale_ip for ${checked[*]}"
+}
+
+# The one-shots the dashboard, S3 storage and Home depend on finished with exit
+# status 0: beszel-pair registered the agent's token and wrote the hub's key
+# (the agent starts only after it), garage-setup assigned the layout,
+# imported the owner's key and created the files bucket, home-keys wrote
+# Home's key files (home-server starts only after it). Each prints why it
+# failed, never a secret.
+check_one_shots() {
+  local name state deadline=$((SECONDS + route_wait_seconds))
+  for name in "${checked_one_shots[@]}"; do
+    while :; do
+      state="$(docker container inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$name" 2>/dev/null || echo missing)"
+      case "$state" in
+        "exited 0") break ;;
+        exited\ *) fail "$name exited with status ${state#exited }; docker logs $name on the host says why" ;;
+        missing) fail "$name was never created; docker compose did not run it" ;;
+      esac
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        fail "$name is still $state after ${route_wait_seconds}s; docker logs $name on the host shows where it waits"
+      fi
+      sleep "$poll_seconds"
+    done
+  done
+  log "${checked_one_shots[*]} finished: the dashboard's agent is paired, S3 has its layout, the owner's key and the files bucket, Home has its key files"
+}
+
+# Each tailnet-only port is bound to the Tailscale address and nothing else, as
+# Docker applied it (the guard checked the compose model before the start).
+check_tailnet_ports() {
+  local entry name port want got
+  local -a checked=()
+  for entry in "${tailnet_ports[@]}"; do
+    read -r name port <<<"$entry"
+    want="{\"$port/tcp\":[{\"HostIp\":\"$tailscale_ip\",\"HostPort\":\"$port\"}]}"
+    got="$(docker container inspect --format '{{json .HostConfig.PortBindings}}' "$name" 2>/dev/null || true)"
+    [ "$got" = "$want" ] || fail "$name publishes ${got:-nothing}, expected only $tailscale_ip:$port (the host's Tailscale address)"
+    checked+=("$name:$port")
+  done
+  log "the tailnet-only ports ${checked[*]} are bound to $tailscale_ip alone"
+}
+
+container_state() {
+  docker container inspect --format '{{.State.Running}} {{.State.Restarting}}' "$1" 2>/dev/null || true
+}
+
+# Watchtower recreates the same labelled app containers a release recreates.
+# It is stopped from the first pull until the app stacks are up, so infra-apply
+# is then their only writer; cleanup starts it again on every exit. A Watchtower
+# that is not running is left alone (verify reports it).
+stop_watchtower() {
+  [ "$(container_state watchtower)" = "true false" ] || return 0
+  watchtower_stopped=1
+  docker stop --time "$watchtower_stop_seconds" watchtower >/dev/null 2>&1 ||
+    untouched "Watchtower could not be stopped, so it could race the release"
+  log "Watchtower is stopped until the app stacks are up"
+}
+
+start_watchtower() {
+  [ "$watchtower_stopped" = 1 ] || return 0
+  docker start watchtower >/dev/null 2>&1 || fail "Watchtower could not be started again; run provisioning with --tags watchtower"
+  watchtower_stopped=0
+  log "Watchtower is running again"
+}
+
+check_proxy() {
+  local proxy="$1" client="$2" started blocked
+  [ "$(container_state "$proxy")" = "true false" ] || fail "$proxy is not running, so $client has no Docker API; run provisioning"
+  [ "$(container_state "$client")" = "true false" ] || fail "$client is not running; run provisioning"
+  started="$(docker container inspect --format '{{.State.StartedAt}}' "$client")"
+  blocked="$(docker logs --since "$started" "$proxy" 2>&1 | grep 'blocked request' || true)"
+  if [ -n "$blocked" ]; then
+    fail "$proxy refused Docker API calls $client made: $(tail -n 3 <<<"$blocked" | tr '\n' ' ')"
+  fi
+}
+
+check_socket_clients() {
+  local started errors
+  check_proxy edge-socket-proxy edge-traefik
+  check_proxy watchtower-socket-proxy watchtower
+  check_proxy autoheal-socket-proxy autoheal
+  check_proxy beszel-socket-proxy beszel-agent
+  started="$(docker container inspect --format '{{.State.StartedAt}}' watchtower)"
+  errors="$(docker logs --since "$started" watchtower 2>&1 |
+    grep -Ei 'too old|minimum supported API version|Cannot connect to the Docker daemon|Error response from daemon: (Forbidden|Method Not Allowed)' || true)"
+  if [ -n "$errors" ]; then
+    fail "Watchtower cannot use the Docker API: $(tail -n 3 <<<"$errors" | tr '\n' ' ')"
+  fi
+  log "Traefik, Watchtower, autoheal and Beszel's agent reach Docker through their socket proxies with no refused calls"
+}
+
+# Prints "<ref>|<digest or unknown>|<created or unknown>" for a running container.
+container_image() {
+  local name="$1" info ref image_id inspect created digest repo
+  info="$(docker container inspect --format '{{.Config.Image}}|{{.Image}}' "$name" 2>/dev/null)" || return 1
+  IFS='|' read -r ref image_id <<<"$info"
+  repo="$(image_repository "$ref")"
+  inspect="$(docker image inspect --format '{{.Created}}{{range .RepoDigests}} {{.}}{{end}}' "$image_id" 2>/dev/null || true)"
+  created="${inspect%% *}"
+  digest="$(tr ' ' '\n' <<<"${inspect#* }" | sed -n "s|^$repo@\\(sha256:[0-9a-f]\\{64\\}\\)$|\\1|p" | head -n 1)"
+  printf '%s|%s|%s\n' "$ref" "${digest:-unknown}" "${created:-unknown}"
+}
+
+record_running_images() {
+  local id="$1" spec key file repo_key container line ref digest created
+  : >"$releases_dir/$id/running-images.env"
+  for spec in "${image_specs[@]}"; do
+    read -r key file repo_key container <<<"$spec"
+    if line="$(container_image "$container")"; then
+      IFS='|' read -r ref digest created <<<"$line"
+      if [ "$digest" != unknown ]; then
+        printf '%s=%s@%s\n' "$container" "$(image_repository "$ref")" "$digest" >>"$releases_dir/$id/running-images.env"
+        continue
+      fi
+    fi
+    log "no registry digest is known for $container; a rollback to this release's image needs an explicit sha256 digest"
+  done
+  chmod 0644 "$releases_dir/$id/running-images.env"
+}
+
+verify_release() {
+  local id="$1"
+  wait_for_stacks
+  check_routes "$stack_dir/current"
+  check_tunnel
+  check_tailnet_ports
+  check_home_tls "$stack_dir/current"
+  check_one_shots
+  check_socket_clients
+  record_running_images "$id"
+  touch "$releases_dir/$id/.verified"
+}
+
+install() {
+  local bundle="$1" prepared="$2" id current previous last_verified last_verified_note current_note release stack
+  id="$(date -u +%Y%m%dT%H%M%SZ)-$(sha256sum "$bundle" | cut -c1-12)"
+  [ ! -e "$releases_dir/$id" ] || untouched "release $id already exists"
+  stop_watchtower
+  current="$(linked_release current)"
+  previous="$(linked_release previous)"
+  last_verified=""
+  if [ -n "$current" ] && [ -e "$releases_dir/$current/.verified" ]; then
+    last_verified="$current"
+  elif [ -n "$previous" ]; then
+    last_verified="$previous"
+  fi
+  mv -T "$prepared" "$releases_dir/$id"
+  release="$releases_dir/$id"
+  log "pulling images"
+  for stack in "${stacks[@]}"; do
+    if ! compose_in "$release/$stack" pull --quiet; then
+      rm -rf "$release"
+      untouched "pulling the $stack images failed"
+    fi
+  done
+
+  # Each hint names a recovery that can fix that stage's failures. A rollback
+  # rebuilds the bundle from master and changes only the app image references,
+  # so it cannot undo a database, provision.sql, stack/ or secret change.
+  last_verified_note="${last_verified:+ (the last verified release was $last_verified: $(release_summary "$releases_dir/$last_verified"))}"
+  current_note="no release is current yet"
+  [ -z "$current" ] || current_note="current still names $current"
+  failure_hint="release $id is installed but not current; $current_note. A rollback cannot fix this: it only re-pins the app images and renders the database stack, provision.sql and the secrets from master again, so revert the stack/database or secret change on master and run release${last_verified_note}"
+  log "starting the database"
+  compose_in "$release/database" up -d --wait --remove-orphans || fail "before the app stacks changed, the database did not come up healthy"
+  provision_database "$release"
+
+  if [ -n "$current" ] && [ -e "$releases_dir/$current/.verified" ]; then
+    previous="$current"
+    link_release previous "$previous"
+  fi
+  link_release current "$id"
+  prune_releases "$id" "$previous"
+  failure_hint="release $id is current but not verified. Run the Deploy workflow with action rollback only if an app image causes the failure above: a rollback changes nothing but the app image references and renders every stack/ file, env file and secret from master again; for any other cause revert that change on master and run release${last_verified_note}"
+  for stack in portfolio hypernova tunnel ai media home; do
+    log "starting $stack"
+    compose_in "$stack_dir/current/$stack" up -d --remove-orphans || fail "$stack did not start"
+  done
+  start_watchtower
+  verify_release "$id"
+  check_public "$stack_dir/current"
+  log "RELEASE OK: $id is current, $(release_summary "$release")${previous:+; $previous is kept as the previous release}"
+}
+
+do_release() {
+  require_root
+  load_host
+  take_lock
+  [ -f "$edge_dir/docker-compose.yml" ] || fail "$edge_dir/docker-compose.yml does not exist, so no Traefik routes the stacks; run provisioning first"
+  mkdir -p "$releases_dir"
+  work_dir="$(mktemp -d "$stack_dir/.incoming.XXXXXX")"
+  trap cleanup EXIT
+  read_bundle "$work_dir/incoming.tgz"
+  prepare "$work_dir/incoming.tgz" "$work_dir/release"
+  registry_login "$work_dir/release"
+  install "$work_dir/incoming.tgz" "$work_dir/release"
+}
+
+release_line() {
+  local name="$1" id="$2"
+  if [ -e "$releases_dir/$id/.verified" ]; then
+    log "$name release: $id (verified), $(release_summary "$releases_dir/$id")"
+  else
+    log "$name release: $id (not verified), $(release_summary "$releases_dir/$id")"
+  fi
+}
+
+do_status() {
+  local current previous spec key file repo_key container line ref digest created id entry stack
+  local -A seen=()
+  require_root
+  load_host
+  take_lock
+  current="$(linked_release current)"
+  previous="$(linked_release previous)"
+  if [ -n "$current" ]; then
+    release_line current "$current"
+  else
+    log "no release is installed"
+  fi
+  if [ -n "$previous" ]; then
+    release_line previous "$previous"
+  else
+    log "previous release: none"
+  fi
+  for spec in "${image_specs[@]}"; do
+    read -r key file repo_key container <<<"$spec"
+    if line="$(container_image "$container")"; then
+      IFS='|' read -r ref digest created <<<"$line"
+      log "image $container ref=$ref digest=$digest created=$created"
+    else
+      log "image $container not running"
+    fi
+  done
+  for spec in "${image_specs[@]}"; do
+    read -r key file repo_key container <<<"$spec"
+    seen=()
+    while read -r digest created; do
+      [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+      [ -z "${seen[$digest]+set}" ] || continue
+      seen[$digest]=1
+      log "known ${repo_of[$key]} digest=$digest created=$created"
+    done < <(docker image ls --digests --no-trunc --format '{{.Digest}} {{.CreatedAt}}' "${repo_of[$key]}" 2>/dev/null || true)
+  done
+  for id in "$current" "$previous"; do
+    [ -n "$id" ] && [ -f "$releases_dir/$id/running-images.env" ] || continue
+    while IFS= read -r entry; do
+      [ -n "$entry" ] && log "recorded $id $entry"
+    done <"$releases_dir/$id/running-images.env"
+  done
+  if [ -n "$current" ]; then
+    for stack in "${stacks[@]}"; do
+      compose_in "$stack_dir/current/$stack" ps --all --format 'table {{.Name}}\t{{.Image}}\t{{.Status}}' || true
+    done
+  fi
+}
+
+[ "$#" -eq 1 ] || usage
+case "$1" in
+  release) do_release ;;
+  status) do_status ;;
+  *) usage ;;
+esac

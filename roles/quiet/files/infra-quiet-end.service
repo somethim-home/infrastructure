@@ -1,0 +1,10 @@
+[Unit]
+Description=Quiet hours end: the GPU power limit and the CPU's top frequency back to their defaults
+Documentation=file:///usr/local/sbin/infra-quiet
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/infra-quiet end
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes

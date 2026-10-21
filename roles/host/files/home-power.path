@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch for power requests from Home
+Documentation=file:///usr/local/sbin/home-power
+RequiresMountsFor=/run/home-power
+
+[Path]
+# Starts the service whenever the directory holds any entry, and checks again
+# each time the service exits, so a request that arrives while a run is ending
+# is never missed (PathChanged= would drop that event).
+DirectoryNotEmpty=/run/home-power
+Unit=home-power.service
+
+[Install]
+WantedBy=paths.target

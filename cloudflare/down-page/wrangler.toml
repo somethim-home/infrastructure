@@ -1,0 +1,25 @@
+# The "server is down" Worker in front of the public sites (docs/edge.md,
+# "The down page"; deploy: RUNBOOK.md, "The down page"). No secrets, no
+# bindings, no logs. Deployed by the owner with `npx wrangler@4.147.0 deploy` from
+# this directory; nothing in CI deploys it.
+name = "down-page"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+# Only the routes below; no *.workers.dev address and no preview URLs.
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
+  { pattern = "www.arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
+  { pattern = "hypernova.arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
+]
+
+# Workers Logs and Logpush stay off: no request (address, path, cookie) is kept.
+[observability]
+enabled = false
+
+# worker-build is pinned to the workers-rs version in Cargo.toml.
+[build]
+command = "cargo install --quiet --locked worker-build@0.8.7 && worker-build --release"

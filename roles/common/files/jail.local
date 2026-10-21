@@ -1,0 +1,17 @@
+# See docs/host.md — fail2ban.
+[DEFAULT]
+# 100.64.0.0/10 is the tailnet, so the owner cannot ban themselves over it.
+ignoreip = 127.0.0.1/8 ::1 172.16.0.0/12 10.0.0.0/8 100.64.0.0/10
+
+bantime          = 1d
+bantime.increment = true
+bantime.factor   = 2
+bantime.maxtime  = 1w
+
+findtime = 10m
+maxretry = 10
+
+backend = systemd
+
+[sshd]
+enabled = true

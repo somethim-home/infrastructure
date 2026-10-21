@@ -1,0 +1,58 @@
+---
+# Read back: the two timers and the boot check are enabled (or all off when
+# quiet_hours_enabled is false), each timer is scheduled, at the time and in
+# the zone production.yml sets.
+- name: Read whether the quiet-hours units are enabled
+  ansible.builtin.command: systemctl is-enabled infra-quiet-start.timer infra-quiet-end.timer infra-quiet-boot.service
+  register: quiet_enabled
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require the quiet-hours units on, or off, as production.yml says
+  ansible.builtin.assert:
+    that:
+      - quiet_enabled.stdout_lines | length == 3
+      - (quiet_enabled.stdout_lines | reject('equalto', 'enabled') | list | length == 0) if quiet_hours_enabled
+        else (quiet_enabled.stdout_lines | select('equalto', 'enabled') | list | length == 0)
+    fail_msg: >-
+      systemctl is-enabled infra-quiet-start.timer infra-quiet-end.timer infra-quiet-boot.service says
+      {{ quiet_enabled.stdout_lines }}, but quiet_hours_enabled is {{ quiet_hours_enabled }}; provision with --tags quiet.
+    quiet: true
+
+- name: Read the quiet-hours timers' schedules
+  ansible.builtin.command:
+    argv: [systemctl, show, --property=TimersCalendar, --value, "infra-quiet-{{ item }}.timer"]
+  loop: [start, end]
+  register: quiet_calendar
+  changed_when: false
+  check_mode: false
+  when: quiet_hours_enabled
+
+- name: Require each timer at its production.yml time and zone
+  vars:
+    quiet_wanted: "OnCalendar=*-*-* {{ quiet_hours_start if item.item == 'start' else quiet_hours_end }}:00 {{ quiet_hours_timezone }} ;"
+  ansible.builtin.assert:
+    that:
+      - quiet_wanted in item.stdout
+    fail_msg: "infra-quiet-{{ item.item }}.timer runs at {{ item.stdout | trim }}, not {{ quiet_wanted }}; provision with --tags quiet."
+    quiet: true
+  loop: "{{ quiet_calendar.results }}"
+  loop_control:
+    label: "infra-quiet-{{ item.item }}.timer"
+  when: quiet_hours_enabled
+
+- name: Read the next quiet-hours edges
+  ansible.builtin.command: systemctl list-timers infra-quiet-start.timer infra-quiet-end.timer --no-pager --output=json
+  register: quiet_timers
+  changed_when: false
+  check_mode: false
+  when: quiet_hours_enabled
+
+- name: Require both timers to be scheduled
+  ansible.builtin.assert:
+    that:
+      - quiet_timers.stdout | from_json | map(attribute='unit') | select('in', ['infra-quiet-start.timer', 'infra-quiet-end.timer']) | unique | list | length == 2
+    fail_msg: "The quiet-hours timers are not both scheduled: {{ quiet_timers.stdout }}"
+    quiet: true
+  when: quiet_hours_enabled

@@ -1,0 +1,14 @@
+[Unit]
+Description=Quiet hours or normal hours at boot, whichever the clock says
+Documentation=file:///usr/local/sbin/infra-quiet
+After=nvidia-persistenced.service time-sync.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/infra-quiet auto
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

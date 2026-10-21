@@ -1,0 +1,92 @@
+---
+# Power requests from Home (docs/host.md, "Power requests from Home"):
+# home-server, and nothing else, writes a signed request into /run/home-power;
+# home-power.path starts home-power, which checks it and runs systemctl
+# poweroff or reboot. The key is made here once, on the host, and never leaves
+# it but through the owner (RUNBOOK.md, "Home's power control"); provisioning
+# holds no secret and never prints it.
+- name: Make the power key once, private to root
+  ansible.builtin.shell: |
+    set -eu
+    umask 077
+    openssl rand -base64 32 >"{{ home_power_key_file }}.new"
+    mv "{{ home_power_key_file }}.new" "{{ home_power_key_file }}"
+  args:
+    creates: "{{ home_power_key_file }}"
+    executable: /bin/bash
+
+- name: Keep the power key root's alone
+  ansible.builtin.file:
+    path: "{{ home_power_key_file }}"
+    state: file
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Check the power key's form without reading it out
+  ansible.builtin.command:
+    argv: [grep, -Eqx, "[A-Za-z0-9+/]{43}=", "{{ home_power_key_file }}"]
+  register: home_power_key_form
+  changed_when: false
+  failed_when: home_power_key_form.rc not in [0, 1]
+  check_mode: false
+
+- name: Require the power key to be base64 of 32 bytes
+  ansible.builtin.assert:
+    that:
+      - home_power_key_form.rc == 0
+    fail_msg: >-
+      {{ home_power_key_file }} is not one line of base64 of 32 bytes. Delete it and provision with --tags host
+      to make a new one, then copy it into the HOME_POWER_KEY secret and release (RUNBOOK.md, "Home's power control").
+    quiet: true
+
+# A tmpfs of its own, so home-server can neither fill /run nor store more than
+# a few small files; the home-server account's alone, nothing on it runs.
+- name: Mount the request directory at every boot
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^\S+\s+{{ home_power_dir }}\s'
+    line: "tmpfs {{ home_power_dir }} tmpfs {{ home_power_mount_options }} 0 0"
+  register: home_power_fstab
+
+- name: Let systemd read the new fstab
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: home_power_fstab is changed
+
+- name: Mount the request directory now
+  ansible.builtin.shell: |
+    set -eu
+    if mountpoint -q {{ home_power_dir | quote }}; then
+      {% if home_power_fstab is changed %}mount -o remount {{ home_power_dir | quote }}; echo remounted{% else %}:{% endif %}
+    else
+      mkdir -p {{ home_power_dir | quote }}
+      mount {{ home_power_dir | quote }}
+      echo mounted
+    fi
+  args:
+    executable: /bin/bash
+  register: home_power_mount
+  changed_when: home_power_mount.stdout | length > 0
+
+- name: Install the power request script and its units
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: home-power, dest: /usr/local/sbin/home-power, mode: "0755" }
+    - { src: home-power.service, dest: /etc/systemd/system/home-power.service, mode: "0644" }
+    - { src: home-power.path, dest: /etc/systemd/system/home-power.path, mode: "0644" }
+  loop_control:
+    label: "{{ item.dest }}"
+  register: home_power_units
+
+- name: Watch the request directory from every boot on
+  ansible.builtin.systemd:
+    name: home-power.path
+    enabled: true
+    state: "{{ 'restarted' if home_power_units is changed or home_power_mount is changed else 'started' }}"
+    daemon_reload: true

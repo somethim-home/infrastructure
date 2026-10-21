@@ -1,0 +1,102 @@
+---
+# See docs/host.md, "Quiet hours". The server stands in a room people sleep in: from
+# quiet_hours_start to quiet_hours_end (quiet_hours_timezone) the GPU gets a
+# lower power limit and the CPU a lower top frequency, and both go back to their
+# defaults at the end. A timer for each edge, and a oneshot at boot that sets
+# whichever state the clock says.
+- name: Require valid quiet-hours settings
+  ansible.builtin.assert:
+    that:
+      - quiet_hours_enabled in [true, false]
+      - quiet_hours_start is match('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+      - quiet_hours_end is match('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+      - quiet_hours_start != quiet_hours_end
+      - quiet_hours_timezone is match('^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$')
+      - quiet_gpu_power_limit_w | string is match('^[0-9]{1,4}$')
+      - quiet_gpu_power_limit_w | int >= 50 and quiet_gpu_power_limit_w | int <= 1000
+      - quiet_cpu_max_percent | string is match('^[0-9]{1,3}$')
+      - quiet_cpu_max_percent | int >= 30 and quiet_cpu_max_percent | int <= 100
+    fail_msg: >-
+      production.yml quiet hours: quiet_hours_enabled true or false, quiet_hours_start and quiet_hours_end HH:MM and
+      different, quiet_hours_timezone a zone name (Europe/Berlin), quiet_gpu_power_limit_w whole watts from 50 to 1000,
+      quiet_cpu_max_percent from 30 to 100.
+    quiet: true
+
+- name: Look for the quiet-hours time zone
+  ansible.builtin.stat:
+    path: "/usr/share/zoneinfo/{{ quiet_hours_timezone }}"
+  register: quiet_zone
+
+- name: Require the time zone to exist on the host
+  ansible.builtin.assert:
+    that:
+      - quiet_zone.stat.exists and quiet_zone.stat.isreg
+    fail_msg: "quiet_hours_timezone {{ quiet_hours_timezone }} is not in /usr/share/zoneinfo on the host (timedatectl list-timezones lists the names)."
+    quiet: true
+  when: quiet_hours_enabled
+
+- name: Install the quiet-hours script and units
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: infra-quiet, dest: /usr/local/sbin/infra-quiet, mode: "0755" }
+    - { src: infra-quiet-start.service, dest: /etc/systemd/system/infra-quiet-start.service, mode: "0644" }
+    - { src: infra-quiet-end.service, dest: /etc/systemd/system/infra-quiet-end.service, mode: "0644" }
+    - { src: infra-quiet-boot.service, dest: /etc/systemd/system/infra-quiet-boot.service, mode: "0644" }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Write the quiet-hours settings and timers
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: quiet.env.j2, dest: /etc/infra/quiet.env }
+    - { src: infra-quiet-start.timer.j2, dest: /etc/systemd/system/infra-quiet-start.timer }
+    - { src: infra-quiet-end.timer.j2, dest: /etc/systemd/system/infra-quiet-end.timer }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Switch the quiet-hours timers and the boot check on or off
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: "{{ quiet_hours_enabled }}"
+    state: "{{ 'started' if quiet_hours_enabled and item.endswith('.timer') else omit }}"
+    daemon_reload: true
+  loop:
+    - infra-quiet-start.timer
+    - infra-quiet-end.timer
+    - infra-quiet-boot.service
+
+- name: Stop the quiet-hours timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - infra-quiet-start.timer
+    - infra-quiet-end.timer
+  when: not quiet_hours_enabled
+
+# Off: back to the defaults. On: the state the clock says, now rather than at the
+# next timer. A driver installed or updated in this run answers only after a
+# reboot (roles/gpu says so); the boot check sets the GPU then.
+- name: Set the GPU and CPU limits for this time of day
+  ansible.builtin.command: "/usr/local/sbin/infra-quiet {{ 'auto' if quiet_hours_enabled else 'end' }}"
+  register: quiet_now
+  changed_when: "'no change' not in quiet_now.stdout"
+  failed_when: quiet_now.rc != 0 and not (gpu_just_installed | default(false) | bool)
+
+- name: Say what quiet hours set
+  ansible.builtin.debug:
+    msg: "{{ (quiet_now.stdout ~ ' ' ~ quiet_now.stderr) | trim }}"
+  when: quiet_now is not skipped
+
+- name: Verify the quiet-hours timers
+  ansible.builtin.import_tasks: verify.yml

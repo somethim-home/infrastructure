@@ -1,0 +1,10 @@
+[Unit]
+Description=Quiet hours begin: lower the GPU power limit and the CPU's top frequency
+Documentation=file:///usr/local/sbin/infra-quiet
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/infra-quiet start
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes

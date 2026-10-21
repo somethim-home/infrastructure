@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta http-equiv="refresh" content="60">
+<title>{{site}} is offline for a moment</title>
+<style>
+:root {
+  --canvas: #0b0f14;
+  --surface: #11161d;
+  --border: #243040;
+  --border-strong: #2f3d50;
+  --text: #e6edf3;
+  --text-soft: #c3ccd6;
+  --text-muted: #8b98a8;
+  --signal: #2dd4bf;
+  --signal-deep: #0d9488;
+  --signal-ink: #042f2b;
+  --lavender: #b4a7f5;
+  --warm: #f2c97d;
+  --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+  --pixel: "Silkscreen", "Press Start 2P", var(--mono);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1rem;
+  background:
+    linear-gradient(rgb(45 212 191 / 3%) 1px, transparent 1px) 0 0 / 100% 4px,
+    var(--canvas);
+  color: var(--text);
+  font: 1rem/1.6 var(--mono);
+}
+main {
+  width: min(34rem, 100%);
+  padding: 2rem 1.5rem 1.75rem;
+  background: var(--surface);
+  border: 2px solid var(--border-strong);
+  box-shadow: 6px 6px 0 var(--signal-ink), 6px 6px 0 2px var(--border);
+  image-rendering: pixelated;
+}
+svg { display: block; width: 7.5rem; height: auto; margin: 0 auto 1.5rem; shape-rendering: crispEdges; }
+.blink { animation: blink 1.6s steps(1, end) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .blink { animation: none; } }
+.status {
+  display: inline-block;
+  margin: 0 0 1rem;
+  padding: 0.15rem 0.5rem;
+  border: 2px solid var(--warm);
+  color: var(--warm);
+  font: 700 0.75rem/1.4 var(--pixel);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+h1 {
+  margin: 0 0 0.75rem;
+  color: var(--signal);
+  font: 700 1.35rem/1.3 var(--pixel);
+  letter-spacing: 0.04em;
+  text-shadow: 2px 2px 0 var(--signal-ink);
+}
+p { margin: 0 0 1rem; color: var(--text-soft); }
+.muted { color: var(--text-muted); font-size: 0.875rem; }
+a.retry {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--signal);
+  color: var(--signal-ink);
+  font: 700 0.875rem/1.2 var(--pixel);
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+  box-shadow: 3px 3px 0 var(--signal-deep);
+}
+a.retry:hover, a.retry:focus-visible { background: #5eead4; outline: 2px solid var(--lavender); outline-offset: 3px; }
+a.retry:active { transform: translate(3px, 3px); box-shadow: none; }
+</style>
+</head>
+<body>
+<main>
+  <svg viewBox="0 0 30 26" aria-hidden="true">
+    <rect x="3" y="2" width="24" height="9" fill="#171e27"/>
+    <rect x="3" y="2" width="24" height="1" fill="#2f3d50"/>
+    <rect x="3" y="10" width="24" height="1" fill="#2f3d50"/>
+    <rect x="3" y="2" width="1" height="9" fill="#2f3d50"/>
+    <rect x="26" y="2" width="1" height="9" fill="#2f3d50"/>
+    <rect x="6" y="5" width="2" height="2" fill="#f2c97d" class="blink"/>
+    <rect x="10" y="5" width="2" height="2" fill="#243040"/>
+    <rect x="15" y="6" width="9" height="1" fill="#243040"/>
+    <rect x="3" y="13" width="24" height="9" fill="#171e27"/>
+    <rect x="3" y="13" width="24" height="1" fill="#2f3d50"/>
+    <rect x="3" y="21" width="24" height="1" fill="#2f3d50"/>
+    <rect x="3" y="13" width="1" height="9" fill="#2f3d50"/>
+    <rect x="26" y="13" width="1" height="9" fill="#2f3d50"/>
+    <rect x="6" y="16" width="2" height="2" fill="#243040"/>
+    <rect x="10" y="16" width="2" height="2" fill="#243040"/>
+    <rect x="15" y="17" width="9" height="1" fill="#243040"/>
+    <rect x="7" y="22" width="2" height="3" fill="#2f3d50"/>
+    <rect x="21" y="22" width="2" height="3" fill="#2f3d50"/>
+    <rect x="22" y="0" width="2" height="1" fill="#b4a7f5"/>
+    <rect x="25" y="0" width="1" height="1" fill="#b4a7f5"/>
+    <rect x="27" y="1" width="2" height="1" fill="#b4a7f5"/>
+  </svg>
+  <p class="status">503 · server offline</p>
+  <h1>{{site}} is offline for a moment</h1>
+  <p>The server behind it is switched off or cannot be reached right now, usually for a restart or
+  maintenance. Nothing is lost; it comes back on its own.</p>
+  <p class="muted">This page tries again every minute.</p>
+  <a class="retry" href="">Try again</a>
+</main>
+</body>
+</html>

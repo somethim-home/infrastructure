@@ -1,0 +1,1085 @@
+# home-tls (the https front of Home and of every service here), the Beszel
+# status dashboard, Garage S3 storage with the SFTPGo file manager, and the
+# plain-http links page, for the owner over the tailnet only. See docs/stacks.md.
+# Each publishes one port on the host's Tailscale address and nowhere else
+# (TAILSCALE_IP comes from /etc/infra/host.env, which infra-apply exports);
+# never through the tunnel or the edge Traefik (nothing here is for the
+# public; home-tls is its own Traefik on the tailnet address). Garage's
+# objects are on the media disk (/srv/media/s3), bind-mounted. Every container runs as the media account (.env, from
+# production.yml), with no capability and no new privileges. No Watchtower
+# label: the images are pinned and move only with a reviewed re-pin and a
+# release. Secrets, each read by its own container: home-tls.env (the
+# Cloudflare DNS token for the certificate), beszel.env,
+# beszel-pair.env and beszel-agent.env (the dashboard's owner password and
+# agent token), garage.env and garage-setup.env (Garage's RPC secret, admin
+# token and the owner's S3 key) and sftpgo.env (the file manager's password).
+# The media engine, Audiobookshelf, Kavita and Immich were retired on
+# 2026-10-20; their volumes and the library folders under /srv/media are kept
+# (and still backed up) until the owner's own apps replace them.
+name: media
+
+services:
+  # The plain-http page at http://infra-host/: it sends the browser on to Home
+  # (https://home.<domain>, home-server in stack/home), and /files.html lists
+  # the other ways into the files bucket (WebDAV, rclone, S3 apps), also at
+  # https://home.<domain>/files.html through home-tls. busybox httpd serves both
+  # pages from tmpfs; they are HOME_HTML and FILES_HTML below (no host file, no
+  # bind mount). Port 80 needs no capability: Docker lets any user bind low
+  # ports inside a container's own network namespace. No data, so nothing to
+  # back up.
+  home:
+    image: busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+    container_name: home
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 32m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - sh
+      - -c
+      - mkdir -p /tmp/www && printf '%s' "$$HOME_HTML" >/tmp/www/index.html && printf '%s' "$$FILES_HTML" >/tmp/www/files.html && exec httpd -f -p 80 -h /tmp/www
+    ports:
+      - "${TAILSCALE_IP}:80:80"
+    environment:
+      # Home took over https://home.<domain> from the links page; old
+      # bookmarks of http://infra-host/ land there, and the file manager and
+      # the status dashboard keep their own names.
+      HOME_HTML: |
+        <!doctype html>
+        <html lang="en">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="color-scheme" content="light dark">
+        <meta http-equiv="refresh" content="0; url=https://${HOME_DOMAIN}/">
+        <title>Home</title>
+        </head>
+        <body>
+        <p><a href="https://${HOME_DOMAIN}/">Home</a> &middot; <a href="https://${HOST_FILES}/web/client">File manager</a> &middot;
+        <a href="https://${HOST_STATUS}/">Status</a> &middot; <a href="/files.html">Other ways into the files bucket</a></p>
+        </body>
+        </html>
+      # The other ways into the files bucket, besides the web file manager
+      # (sftpgo, https://files.<home domain>): WebDAV, rclone and S3 apps.
+      FILES_HTML: |
+        <!doctype html>
+        <html lang="en">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <meta name="color-scheme" content="light dark">
+        <title>Files</title>
+        <style>
+        :root { --bg: #f3f4f6; --tile: #ffffff; --text: #111827; --muted: #6b7280; --edge: #e5e7eb; }
+        @media (prefers-color-scheme: dark) {
+          :root { --bg: #0b0d10; --tile: #171a1f; --text: #f3f4f6; --muted: #9ca3af; --edge: #262a31; }
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: var(--bg); color: var(--text);
+          font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+                   max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+        main { max-width: 44rem; margin: 0 auto; }
+        section { background: var(--tile); border: 1px solid var(--edge); border-radius: 16px; padding: 4px 18px; margin: 12px 0; }
+        h1 { font-size: 1.5rem; margin: 8px 0 4px; } h2 { font-size: 1.05rem; margin: 14px 0 6px; }
+        p, li { color: var(--muted); } b { color: var(--text); }
+        pre { overflow-x: auto; background: var(--bg); border: 1px solid var(--edge); border-radius: 10px; padding: 10px; font-size: 0.85rem; color: var(--text); }
+        a { color: #c9a227; }
+        </style>
+        </head>
+        <body>
+        <main>
+        <p><a href="https://${HOME_DOMAIN}/">&larr; Home</a></p>
+        <h1>Files</h1>
+        <p>Your files live in the <b>files</b> bucket on the server, reachable over Tailscale only. The easiest way in is the
+        <a href="https://${HOST_FILES}/web/client">file manager</a> (upload, folders, preview, share links). These are the other ways in.</p>
+        <section>
+        <h2>Mount it as a drive (WebDAV)</h2>
+        <ul>
+        <li><b>Address:</b> https://${HOST_FILES}/dav</li>
+        <li><b>User:</b> owner &middot; <b>Password:</b> 1Password, &ldquo;infra production secrets&rdquo;, field FILES_PASSWORD</li>
+        <li><b>Linux file manager:</b> Other Locations &rarr; <b>davs://${HOST_FILES}/dav</b></li>
+        <li><b>Android:</b> a WebDAV-capable file manager (Material Files, Solid Explorer&hellip;) with the address above</li>
+        </ul>
+        </section>
+        <section>
+        <h2>rclone (laptop)</h2>
+        <pre>rclone config create home s3 provider=Other endpoint=https://${HOST_S3} \
+          region=garage force_path_style=true \
+          access_key_id="$$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_ACCESS_KEY_ID --reveal)" \
+          secret_access_key="$$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_SECRET_KEY --reveal)"
+        rclone copy ~/Documents/report.pdf home:files/
+        rclone mount home:files ~/Files --vfs-cache-mode writes --daemon</pre>
+        </section>
+        <section>
+        <h2>S3 apps</h2>
+        <p>Any S3 client works (Cyberduck, S3 Files, FolderSync&hellip;): choose <b>Amazon S3 / S3-compatible</b>, server <b>${HOST_S3}</b>, port <b>443</b> with <b>TLS</b>, path-style addressing, region <b>garage</b>, and the key in 1Password (GARAGE_OWNER_ACCESS_KEY_ID and GARAGE_OWNER_SECRET_KEY).</p>
+        </section>
+        </main>
+        </body>
+        </html>
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    labels:
+      - autoheal=true
+
+  # https://home.arbikullakshi.com (Home: home-server, stack/home, on the media
+  # network) and one https name per tailnet service under it
+  # (<label>.home.arbikullakshi.com, production.yml's home_hosts): the apps'
+  # clipboard, microphone, passkeys and install features need https. A second Traefik (the edge image) terminates TLS on the Tailscale
+  # address and routes each name to its container over the media network: no buffering, no compression, no
+  # read or write deadline, so big uploads and streams pass. One certificate
+  # covers home.<domain> and *.home.<domain>; it comes from Let's Encrypt by DNS-01 through
+  # Cloudflare's API (home-tls.env: a token that may edit only this zone's DNS),
+  # so nothing on the internet has to reach the host. No Docker socket: the
+  # static and dynamic configuration are written to tmpfs from the variables
+  # below at start. Port 443 needs no capability (as for home's 80).
+  home-tls:
+    image: traefik:v3.7.13@sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+    container_name: home-tls
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 128m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: home-tls.env
+    command:
+      - sh
+      - -c
+      - printf '%s' "$$HOME_TLS_STATIC" >/tmp/traefik.yml && printf '%s' "$$HOME_TLS_DYNAMIC" >/tmp/dynamic.yml && exec traefik --configfile=/tmp/traefik.yml
+    ports:
+      - "${TAILSCALE_IP}:443:443"
+    environment:
+      GOMEMLIMIT: 96MiB
+      HOME_TLS_STATIC: |
+        global:
+          checkNewVersion: false
+          sendAnonymousUsage: false
+        log:
+          level: INFO
+        entryPoints:
+          websecure:
+            address: ":443"
+            http:
+              # Drop headers that alias one Traefik sets (X_Forwarded_For).
+              aliasHeadersStrategy: delete
+            transport:
+              # Large uploads (the file manager, S3) and long streams
+              # (websockets, video) must not be cut: no read or write
+              # deadline (Traefik's 60 s read timeout would end a big upload),
+              # and idle keep-alive connections close after 10 minutes.
+              respondingTimeouts:
+                readTimeout: 0s
+                writeTimeout: 0s
+                idleTimeout: 600s
+          ping:
+            address: "127.0.0.1:8082"
+            http:
+              aliasHeadersStrategy: delete
+        ping:
+          entryPoint: ping
+        providers:
+          file:
+            filename: /tmp/dynamic.yml
+        certificatesResolvers:
+          letsencrypt:
+            acme:
+              email: "${ACME_EMAIL}"
+              storage: /acme/acme.json
+              dnsChallenge:
+                provider: cloudflare
+                resolvers:
+                  - "1.1.1.1:53"
+                  - "8.8.8.8:53"
+      HOME_TLS_DYNAMIC: |
+        http:
+          routers:
+            home:
+              rule: "Host(`${HOME_DOMAIN}`)"
+              entryPoints: [websecure]
+              service: home-server
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            # The page of other ways into the files bucket, from the links
+            # page's days; Home has no such path.
+            home-files-page:
+              rule: "Host(`${HOME_DOMAIN}`) && Path(`/files.html`)"
+              entryPoints: [websecure]
+              service: links
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            # WebDAV for the files bucket (sftpgo) on Home's name (home-server
+            # has no /dav), kept for mounts made before files.<home domain> existed.
+            home-dav:
+              rule: "Host(`${HOME_DOMAIN}`) && PathPrefix(`/dav`)"
+              entryPoints: [websecure]
+              service: files-dav
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            files:
+              rule: "Host(`${HOST_FILES}`)"
+              entryPoints: [websecure]
+              service: files
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            status:
+              rule: "Host(`${HOST_STATUS}`)"
+              entryPoints: [websecure]
+              service: status
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            s3:
+              rule: "Host(`${HOST_S3}`)"
+              entryPoints: [websecure]
+              service: s3
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+            # WebDAV under the file manager's own name.
+            files-dav:
+              rule: "Host(`${HOST_FILES}`) && PathPrefix(`/dav`)"
+              entryPoints: [websecure]
+              service: files-dav
+              tls:
+                certResolver: letsencrypt
+                domains:
+                  - main: "${HOME_DOMAIN}"
+                    sans: ["*.${HOME_DOMAIN}"]
+          services:
+            home-server:
+              loadBalancer:
+                servers:
+                  - url: "http://home-server:8080"
+            links:
+              loadBalancer:
+                servers:
+                  - url: "http://home:80"
+            files-dav:
+              loadBalancer:
+                servers:
+                  - url: "http://sftpgo:8092"
+            files:
+              loadBalancer:
+                servers:
+                  - url: "http://sftpgo:8091"
+            status:
+              loadBalancer:
+                servers:
+                  - url: "http://beszel:8090"
+            s3:
+              loadBalancer:
+                servers:
+                  - url: "http://garage:3900"
+    volumes:
+      # The ACME account and certificate (acme.json, 0600), so a restart does
+      # not ask Let's Encrypt again. Not backed up: a lost one is reissued.
+      - type: volume
+        source: home-tls-acme
+        target: /acme
+        volume:
+          nocopy: true
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8082/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - autoheal=true
+
+  # Beszel, the status dashboard (https://status.<home domain>, also http://infra-host:8090): CPU, memory, disks,
+  # temperatures, the GPU and every container's usage, with history. The hub
+  # stores its data in beszel-data. On its first start it creates the owner's
+  # login from BESZEL_HUB_USER_EMAIL (.env) and _PASSWORD (beszel.env), so
+  # there is no sign-up page to race for. No update checks.
+  beszel:
+    image: henrygd/beszel:0.21.0@sha256:6b39a8b64f9b15d00a25e7683e31a93c46161182a54f62713525107064e10599
+    container_name: beszel
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 192m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: beszel.env
+    environment:
+      BESZEL_HUB_USER_EMAIL: "${STATUS_OWNER_EMAIL}"
+      BESZEL_HUB_APP_URL: "https://${HOST_STATUS}"
+      BESZEL_HUB_CHECK_UPDATES: "false"
+      GOMEMLIMIT: 160MiB
+    ports:
+      - "${TAILSCALE_IP}:8090:8090"
+    volumes:
+      - type: volume
+        source: beszel-data
+        target: /beszel_data
+        volume:
+          nocopy: true
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "/beszel", "health", "--url", "http://127.0.0.1:8090"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      - autoheal=true
+
+  # One-shot, after the hub is healthy: signs in as the owner, makes the
+  # agent's token (beszel-pair.env) the owner's permanent universal token, so
+  # the agent is added as a system on its first connection, and writes the
+  # hub's public key into the agent's volume for it to check the hub with.
+  # Prints no secret.
+  beszel-pair:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    container_name: beszel-pair
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 32m
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: beszel-pair.env
+    environment:
+      OWNER_EMAIL: "${STATUS_OWNER_EMAIL}"
+      PAIR_SH: |
+        set -eu
+        hub=http://beszel:8090
+        i=0
+        until [ "$$(curl -s -o /dev/null -w '%{http_code}' "$$hub/api/health")" = 200 ]; do
+          i=$$((i + 1)); [ "$$i" -lt 60 ] || { echo "beszel-pair: the hub did not answer within 2 minutes" >&2; exit 1; }
+          sleep 2
+        done
+        field() { tr -d '\n' | sed -n "s/.*\"$$1\": *\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+        auth="$$(curl -sS -f -H 'Content-Type: application/json' \
+          --data "{\"identity\":\"$$OWNER_EMAIL\",\"password\":\"$$OWNER_PASSWORD\"}" \
+          "$$hub/api/collections/users/auth-with-password" | field token)" ||
+          { echo "beszel-pair: the hub refused the owner's login (BESZEL_PASSWORD changed after the hub's first start? RUNBOOK.md, \"Rotating a secret\")" >&2; exit 1; }
+        [ -n "$$auth" ] || { echo "beszel-pair: no session token in the hub's login answer" >&2; exit 1; }
+        curl -sS -f -o /dev/null -H "Authorization: $$auth" \
+          "$$hub/api/beszel/universal-token?enable=1&permanent=1&token=$$AGENT_TOKEN"
+        key="$$(curl -sS -f -H "Authorization: $$auth" "$$hub/api/beszel/info" | field key)"
+        case "$$key" in
+          ssh-ed25519\ *) printf '%s\n' "$$key" >/agent/hub.pub.tmp && mv -f /agent/hub.pub.tmp /agent/hub.pub ;;
+          *) echo "beszel-pair: the hub returned no ed25519 public key" >&2; exit 1 ;;
+        esac
+        echo "beszel-pair: the agent's token is the owner's universal token; the hub's key is in place"
+    command: [sh, -c, "printf '%s' \"$$PAIR_SH\" >/tmp/pair.sh && exec sh /tmp/pair.sh"]
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: volume
+        source: beszel-agent-data
+        target: /agent
+        volume:
+          nocopy: true
+    depends_on:
+      beszel:
+        condition: service_healthy
+    networks:
+      - media
+
+  # The agent: host CPU, memory and temperatures (/proc and /sys are the
+  # host's for these), the SSD (its own root), the media disk and the backup
+  # disk (each read through an empty or root-only folder bound read-only: it
+  # only asks the filesystem for its size), the GPU (NVML, through the
+  # reservation), and each container's usage through beszel-socket-proxy
+  # (roles/beszel: four read-only Docker calls). It dials the hub over the
+  # media network (TOKEN, KEY_FILE from beszel-pair); no SSH listener, no
+  # host network, so the host's own network totals are not shown, only each
+  # container's. No image update checks (they would ask registries and the
+  # proxy for image details).
+  beszel-agent:
+    image: henrygd/beszel-agent-nvidia:0.21.0@sha256:07554f812db9553fb6e84aff0cd9f02c8797b4f705eb94292c1e7f23a24789e7
+    container_name: beszel-agent
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 128m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: beszel-agent.env
+    environment:
+      HUB_URL: http://beszel:8090
+      KEY_FILE: /var/lib/beszel-agent/hub.pub
+      DATA_DIR: /var/lib/beszel-agent
+      DISABLE_SSH: "true"
+      SYSTEM_NAME: infra-host
+      DOCKER_HOST: tcp://beszel-socket-proxy:2375
+      DOCKER_IMAGE_CHECK: "false"
+      NVIDIA_DRIVER_CAPABILITIES: utility
+      GOMEMLIMIT: 96MiB
+    volumes:
+      - type: volume
+        source: beszel-agent-data
+        target: /var/lib/beszel-agent
+        volume:
+          nocopy: true
+      - type: bind
+        source: /srv/media/.beszel
+        target: /extra-filesystems/media
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/backup
+        target: /extra-filesystems/backup
+        read_only: true
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      beszel-pair:
+        condition: service_completed_successfully
+    networks:
+      - media
+      - beszel-socket
+    healthcheck:
+      test: ["CMD", "/agent", "health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      - autoheal=true
+
+  # Garage's configuration, written into its metadata volume before it starts
+  # (its image has no shell). The secrets are not in it: Garage reads
+  # GARAGE_RPC_SECRET and GARAGE_ADMIN_TOKEN from garage.env.
+  garage-config:
+    image: busybox:1.37.0-musl@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
+    container_name: garage-config
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 16m
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      GARAGE_TOML: |
+        # Written by garage-config on every release (stack/media). One node,
+        # one copy of every object: the nightly backup is the second copy.
+        metadata_dir = "/meta/db"
+        data_dir = "/data"
+        db_engine = "sqlite"
+        replication_factor = 1
+        rpc_bind_addr = "[::]:3901"
+        rpc_public_addr = "127.0.0.1:3901"
+
+        [s3_api]
+        s3_region = "garage"
+        api_bind_addr = "[::]:3900"
+
+        [admin]
+        api_bind_addr = "[::]:3903"
+    command: [sh, -c, "mkdir -p /meta/db && printf '%s' \"$$GARAGE_TOML\" >/meta/garage.toml.tmp && mv -f /meta/garage.toml.tmp /meta/garage.toml"]
+    volumes:
+      - type: volume
+        source: garage-meta
+        target: /meta
+        volume:
+          nocopy: true
+    networks:
+      - media
+
+  # Garage, S3-compatible storage (https://s3.<home domain> or http://infra-host:3900, region garage,
+  # path-style). Objects live on the media disk (/srv/media/s3, the media
+  # account's, 0700); the metadata (SQLite) on the SSD in garage-meta. The
+  # admin API (3903) and RPC (3901) stay on the media network.
+  garage:
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    container_name: garage
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 512m
+    restart: always
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: garage.env
+    environment:
+      GARAGE_CONFIG_FILE: /meta/garage.toml
+      RUST_LOG: garage=info
+    command: [/garage, server]
+    ports:
+      - "${TAILSCALE_IP}:3900:3900"
+    volumes:
+      - type: volume
+        source: garage-meta
+        target: /meta
+        volume:
+          nocopy: true
+      - type: bind
+        source: /srv/media/s3
+        target: /data
+        bind:
+          create_host_path: false
+    depends_on:
+      garage-config:
+        condition: service_completed_successfully
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      - autoheal=true
+
+  # One-shot, after Garage is healthy, through its admin API: assigns the
+  # single node its role (once), imports the owner's access key from
+  # GARAGE_OWNER_ACCESS_KEY_ID and _SECRET_KEY (garage-setup.env; a new
+  # secret needs a new key ID, and keys named owner under another ID are
+  # deleted), creates the files bucket and lets the key read, write and own
+  # it. Idempotent; prints no secret.
+  garage-setup:
+    image: curlimages/curl:8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777
+    container_name: garage-setup
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 32m
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: garage-setup.env
+    environment:
+      # Garage only places data by capacity; one node takes it all.
+      GARAGE_CAPACITY: "800000000000"
+      GARAGE_BUCKETS: files
+      SETUP_SH: |
+        set -eu
+        api=http://garage:3903
+        call() {
+          if [ $$# -ge 3 ]; then
+            curl -sS -f -X "$$1" -H "Authorization: Bearer $$GARAGE_ADMIN_TOKEN" -H 'Content-Type: application/json' --data "$$3" "$$api$$2"
+          else
+            curl -sS -f -X "$$1" -H "Authorization: Bearer $$GARAGE_ADMIN_TOKEN" "$$api$$2"
+          fi
+        }
+        status() { curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $$GARAGE_ADMIN_TOKEN" "$$api$$1"; }
+        field() { tr -d '\n' | sed -n "s/.*\"$$1\": *\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+        i=0
+        until [ "$$(status /v2/GetClusterStatus)" = 200 ]; do
+          i=$$((i + 1)); [ "$$i" -lt 60 ] || { echo "garage-setup: Garage's admin API did not answer within 2 minutes (GARAGE_ADMIN_TOKEN?)" >&2; exit 1; }
+          sleep 2
+        done
+        node="$$(call GET /v2/GetClusterStatus | tr -d '\n' | sed -n 's/.*"nodes": *\[ *{ *"id": *"\([0-9a-f]*\)".*/\1/p')"
+        [ -n "$$node" ] || { echo "garage-setup: no node id in Garage's cluster status" >&2; exit 1; }
+        if call GET /v2/GetClusterLayout | tr -d '\n' | grep -q "\"roles\": *\[ *{[^]]*\"id\": *\"$$node\""; then
+          echo "garage-setup: the layout already holds this node"
+        else
+          call POST /v2/UpdateClusterLayout "{\"roles\":[{\"id\":\"$$node\",\"zone\":\"home\",\"capacity\":$$GARAGE_CAPACITY,\"tags\":[]}]}" >/dev/null
+          version="$$(call GET /v2/GetClusterLayout | tr -d '\n' | sed -n 's/.*"version": *\([0-9]*\).*/\1/p' | head -n 1)"
+          call POST /v2/ApplyClusterLayout "{\"version\":$$((version + 1))}" >/dev/null
+          echo "garage-setup: layout version $$((version + 1)) applied: one node, zone home"
+        fi
+        if [ "$$(status "/v2/GetKeyInfo?id=$$OWNER_ACCESS_KEY_ID")" = 200 ]; then
+          if [ "$$(call GET "/v2/GetKeyInfo?id=$$OWNER_ACCESS_KEY_ID&showSecretKey=true" | field secretAccessKey)" != "$$OWNER_SECRET_ACCESS_KEY" ]; then
+            echo "garage-setup: the key $$OWNER_ACCESS_KEY_ID exists with another secret; rotate GARAGE_OWNER_ACCESS_KEY_ID together with GARAGE_OWNER_SECRET_KEY (RUNBOOK.md, \"Rotating a secret\")" >&2
+            exit 1
+          fi
+          echo "garage-setup: the owner's key is in place"
+        else
+          code="$$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $$GARAGE_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+            --data "{\"accessKeyId\":\"$$OWNER_ACCESS_KEY_ID\",\"secretAccessKey\":\"$$OWNER_SECRET_ACCESS_KEY\",\"name\":\"owner\"}" "$$api/v2/ImportKey")"
+          case "$$code" in
+            200) echo "garage-setup: the owner's key $$OWNER_ACCESS_KEY_ID was imported" ;;
+            409) echo "garage-setup: the key ID $$OWNER_ACCESS_KEY_ID was used before and deleted; Garage never reuses one, so generate a new GARAGE_OWNER_ACCESS_KEY_ID" >&2; exit 1 ;;
+            *) echo "garage-setup: importing the owner's key answered $$code (the ID must be GK and 24 hex digits, the secret 64 hex digits)" >&2; exit 1 ;;
+          esac
+        fi
+        for old in $$(call GET /v2/ListKeys | tr -d '\n' | sed 's/},/}\n/g' | grep '"name": *"owner"' | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p'); do
+          [ "$$old" = "$$OWNER_ACCESS_KEY_ID" ] && continue
+          call POST "/v2/DeleteKey?id=$$old" >/dev/null
+          echo "garage-setup: deleted the rotated-out key $$old"
+        done
+        for bucket in $$GARAGE_BUCKETS; do
+          if [ "$$(status "/v2/GetBucketInfo?globalAlias=$$bucket")" = 200 ]; then
+            id="$$(call GET "/v2/GetBucketInfo?globalAlias=$$bucket" | field id)"
+          else
+            id="$$(call POST /v2/CreateBucket "{\"globalAlias\":\"$$bucket\"}" | field id)"
+            echo "garage-setup: created the bucket $$bucket"
+          fi
+          [ -n "$$id" ] || { echo "garage-setup: no id for the bucket $$bucket" >&2; exit 1; }
+          call POST /v2/AllowBucketKey "{\"bucketId\":\"$$id\",\"accessKeyId\":\"$$OWNER_ACCESS_KEY_ID\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
+          echo "garage-setup: the owner may read, write and own $$bucket"
+        done
+    command: [sh, -c, "printf '%s' \"$$SETUP_SH\" >/tmp/setup.sh && exec sh /tmp/setup.sh"]
+    depends_on:
+      garage:
+        condition: service_healthy
+    networks:
+      - media
+
+  # SFTPGo, the file manager for the files bucket (https://files.<home domain>, also http://infra-host:8091):
+  # a web client to upload (drag and drop), make folders, rename, move,
+  # delete, preview, download and share files, and WebDAV for mounting it as
+  # a drive, served at https://<home domain>/dav through home-tls
+  # (port 8092 stays on the media network). One user, owner, defined as code:
+  # at every start the JSON below is loaded with mode 0 (added, or updated to
+  # match), its password from FILES_PASSWORD and its storage the files bucket
+  # in Garage with the owner's S3 key (sftpgo.env), plus an admin SFTPGo
+  # insists on, with a random password nobody can use. SFTP, FTP, the admin
+  # web UI and the REST API are off. Its database (share links, sessions) lives
+  # in sftpgo-data, which the nightly backup copies.
+  sftpgo:
+    image: drakkan/sftpgo:v2.7.6-alpine@sha256:484f430b2115ec8e015644b1a5e54a5f5b8568f883cb5146e9043885f691d8f7
+    container_name: sftpgo
+    user: "${MEDIA_UID}:${MEDIA_GID}"
+    mem_limit: 256m
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    env_file: sftpgo.env
+    environment:
+      SFTPGO_SFTPD__BINDINGS__0__PORT: "0"
+      SFTPGO_FTPD__BINDINGS__0__PORT: "0"
+      SFTPGO_HTTPD__BINDINGS__0__PORT: "8091"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_REST_API: "false"
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_CLIENT: "true"
+      # home-tls (on the media network) forwards https; trusting its
+      # X-Forwarded-Proto gives the session cookie the Secure flag there.
+      # Tailnet clients on 8091 keep their 100.x source address, outside these.
+      SFTPGO_HTTPD__BINDINGS__0__PROXY_ALLOWED: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+      # A sign-in is bound to the client's address. Behind home-tls that must be
+      # the device's (stable) Tailscale address from X-Forwarded-For, not
+      # home-tls's own container address, which changes when a release
+      # recreates it and so signed everyone out.
+      SFTPGO_HTTPD__BINDINGS__0__CLIENT_IP_PROXY_HEADER: X-Forwarded-For
+      SFTPGO_HTTPD__BINDINGS__0__CLIENT_IP_HEADER_DEPTH: "0"
+      # Sign-ins last 12 hours, renewed while in use (SFTPGo's maximum: it
+      # ignores more than 720 minutes), and survive closing the browser and a
+      # restart or release: the key that signs them is made once into
+      # sftpgo-data instead of being regenerated at every start.
+      SFTPGO_HTTPD__COOKIE_LIFETIME: "720"
+      SFTPGO_HTTPD__SIGNING_PASSPHRASE_FILE: /var/lib/sftpgo/web-signing.key
+      # The Drive-style file list: FILES_UI_SH copies the image's templates to
+      # /tmp/templates and inserts DRIVE_JS into webclient/files.html, but only
+      # into the files.html it was written against (FILES_HTML_SHA256, checked
+      # in CI by ci/files-ui.sh); any other one is served as shipped.
+      SFTPGO_HTTPD__TEMPLATES_PATH: /tmp/templates
+      SFTPGO_HTTPD__STATIC_FILES_PATH: /usr/share/sftpgo/static
+      FILES_HTML_SHA256: 04e3d5d39a90abe183adbdad999ab32e08b74d7248f1c2395003667a7c97f1d0
+      SFTPGO_HTTPD__BACKUPS_PATH: /var/lib/sftpgo/backups
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: "8092"
+      SFTPGO_WEBDAVD__BINDINGS__0__PREFIX: /dav
+      SFTPGO_DATA_PROVIDER__DRIVER: sqlite
+      SFTPGO_DATA_PROVIDER__NAME: /var/lib/sftpgo/sftpgo.db
+      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "false"
+      SFTPGO_LOADDATA_FROM: /tmp/owner.json
+      SFTPGO_LOADDATA_MODE: "0"
+      SFTPGO_LOADDATA_CLEAN: "false"
+      SFTPGO_COMMON__TEMP_PATH: /tmp
+      GOMEMLIMIT: 200MiB
+      OWNER_JSON_SH: |
+        set -eu
+        # SFTPGo sends every login to its admin setup page until an admin
+        # exists. The admin UI and REST API are off, so nobody can use this
+        # one; its password is new random at every start and never kept.
+        admin_password="$$(tr -dc A-Za-z0-9 </dev/urandom | head -c 40)"
+        # The session signing key: made once, kept in sftpgo-data, never printed.
+        key=/var/lib/sftpgo/web-signing.key
+        [ -s "$$key" ] || (umask 077 && tr -dc A-Za-z0-9 </dev/urandom | head -c 64 >"$$key")
+        printf '{"admins":[{"username":"admin","status":1,"password":"%s","permissions":["*"]}],"users":[{"username":"owner","status":1,"password":"%s","home_dir":"/var/lib/sftpgo/owner","permissions":{"/":["*"]},"filesystem":{"provider":1,"s3config":{"bucket":"files","region":"garage","endpoint":"http://garage:3900","force_path_style":true,"access_key":"%s","access_secret":{"status":"Plain","payload":"%s"}}}}]}' \
+          "$$admin_password" "$$FILES_PASSWORD" "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY" >/tmp/owner.json
+      FILES_UI_SH: |
+        set -eu
+        src=/usr/share/sftpgo/templates
+        rm -rf /tmp/templates && cp -r "$$src" /tmp/templates
+        have="$$(sha256sum "$$src/webclient/files.html" | cut -d' ' -f1)"
+        if [ "$$have" = "$$FILES_HTML_SHA256" ]; then
+          printf '%s' "$$DRIVE_JS" >/tmp/drive.js
+          awk '{ print } /^\{\{- define "extra_js"\}\}$$/ { print "<script nonce=\"{{.CSPNonce}}\">"; while ((getline line < "/tmp/drive.js") > 0) print line; print "</script>" }' \
+            "$$src/webclient/files.html" >/tmp/templates/webclient/files.html
+          grep -q drive-preview /tmp/templates/webclient/files.html
+          echo "files: Drive-style file list on"
+        else
+          echo "files: WARNING webclient/files.html is $$have, not $$FILES_HTML_SHA256; serving SFTPGo's own file list" >&2
+        fi
+      # Single click selects, double click (a tap on a phone) opens a
+      # full-screen preview with prev/next and download, right click opens a
+      # menu, the row's button downloads. No dollar sign or double braces in
+      # here: Compose and SFTPGo's templates would read them.
+      DRIVE_JS: |
+        (function () {
+          "use strict";
+          // Drive-style behaviour for SFTPGo's file list: single click selects,
+          // double click (or a tap on a touch screen) opens, a right click opens a
+          // menu, and files open in a full-screen preview with prev/next and download.
+          var KINDS = {
+            image: ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif"],
+            video: ["mp4", "webm", "mov", "m4v", "ogv", "mkv"],
+            audio: ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus"],
+            pdf: ["pdf"],
+            text: ["txt", "md", "log", "csv", "tsv", "json", "xml", "yml", "yaml", "ini", "conf", "cfg", "toml", "env",
+              "sh", "py", "js", "ts", "go", "rs", "c", "h", "cpp", "hpp", "java", "kt", "html", "css", "scss", "sql", "srt", "vtt"]
+          };
+          var TEXT_LIMIT = 2 * 1024 * 1024;
+          // A tap opens straight away, as in Drive's app; a mouse click selects.
+          var lastPointer = "mouse";
+
+          function ext(name) {
+            var i = name.lastIndexOf(".");
+            return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+          }
+          function kindOf(name) {
+            var e = ext(name);
+            for (var k in KINDS) { if (KINDS[k].indexOf(e) >= 0) return k; }
+            return "";
+          }
+          function dt() { return window.jQuery("#file_manager_list").DataTable(); }
+          function dataOf(tr) { var d = dt().row(tr).data(); return d || null; }
+          function isDir(d) { return String(d.type) === "1"; }
+          function el(tag, attrs, text) {
+            var e = document.createElement(tag);
+            for (var a in (attrs || {})) e.setAttribute(a, attrs[a]);
+            if (text) e.textContent = text;
+            return e;
+          }
+
+          // ---- selection ----------------------------------------------------------
+          function checkbox(tr) { return tr.querySelector("td:first-child input[type=checkbox]"); }
+          function setChecked(tr, on) {
+            var cb = checkbox(tr);
+            if (cb && cb.checked !== on) cb.click();
+          }
+          function selectOnly(tr) {
+            document.querySelectorAll("#file_manager_list_body tr").forEach(function (r) { if (r !== tr) setChecked(r, false); });
+            setChecked(tr, true);
+          }
+
+          // ---- opening and downloading -------------------------------------------
+          function download(d, tr) {
+            if (isDir(d)) {
+              selectOnly(tr);
+              var btn = document.querySelector('[data-kt-filemanager-table-select="download_selected"]');
+              if (btn) btn.click();
+              return;
+            }
+            var a = el("a", { href: d.url, download: d.name });
+            document.body.appendChild(a); a.click(); a.remove();
+          }
+          function open(d, tr) {
+            if (isDir(d)) { window.location.href = d.url; return; }
+            var list = [];
+            dt().rows({ search: "applied", page: "current" }).every(function () {
+              var r = this.data();
+              if (r && !isDir(r)) list.push({ d: r, tr: this.node() });
+            });
+            var idx = 0;
+            list.forEach(function (it, i) { if (it.d.url === d.url) idx = i; });
+            Preview.show(list, idx);
+          }
+
+          // ---- full-screen preview -----------------------------------------------
+          var Preview = (function () {
+            var root, title, counter, body, list = [], idx = 0, alive = null;
+            function build() {
+              root = el("div", { id: "drive-preview", tabindex: "-1" });
+              var bar = el("div", { "class": "drive-bar" });
+              var close = el("button", { "class": "drive-btn", title: "Close (Esc)", "aria-label": "Close" }, "✕");
+              title = el("div", { "class": "drive-title" });
+              counter = el("div", { "class": "drive-counter" });
+              var dl = el("button", { "class": "drive-btn", title: "Download", "aria-label": "Download" }, "⤓");
+              bar.appendChild(close); bar.appendChild(title); bar.appendChild(counter); bar.appendChild(dl);
+              body = el("div", { "class": "drive-body" });
+              var prev = el("button", { "class": "drive-nav drive-prev", title: "Previous", "aria-label": "Previous" }, "‹");
+              var next = el("button", { "class": "drive-nav drive-next", title: "Next", "aria-label": "Next" }, "›");
+              root.appendChild(bar); root.appendChild(body); root.appendChild(prev); root.appendChild(next);
+              close.addEventListener("click", hide);
+              dl.addEventListener("click", function () { var it = list[idx]; if (it) download(it.d, it.tr); });
+              prev.addEventListener("click", function () { go(-1); });
+              next.addEventListener("click", function () { go(1); });
+              root.addEventListener("click", function (e) { if (e.target === root || e.target === body) hide(); });
+              document.body.appendChild(root);
+            }
+            function render() {
+              var it = list[idx], d = it.d, k = kindOf(d.name);
+              title.textContent = d.name;
+              counter.textContent = list.length > 1 ? (idx + 1) + " / " + list.length : "";
+              root.querySelector(".drive-prev").style.visibility = idx > 0 ? "visible" : "hidden";
+              root.querySelector(".drive-next").style.visibility = idx < list.length - 1 ? "visible" : "hidden";
+              body.innerHTML = "";
+              if (k === "image") {
+                body.appendChild(el("img", { src: d.url, alt: d.name }));
+              } else if (k === "video") {
+                body.appendChild(el("video", { src: d.url, controls: "", autoplay: "", playsinline: "", preload: "metadata" }));
+              } else if (k === "audio") {
+                var wrap = el("div", { "class": "drive-audio" });
+                wrap.appendChild(el("div", { "class": "drive-audio-name" }, d.name));
+                wrap.appendChild(el("audio", { src: d.url, controls: "", autoplay: "" }));
+                body.appendChild(wrap);
+              } else if (k === "pdf") {
+                body.appendChild(el("iframe", { src: d.url.replace("/files?", "/viewpdf?"), title: d.name }));
+              } else if (k === "text" && Number(d.size || 0) <= TEXT_LIMIT) {
+                var pre = el("pre", { "class": "drive-text" }, "Loading…");
+                body.appendChild(pre);
+                fetch(d.url, { credentials: "same-origin" }).then(function (r) { return r.text(); })
+                  .then(function (t) { if (list[idx] === it) pre.textContent = t; })
+                  .catch(function () { pre.textContent = "This file could not be loaded."; });
+              } else {
+                var none = el("div", { "class": "drive-none" });
+                none.appendChild(el("div", { "class": "drive-none-name" }, d.name));
+                none.appendChild(el("div", {}, "No preview available for this file."));
+                var b = el("button", { "class": "btn btn-primary mt-5" }, "Download");
+                b.addEventListener("click", function () { download(d, it.tr); });
+                none.appendChild(b);
+                body.appendChild(none);
+              }
+            }
+            function go(step) {
+              var n = idx + step;
+              if (n < 0 || n >= list.length) return;
+              idx = n; render();
+            }
+            function onKey(e) {
+              if (!root || root.style.display === "none") return;
+              if (e.key === "Escape") { e.preventDefault(); hide(); }
+              else if (e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
+              else if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
+            }
+            function show(l, i) {
+              if (!root) { build(); document.addEventListener("keydown", onKey); }
+              list = l; idx = i;
+              root.style.display = "flex"; document.body.style.overflow = "hidden";
+              render(); root.focus();
+              if (typeof window.keepAlive === "function" && !alive) alive = setInterval(window.keepAlive, 300000);
+            }
+            function hide() {
+              if (!root) return;
+              body.innerHTML = ""; root.style.display = "none"; document.body.style.overflow = "";
+              if (alive) { clearInterval(alive); alive = null; }
+            }
+            return { show: show };
+          })();
+
+          // ---- right-click menu ---------------------------------------------------
+          var Menu = (function () {
+            var m;
+            function hide() { if (m) m.style.display = "none"; }
+            function item(label, fn, cls) {
+              var a = el("button", { "class": "drive-menu-item" + (cls ? " " + cls : "") }, label);
+              a.addEventListener("click", function (e) { e.preventDefault(); hide(); fn(); });
+              m.appendChild(a);
+            }
+            function show(x, y, d, tr) {
+              if (!m) {
+                m = el("div", { id: "drive-menu" });
+                document.body.appendChild(m);
+                document.addEventListener("click", hide);
+                document.addEventListener("scroll", hide, true);
+                window.addEventListener("resize", hide);
+                document.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });
+              }
+              m.innerHTML = "";
+              item(isDir(d) ? "Open" : "Open preview", function () { open(d, tr); });
+              item("Download", function () { download(d, tr); });
+              [["rename", "Rename"], ["move_or_copy", "Move or copy"], ["share", "Share"], ["delete", "Delete", "drive-danger"]]
+                .forEach(function (a) {
+                  var t = tr.querySelector('[data-kt-filemanager-table-action="' + a[0] + '"]');
+                  if (t) item(a[1], function () { t.click(); }, a[2]);
+                });
+              m.style.display = "block";
+              var w = m.offsetWidth, h = m.offsetHeight;
+              m.style.left = Math.min(x, window.innerWidth - w - 8) + "px";
+              m.style.top = Math.min(y, window.innerHeight - h - 8) + "px";
+            }
+            return { show: show, hide: hide };
+          })();
+
+          // ---- wiring -------------------------------------------------------------
+          var IGNORE = 'input, button, .btn, .menu, [data-kt-menu-trigger], [data-kt-filemanger-table="view_item"]';
+          function rowFrom(e) {
+            var tr = e.target.closest("#file_manager_list_body tr");
+            if (!tr || e.target.closest(IGNORE)) return null;
+            var d = dataOf(tr);
+            return d ? { tr: tr, d: d } : null;
+          }
+          function addDownloadButtons() {
+            document.querySelectorAll("#file_manager_list_body tr").forEach(function (tr) {
+              var cell = tr.querySelector("td:last-child .d-flex");
+              if (!cell || cell.querySelector(".drive-dl")) return;
+              var d = dataOf(tr);
+              if (!d) return;
+              var b = el("button", { type: "button", title: "Download", "aria-label": "Download",
+                "class": "btn btn-sm btn-icon btn-light btn-active-light-primary ms-2 drive-dl" }, "⤓");
+              b.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); download(d, tr); });
+              cell.insertBefore(b, cell.firstChild);
+            });
+          }
+          function init() {
+            var body = document.getElementById("file_manager_list_body");
+            if (!body || !window.jQuery) return;
+            var css = el("style");
+            css.textContent = [
+              '#file_manager_list_body [data-kt-filemanger-table="view_item"]{display:none}',
+              "#file_manager_list_body tr{cursor:default;user-select:none}",
+              "#file_manager_list_body tr:has(td:first-child input:checked) td{background:rgba(27,132,255,.12)}",
+              "#file_manager_list_body td a.text-gray-800{pointer-events:none}",
+              ".drive-dl{font-size:1.1rem;line-height:1}",
+              "#drive-preview{position:fixed;inset:0;z-index:2000;display:none;flex-direction:column;background:rgba(10,10,12,.94);outline:none}",
+              ".drive-bar{display:flex;align-items:center;gap:12px;padding:10px 14px;color:#eee;background:rgba(0,0,0,.35)}",
+              ".drive-title{flex:1;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+              ".drive-counter{color:#aaa;font-size:.9rem}",
+              ".drive-btn{background:none;border:0;color:#eee;font-size:1.4rem;width:40px;height:40px;border-radius:50%;cursor:pointer}",
+              ".drive-btn:hover,.drive-nav:hover{background:rgba(255,255,255,.12)}",
+              ".drive-body{flex:1;display:flex;align-items:center;justify-content:center;min-height:0;padding:12px 64px}",
+              ".drive-body img,.drive-body video{max-width:100%;max-height:100%;object-fit:contain}",
+              ".drive-body iframe{width:100%;height:100%;border:0;background:#fff;border-radius:4px}",
+              ".drive-text{width:100%;max-width:1000px;height:100%;overflow:auto;margin:0;padding:16px;background:#1e1e22;color:#ddd;border-radius:6px;white-space:pre-wrap;font-size:.9rem}",
+              ".drive-audio,.drive-none{color:#eee;text-align:center}",
+              ".drive-audio-name,.drive-none-name{font-size:1.2rem;margin-bottom:16px}",
+              ".drive-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(0,0,0,.35);border:0;color:#fff;font-size:2.4rem;width:52px;height:52px;border-radius:50%;cursor:pointer}",
+              ".drive-prev{left:8px}.drive-next{right:8px}",
+              "@media (max-width:600px){.drive-body{padding:8px}.drive-nav{top:auto;bottom:16px;transform:none} }",
+              "#drive-menu{position:fixed;z-index:2100;display:none;min-width:190px;padding:6px 0;background:var(--bs-body-bg,#1e1e2d);border:1px solid rgba(127,127,127,.25);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.35)}",
+              ".drive-menu-item{display:block;width:100%;text-align:left;background:none;border:0;padding:8px 16px;color:var(--bs-body-color,#ddd);cursor:pointer}",
+              ".drive-menu-item:hover{background:rgba(127,127,127,.15)}",
+              ".drive-danger{color:#f1416c}"
+            ].join("\n");
+            document.head.appendChild(css);
+
+            body.addEventListener("pointerdown", function (e) { lastPointer = e.pointerType || "mouse"; }, true);
+            body.addEventListener("click", function (e) {
+              var r = rowFrom(e);
+              if (!r) return;
+              e.preventDefault();
+              if (lastPointer === "touch") { open(r.d, r.tr); return; }
+              if (e.ctrlKey || e.metaKey) { var cb = checkbox(r.tr); if (cb) cb.click(); return; }
+              selectOnly(r.tr);
+            });
+            body.addEventListener("dblclick", function (e) {
+              var r = rowFrom(e);
+              if (!r) return;
+              e.preventDefault();
+              window.getSelection && window.getSelection().removeAllRanges();
+              open(r.d, r.tr);
+            });
+            body.addEventListener("contextmenu", function (e) {
+              var tr = e.target.closest("#file_manager_list_body tr");
+              if (!tr) return;
+              var d = dataOf(tr);
+              if (!d) return;
+              e.preventDefault();
+              if (!checkbox(tr) || !checkbox(tr).checked) selectOnly(tr);
+              Menu.show(e.clientX, e.clientY, d, tr);
+            });
+            body.addEventListener("keydown", function (e) {
+              if (e.key !== "Enter") return;
+              var r = rowFrom(e);
+              if (r) { e.preventDefault(); open(r.d, r.tr); }
+            });
+            new MutationObserver(addDownloadButtons).observe(body, { childList: true, subtree: true });
+            addDownloadButtons();
+          }
+          if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+          else init();
+        })();
+    command: [sh, -c, "printf '%s' \"$$OWNER_JSON_SH\" >/tmp/owner.sh && sh /tmp/owner.sh && printf '%s' \"$$FILES_UI_SH\" >/tmp/files-ui.sh && sh /tmp/files-ui.sh && exec sftpgo serve"]
+    ports:
+      - "${TAILSCALE_IP}:8091:8091"
+    volumes:
+      - type: volume
+        source: sftpgo-data
+        target: /var/lib/sftpgo
+        volume:
+          nocopy: true
+    depends_on:
+      garage-setup:
+        condition: service_completed_successfully
+    networks:
+      - media
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8091/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - autoheal=true
+
+networks:
+  media:
+    name: media
+    external: true
+  # Created by provisioning (roles/beszel), internal: only beszel-agent and its
+  # socket proxy are on it.
+  beszel-socket:
+    name: beszel-socket
+    external: true
+
+volumes:
+  home-tls-acme:
+    name: home-tls-acme
+    external: true
+  beszel-data:
+    name: beszel-data
+    external: true
+  beszel-agent-data:
+    name: beszel-agent-data
+    external: true
+  garage-meta:
+    name: garage-meta
+    external: true
+  sftpgo-data:
+    name: sftpgo-data
+    external: true

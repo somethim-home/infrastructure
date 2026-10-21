@@ -1,0 +1,118 @@
+---
+- name: Read the CI deploy key
+  vars:
+    line_break: "\n"
+  ansible.builtin.set_fact:
+    ci_key_line: >-
+      {{ lookup('ansible.builtin.file', deploy_ssh_public_key_file | expanduser).split(line_break)
+         | map('trim') | reject('match', '^(#|$)') | first }}
+
+- name: Require a plain public key for the CI deploy key
+  ansible.builtin.assert:
+    that:
+      - ci_key_line is match(ssh_public_key_pattern)
+    fail_msg: "{{ deploy_ssh_public_key_file }} must hold one plain public key line (RUNBOOK.md, \"New CI deploy key\")."
+    quiet: true
+
+- name: Create the admin user with a locked password
+  ansible.builtin.user:
+    name: "{{ admin_user }}"
+    shell: /bin/bash
+    create_home: true
+    password: "!"
+    update_password: on_create
+  register: admin_account
+
+- name: Ensure the admin user's .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ admin_account.home }}/.ssh"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0700"
+
+- name: Find the home of the installer's account this bootstrap run logged in as
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ ssh_login_user.stdout }}"
+  when: bootstrap_run
+
+- name: Read the keys the owner installed for the installer's account with ssh-copy-id
+  ansible.builtin.slurp:
+    src: "{{ ansible_facts['getent_passwd'][ssh_login_user.stdout][4] }}/.ssh/authorized_keys"
+  register: bootstrap_authorized_keys
+  when: bootstrap_run
+
+- name: Require only the owner's plain public keys there, never the CI deploy key
+  vars:
+    bootstrap_key_lines: >-
+      {{ (bootstrap_authorized_keys.content | b64decode).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}
+  ansible.builtin.assert:
+    that:
+      - bootstrap_key_lines | length > 0
+      - bootstrap_key_lines | reject('match', ssh_public_key_pattern) | list | length == 0
+      - ci_key_line | regex_search('^[^ ]+ [^ ]+') not in (bootstrap_key_lines | map('regex_search', '^[^ ]+ [^ ]+') | list)
+    fail_msg: >-
+      {{ ssh_login_user.stdout }}'s authorized_keys on {{ inventory_hostname }} must hold only your own public keys,
+      installed with ssh-copy-id, as plain lines with no options, and never the CI deploy key
+      (RUNBOOK.md, "First provision over the LAN").
+    quiet: true
+  when: bootstrap_run
+
+- name: Give the admin user the owner's keys from the installer's account, once
+  ansible.builtin.copy:
+    src: "{{ ansible_facts['getent_passwd'][ssh_login_user.stdout][4] }}/.ssh/authorized_keys"
+    dest: "{{ admin_account.home }}/.ssh/authorized_keys"
+    remote_src: true
+    force: false
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0600"
+  when: bootstrap_run
+
+- name: Create the host configuration directory
+  ansible.builtin.file:
+    path: /etc/infra
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The admin run removes this account once the admin user has logged in itself
+# (ssh_access.yml), so the installer's sudo account does not outlive setup.
+- name: Remember the installer's account for removal by the first admin run
+  ansible.builtin.copy:
+    dest: /etc/infra/bootstrap-user
+    content: "{{ ssh_login_user.stdout }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: bootstrap_run
+
+- name: Read the admin user's keys
+  ansible.builtin.slurp:
+    src: "{{ admin_account.home }}/.ssh/authorized_keys"
+  register: admin_authorized_keys
+
+- name: Require plain public keys for the admin user, none of them the CI deploy key
+  vars:
+    admin_key_lines: >-
+      {{ (admin_authorized_keys.content | b64decode).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}
+  ansible.builtin.assert:
+    that:
+      - admin_key_lines | length > 0
+      - admin_key_lines | reject('match', ssh_public_key_pattern) | list | length == 0
+      - ci_key_line | regex_search('^[^ ]+ [^ ]+') not in (admin_key_lines | map('regex_search', '^[^ ]+ [^ ]+') | list)
+    fail_msg: >-
+      {{ admin_account.home }}/.ssh/authorized_keys must hold one or more of your plain public keys and never the
+      CI deploy key.
+    quiet: true
+
+- name: Give the admin user sudo that asks for its password
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ admin_user }}"
+    content: "{{ admin_user }} ALL=(ALL:ALL) ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
