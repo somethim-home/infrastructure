@@ -19,7 +19,13 @@
 #   snapshots/<date>/media/s3/         Garage's objects (/srv/media/s3), copied in the same stop
 #                                      as garage-meta, so the two match
 #   snapshots/<date>/media/home-files/ Home Files' ciphertext (/srv/media/home-files), copied in
-#                                      the same stop as home-data (Home's SQLite), so the two match
+#                                      the same stop as home-data (Home's SQLite: accounts, Media's
+#                                      catalogue, the AI chats, Books' library), so the two match;
+#                                      home-data without Media's cache (media-cache: pictures,
+#                                      trickplay, HLS) and Books' catalog covers and downloads in progress
+#   snapshots/<date>/media/{movies,shows}/  the film and series library's metadata only: the .nfo
+#                                      files, pictures and subtitle files Home and the owner keep next
+#                                      to the videos; never the videos themselves (they would not fit)
 #   snapshots/<date>/media/<name>/     /srv/media/{audiobooks,books,podcasts,photos}; photos
 #                                      without Immich's thumbs and encoded-video (it rebuilds them)
 #   snapshots/latest                   symlink to the newest complete snapshot
@@ -45,10 +51,10 @@
 #
 # Every step runs even when an earlier one failed; the script exits 1 if any
 # did, which starts infra-backup-failed.service (an error line in the journal).
-# Never touches the ollama-models and comfyui-data volumes (models and the
-# Stable Diffusion checkpoint download again), Jellyfin's cache and transcodes,
-# or home-keys (Home's keys stay out of the backups; the release writes them
-# again from the GitHub secrets).
+# Never touches the ollama-models, llama-models and comfyui-data volumes
+# (models and the Stable Diffusion checkpoint download again), Jellyfin's cache
+# and transcodes, or home-keys (Home's keys stay out of the backups; the release
+# writes them again from the GitHub secrets).
 # Restoring: RUNBOOK.md, "Restoring from the backup disk".
 set -euo pipefail
 umask 077
@@ -85,8 +91,19 @@ readonly service_data=(
   "sftpgo sftpgo-data"
   "home-server home-data media/home-files"
 )
+# <volume> <path inside it to leave out>...: caches inside a volume that service_data copies.
+declare -rA volume_excludes=(
+  [home-data]="media-cache books/catalog-covers books/.tmp"
+)
 # <folder> [<path inside it to leave out>...]
 readonly mirrored=(audiobooks books podcasts "photos thumbs encoded-video")
+# The film and series library: only what describes the videos (Home's .nfo
+# files, posters, fanart, stills, subtitle files), never the videos, and not
+# Home's uploads in progress (.home-uploads).
+readonly metadata_only=(movies shows)
+readonly metadata_types=(nfo jpg jpeg png webp tbn srt ass ssa vtt)
+# Extra rsync filters for the copy in progress (mirror_metadata sets them).
+copy_filters=()
 
 failures=0
 stopped=()
@@ -238,6 +255,7 @@ copy_tree() {
   for exclude in "$@"; do
     options+=("--exclude=/$exclude/")
   done
+  options+=("${copy_filters[@]}")
   [ -z "$link" ] || [ ! -d "$link" ] || options+=("--link-dest=$link")
   mkdir -p "$target"
   rsync "${options[@]}" "$source/" "$target/"
@@ -277,6 +295,7 @@ backup_apps() {
     read -r -a parts <<<"$spec"
     copy_volume "${parts[@]}"
   done
+  local -a excludes
   for spec in "${service_data[@]}"; do
     read -r -a parts <<<"$spec"
     name="${parts[0]}"
@@ -285,7 +304,8 @@ backup_apps() {
       if [[ "$item" == media/* ]]; then
         mirror_one "${item#media/}"
       else
-        copy_volume "$item"
+        read -r -a excludes <<<"${volume_excludes[$item]-}"
+        copy_volume "$item" "${excludes[@]}"
       fi
     done
     start_stopped
@@ -330,6 +350,21 @@ mirror_media() {
   done
 }
 
+# The films' and series' metadata: every folder, and in it only the files of
+# metadata_types (either case), linked against the previous snapshot like the rest.
+mirror_metadata() {
+  local name type
+  copy_filters=(--prune-empty-dirs "--include=*/")
+  for type in "${metadata_types[@]}"; do
+    copy_filters+=("--include=*.$type" "--include=*.${type^^}")
+  done
+  copy_filters+=("--exclude=*")
+  for name in "${metadata_only[@]}"; do
+    mirror_one "$name" .home-uploads
+  done
+  copy_filters=()
+}
+
 finish() {
   if [ "$failures" -gt 0 ]; then
     log "the incomplete snapshot is kept in $partial for inspection; the next run deletes it"
@@ -366,6 +401,7 @@ backup_postgres
 backup_immich
 backup_apps
 mirror_media
+mirror_metadata
 finish
 
 if [ "$failures" -gt 0 ]; then

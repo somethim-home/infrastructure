@@ -19,10 +19,10 @@
 #   media/garage.env        RPC secret, admin token (garage)
 #   media/garage-setup.env  admin token, S3 key     (garage-setup, imports the owner's key)
 #   media/sftpgo.env        files password, S3 key  (sftpgo, the file manager)
-#   home/home-keys.env      keys, mail, Beszel, power (home-keys, which writes them to files for home-server)
+#   home/home-keys.env      keys, mail, Beszel, power, TMDB (home-keys, which writes them to files for home-server)
 #   ghcr.env                registry login          (infra-apply's docker login)
 # home/home-server.env holds Home's settings and the owner's address, no secret.
-# The <stack>/.env files hold only image references, domains, uids and the models.
+# The <stack>/.env files hold only image references, domains, uids and gids and the models.
 - name: Render the infra release bundle on the runner
   hosts: localhost
   connection: local
@@ -60,6 +60,7 @@
       - home_data_key
       - home_resend_api_key
       - home_power_key
+      - home_tmdb_read_token
       - home_beszel_password
 
   pre_tasks:
@@ -142,12 +143,34 @@
           - home_beszel_user | default('') == '' or home_beszel_password | default('') is match('^[A-Za-z0-9]{16,}$')
           - home_power_key | default('') == '' or home_power_key is match('^[A-Za-z0-9+/]{43}=$')
           - home_power_key | default('') == '' or home_power_key not in [home_secret_key, home_data_key]
+          - home_tmdb_read_token | default('') == '' or home_tmdb_read_token is match('^eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$')
+          - home_media_transcodes | int >= 1 and home_media_transcodes_quiet | int >= 1
         fail_msg: >-
           Home needs the HOME_OWNER_EMAIL repository variable (the owner's address: setup links only ever go
           there), production.yml's home_files_capacity as a size (600G), and, when production.yml names
           home_beszel_user, that user's email and the HOME_BESZEL_PASSWORD secret of at least 16 letters and
-          digits (RUNBOOK.md, "Home"), and HOME_POWER_KEY, when set, as base64 of 32 bytes unlike Home's other two keys:
-          the host's /etc/infra/home-power.key (RUNBOOK.md, "Home's power control").
+          digits (RUNBOOK.md, "Home"), HOME_POWER_KEY, when set, as base64 of 32 bytes unlike Home's other two keys:
+          the host's /etc/infra/home-power.key (RUNBOOK.md, "Home's power control"), HOME_TMDB_READ_TOKEN, when
+          set, as TMDB's API Read Access Token (the long eyJ… token with two dots, not the short API key), and
+          production.yml's home_media_transcodes and home_media_transcodes_quiet of at least 1.
+        quiet: true
+
+    - name: Require the AI models Home lists and llama-server serves
+      ansible.builtin.assert:
+        that:
+          - home_ai_models is sequence and home_ai_models is not string and home_ai_models | length > 0
+          - home_ai_models | map(attribute='id') | select('match', '^[a-z0-9][a-z0-9._-]*$') | list | length == home_ai_models | length
+          - home_ai_models | map(attribute='id') | unique | list | length == home_ai_models | length
+          - home_ai_models | map(attribute='file') | select('match', '^[A-Za-z0-9][A-Za-z0-9._-]*\\.gguf$') | list | length == home_ai_models | length
+          - home_ai_models | map(attribute='label') | select('match', '^[^;|=#$"\'`\\\\]+$') | list | length == home_ai_models | length
+          - home_ai_models | map(attribute='about') | select('match', '^[^;|=#$"\'`\\\\]*$') | list | length == home_ai_models | length
+          - home_ai_models | map(attribute='day_only') | select('boolean') | list | length == home_ai_models | length
+          - not home_ai_models[0].day_only
+        fail_msg: >-
+          production.yml's home_ai_models must be a non-empty list of models, each with a distinct id (lower-case
+          letters, digits, . _ -), a file ending in .gguf, a label and an about line without ; | = # $ quotes or
+          backslashes (HOME_AI_MODELS is built from them), and day_only true or false; the first is Home's default
+          and may not be day_only.
         quiet: true
 
     - name: Require one https name per tailnet service under the links page's name
@@ -168,8 +191,9 @@
         that:
           - gpu_enabled | bool
         fail_msg: >-
-          production.yml sets gpu_enabled: false, but Ollama (ai) and Beszel's agent (media) reserve the NVIDIA
-          GPU, so they could not start. Set gpu_enabled: true and provision (roles/gpu) before releasing.
+          production.yml sets gpu_enabled: false, but Ollama and llama-server (ai), Beszel's agent (media) and
+          home-server (home) reserve the NVIDIA GPU, so they could not start. Set gpu_enabled: true and provision
+          (roles/gpu) before releasing.
         quiet: true
 
     - name: Require a bundle directory that does not exist yet

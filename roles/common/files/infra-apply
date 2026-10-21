@@ -268,7 +268,8 @@ validate_env_files() {
   require_env "$dir" media/sftpgo.env '^FILES_PASSWORD=[A-Za-z0-9]{16,}$' '^S3_ACCESS_KEY_ID=GK[0-9a-f]{24}$' \
     '^S3_SECRET_ACCESS_KEY=[0-9a-f]{64}$'
   require_env "$dir" home/home-keys.env '^HOME_SECRET_KEY=[A-Za-z0-9+/]{43}=$' '^HOME_DATA_KEY=[A-Za-z0-9+/]{43}=$' \
-    '^HOME_SMTP_PASSWORD=[A-Za-z0-9_-]{16,}$' '^HOME_BESZEL_PASSWORD=([A-Za-z0-9]{16,})?$' '^HOME_POWER_KEY=([A-Za-z0-9+/]{43}=)?$'
+    '^HOME_SMTP_PASSWORD=[A-Za-z0-9_-]{16,}$' '^HOME_BESZEL_PASSWORD=([A-Za-z0-9]{16,})?$' '^HOME_POWER_KEY=([A-Za-z0-9+/]{43}=)?$' \
+    '^HOME_TMDB_READ_TOKEN=(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)?$'
 }
 
 # HOME_POWER_KEY, when set, must be the key home-power checks requests with,
@@ -363,7 +364,8 @@ guard_stacks() {
     case "$stack" in
       ai) options+=("--service-user=$ai_user") ;;
       media) options+=("--service-user=$media_user") ;;
-      home) options+=("--service-user=$home_user") ;;
+      # home-server joins the media group to write into the film and series library.
+      home) options+=("--service-user=$home_user" "--media-gid=${media_user#*:}") ;;
     esac
     if ! guarded="$(python3 -I "$guard" "$dir.$stack.json" "$dir/$stack" "$stack" "${options[@]}" "${repos[@]}")"; then
       untouched "$stack/${guarded:-docker-compose.yml: the compose model could not be checked}"
@@ -625,9 +627,11 @@ check_public() {
 # from production.yml's home_hosts), with a certificate curl trusts: Let's
 # Encrypt has issued it through Cloudflare's DNS. Each is asked by name, pinned
 # to the tailnet address, the way a tailnet browser reaches it; Home must
-# answer 200 on /healthz (home-server's own, so the route reaches it), a
-# service 2xx, 3xx, 401 or 403 on / (a login redirect, or 403 from S3 without a
-# key, proves the route reaches the app; a 404 is Traefik without a route).
+# answer 200 on /healthz (home-server's own, so the route reaches it) and on
+# /app/ (the web app's index.html, which Home's image carries: nothing in front
+# of it may strip that path), a service 2xx, 3xx, 401 or 403 on / (a login
+# redirect, or 403 from S3 without a key, proves the route reaches the app; a
+# 404 is Traefik without a route).
 check_home_tls() {
   local release="$1" name path code deadline want want_text
   local -a names checked=()
@@ -648,7 +652,16 @@ check_home_tls() {
     done
     checked+=("$name")
   done
-  log "home-tls serves https with a trusted certificate on $tailscale_ip for ${checked[*]}"
+  deadline=$((SECONDS + route_wait_seconds))
+  while :; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "${names[0]}:443:$tailscale_ip" "https://${names[0]}/app/" || true)"
+    [ "${code:-000}" != 200 ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "https://${names[0]}/app/ on $tailscale_ip answered ${code:-000}, expected 200: Home's web app (HOME_WEB_APP_DIR, /app in its image) is missing from the image that runs, or home-tls does not pass /app to home-server"
+    fi
+    sleep "$poll_seconds"
+  done
+  log "home-tls serves https with a trusted certificate on $tailscale_ip for ${checked[*]}, and Home's web app at https://${names[0]}/app/"
 }
 
 # The one-shots the dashboard, S3 storage and Home depend on finished with exit

@@ -129,6 +129,7 @@ cat >"$work/vars.json" <<JSON
   "home_data_key": "SGFybmVzc0hvbWVEYXRhS2V5MDEyMzQ1Njc4OWFiY2Q=",
   "home_resend_api_key": "HarnessHomeResendKey0123",
   "home_power_key": "$host_power_key",
+  "home_tmdb_read_token": "eyJIb21lVG1kYg.eyJIYXJuZXNzVG1kYiI6MX0.SGFybmVzc1RtZGJTaWduYXR1cmU",
   "home_beszel_password": "",
   "deploy_key_file": "$work/deploy_key.pub"
 }
@@ -140,7 +141,7 @@ secrets=(ghp_HarnessToken0123456789 HarnessPgSuperuser0123456789abcdefA HarnessP
   HarnessBeszelPassword0123 harness-beszel-agent-token-0123456789 aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111
   HarnessGarageAdmin0123456789abcdefAB GKcccc3333cccc3333cccc3333 bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222
   HarnessFilesPassword0123 SGFybmVzc0hvbWVTZWNyZXRLZXkwMTIzNDU2Nzg5YWI= SGFybmVzc0hvbWVEYXRhS2V5MDEyMzQ1Njc4OWFiY2Q=
-  HarnessHomeResendKey0123 "$host_power_key")
+  HarnessHomeResendKey0123 "$host_power_key" eyJIb21lVG1kYg.eyJIYXJuZXNzVG1kYiI6MX0.SGFybmVzc1RtZGJTaWduYXR1cmU)
 
 build() {
   "$root/build-bundle.sh" "$@" >"$work/build.log" 2>&1
@@ -173,7 +174,7 @@ owner_of() {
     HarnessGarageAdmin*) echo "media/garage.env media/garage-setup.env" ;;
     GKcccc3333* | bbbb2222*) echo "media/garage-setup.env media/sftpgo.env" ;;
     HarnessFilesPassword*) echo media/sftpgo.env ;;
-    SGFybmVzc0hvbWV* | HarnessHomeResend*) echo home/home-keys.env ;;
+    SGFybmVzc0hvbWV* | HarnessHomeResend* | eyJIb21lVG1kYg*) echo home/home-keys.env ;;
     *) echo portfolio/portfolio.env ;;
   esac
 }
@@ -183,21 +184,29 @@ for secret in "${secrets[@]}"; do
   [ "$found" = "$want" ] || { echo "FAIL a secret is in '$found', expected only '$want'"; exit 1; }
 done
 for file in portfolio/.env hypernova/.env ai/.env media/.env home/.env; do
-  if grep -vqE '^(PORTFOLIO_IMAGE|PROVIDER_IMAGE|WEB_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|WEB_DOMAIN|AI_UID|AI_GID|OLLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|HOST_[A-Z0-9]+|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/good/$file"; then
+  if grep -vqE '^(PORTFOLIO_IMAGE|PROVIDER_IMAGE|WEB_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|WEB_DOMAIN|AI_UID|AI_GID|OLLAMA_MODELS|LLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|HOST_[A-Z0-9]+|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/good/$file"; then
     cat "$work/good/$file"; echo "FAIL $file holds more than image references, domains, the service accounts, the models and the contact addresses"; exit 1
   fi
 done
 grep -qx 'OLLAMA_MODELS=qwen3:4b qwen2.5-coder:14b qwen3:14b' "$work/good/ai/.env" || { echo "FAIL ai/.env does not list production.yml's ollama_models"; exit 1; }
+grep -qx 'LLAMA_MODELS=qwen3-8b:Qwen3-8B-Q5_K_M.gguf gemma-3-12b:gemma-3-12b-it-q4_0.gguf qwen3-14b:Qwen3-14B-Q4_K_M.gguf' "$work/good/ai/.env" ||
+  { cat "$work/good/ai/.env"; echo "FAIL ai/.env does not list production.yml's home_ai_models for llama-server"; exit 1; }
+grep -qx 'MEDIA_GID=2000' "$work/good/home/.env" || { cat "$work/good/home/.env"; echo "FAIL home/.env does not name the media group home-server joins"; exit 1; }
 grep -q '^HOST_' "$work/good/ai/.env" && { cat "$work/good/ai/.env"; echo "FAIL ai/.env names an https host, but nothing in the ai stack is served"; exit 1; }
 for want in HOST_FILES=files HOST_STATUS=status HOST_S3=s3; do
   grep -qx "$want.home.arbikullakshi.com" "$work/good/media/.env" || { cat "$work/good/media/.env"; echo "FAIL media/.env lacks $want.home.arbikullakshi.com"; exit 1; }
 done
 for want in HOME_OWNER_EMAIL=owner@example.com HOME_PUBLIC_ORIGIN=https://home.arbikullakshi.com HOME_SECRET_KEY_FILE=/run/keys/secret_key \
   HOME_DATA_KEY_FILE=/run/keys/data_key HOME_SMTP_PASSWORD_FILE=/run/keys/smtp_password HOME_FILES_ROOT=/files HOME_FILES_CAPACITY=600G HOME_BESZEL_URL= \
-  HOME_POWER_DIR=/run/power HOME_POWER_KEY_FILE=/run/keys/power_key; do
+  HOME_POWER_DIR=/run/power HOME_POWER_KEY_FILE=/run/keys/power_key HOME_MEDIA_FILMS=/data/media/films HOME_MEDIA_SERIES=/data/media/series \
+  HOME_MEDIA_CACHE=/data/media-cache HOME_MEDIA_QUIET_HOURS=23:00-08:00 HOME_MEDIA_TIMEZONE=Europe/Berlin HOME_MEDIA_TRANSCODES=2 HOME_MEDIA_TRANSCODES_QUIET=1 \
+  HOME_TMDB_READ_TOKEN_FILE=/run/keys/tmdb_read_token HOME_BOOKS_LIBRARY=/data/books HOME_AI_URL=http://llama:8080 \
+  "HOME_AI_MODELS=qwen3-8b=Qwen3 8B|Fast everyday answers, any hour;gemma-3-12b=Gemma 3 12B|Writing and explaining, careful with kids;qwen3-14b=Qwen3 14B|Code and reasoning, by day only" \
+  HOME_AI_DAY_ONLY_MODELS=qwen3-14b HOME_AI_DATABASE_PATH=/data/ai.db HOME_AI_QUIET_HOURS=23:00-08:00 HOME_AI_TIMEZONE=Europe/Berlin; do
   grep -qxF "$want" "$work/good/home/home-server.env" || { cat "$work/good/home/home-server.env"; echo "FAIL home/home-server.env lacks $want"; exit 1; }
 done
 grep -qx 'HOME_BESZEL_PASSWORD=' "$work/good/home/home-keys.env" || { echo "FAIL home-keys.env holds a Beszel password while production.yml names no Beszel user"; exit 1; }
+grep -q 'HOME_WEB_APP_DIR' "$work/good/home/home-server.env" && { echo "FAIL home-server.env sets HOME_WEB_APP_DIR, which Home's image sets to its own /app"; exit 1; }
 grep -qx 'OLLAMA_MODEL=qwen3:4b' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not ask for production.yml's hypernova_ollama_model"; exit 1; }
 grep -qx 'OLLAMA_HOST=http://ollama:11434' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not reach Ollama on llm"; exit 1; }
 echo "ok   bundle: each secret is only in the env file of the container that reads it"
@@ -279,6 +288,29 @@ render_refused "the same key twice for Home" '.home_data_key = .home_secret_key'
 render_refused "no Resend key for Home's mail" '.home_resend_api_key = ""'
 render_refused "a Beszel user for Home without its password" '.home_beszel_user = "status@example.com"'
 render_refused "a Home Files pool that is not a size" '.home_files_capacity = "lots"'
+render_refused "TMDB's short API key instead of its Read Access Token" '.home_tmdb_read_token = "0123456789abcdef0123456789abcdef"'
+grep -q "HOME_TMDB_READ_TOKEN, when" "$work/build.log" || { cat "$work/build.log"; echo "FAIL a short TMDB key was refused for another reason"; exit 1; }
+# production.yml's home_ai_models as a jq literal, so a case changes one field of the real list.
+ai_models="$(python3 -I -c 'import json, sys, yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))["home_ai_models"]))' "$root/production.yml")"
+render_refused "a day-only default AI model" ".home_ai_models = $ai_models | .home_ai_models[0].day_only = true"
+grep -q "home_ai_models must be" "$work/build.log" || { cat "$work/build.log"; echo "FAIL a day-only default model was refused for another reason"; exit 1; }
+render_refused "an AI model label that would split HOME_AI_MODELS" ".home_ai_models = $ai_models | .home_ai_models[1].label = \"Gemma; 12B\""
+render_refused "an AI model whose file is not a GGUF" ".home_ai_models = $ai_models | .home_ai_models[2].file = \"../etc/passwd\""
+render_refused "two AI models with one id" ".home_ai_models = $ai_models | .home_ai_models[1].id = \"qwen3-8b\""
+render_refused "no HLS transcode allowed" '.home_media_transcodes = 0'
+jq 'del(.home_tmdb_read_token)' "$work/vars.json" >"$work/vars-notmdb.json"
+build "$work/vars-notmdb.json" "$work/notmdb.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh without a TMDB token"; exit 1; }
+unpack "$work/notmdb.tgz" "$work/notmdb"
+if ! grep -qx 'HOME_TMDB_READ_TOKEN=' "$work/notmdb/home/home-keys.env" || ! grep -qx 'HOME_TMDB_READ_TOKEN_FILE=' "$work/notmdb/home/home-server.env"; then
+  echo "FAIL without a TMDB token Home is still pointed at a token file"; exit 1
+fi
+jq '.quiet_hours_enabled = false' "$work/vars.json" >"$work/vars-noquiet.json"
+build "$work/vars-noquiet.json" "$work/noquiet.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh without quiet hours"; exit 1; }
+unpack "$work/noquiet.tgz" "$work/noquiet"
+if ! grep -qx 'HOME_AI_QUIET_HOURS=off' "$work/noquiet/home/home-server.env" || ! grep -qx 'HOME_MEDIA_QUIET_HOURS=' "$work/noquiet/home/home-server.env"; then
+  cat "$work/noquiet/home/home-server.env"; echo "FAIL Home keeps quiet hours that production.yml turned off"; exit 1
+fi
+echo "ok   bundle: Home's TMDB token file only with a token; its quiet hours follow production.yml's"
 jq '.home_beszel_user = "status@example.com" | .home_beszel_password = "HarnessHomeBeszel0123"' "$work/vars.json" >"$work/vars-beszel.json"
 build "$work/vars-beszel.json" "$work/beszel.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh with a Beszel user for Home"; exit 1; }
 no_secret_in "$work/build.log" "build-bundle.sh with a Beszel user for Home"
@@ -316,12 +348,12 @@ first_id="$(current_release)"
 for stack in database portfolio hypernova tunnel ai media home; do
   grep -q "compose model accepted: .* in the $stack stack, no privileged settings" "$work/out" || { cat "$work/out"; echo "FAIL the checked-in $stack stack did not pass the compose guard"; exit 1; }
 done
-grep -qF "compose model accepted: 2 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, no bind mount but none, the GPU only for ollama, no Docker socket" "$work/out" ||
-  { cat "$work/out"; echo "FAIL the ai stack summary does not say it publishes nothing and gives the GPU to Ollama alone"; exit 1; }
+grep -qF "compose model accepted: 3 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, no bind mount but none, the GPU only for llama, ollama, no Docker socket" "$work/out" ||
+  { cat "$work/out"; echo "FAIL the ai stack summary does not say it publishes nothing and gives the GPU to Ollama and llama-server alone"; exit 1; }
 grep -qF "compose model accepted: 9 service(s) in the media stack, no privileged settings, no host port but beszel $tailscale_ip:8090, garage $tailscale_ip:3900, home $tailscale_ip:80, home-tls $tailscale_ip:443, sftpgo $tailscale_ip:8091 on the tailnet, no bind mount but beszel-agent /srv/media/.beszel (ro), beszel-agent /srv/backup (ro), garage /srv/media/s3, the GPU only for beszel-agent, no Docker socket" "$work/out" ||
   { cat "$work/out"; echo "FAIL the media stack summary does not name its tailnet ports, its bind mounts and the GPU"; exit 1; }
-grep -qF "compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, the GPU only for none, no Docker socket" "$work/out" ||
-  { cat "$work/out"; echo "FAIL the home stack summary does not name its two bind mounts (Files and the power requests)"; exit 1; }
+grep -qF "compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, no Docker socket, no extra group but home-server +media" "$work/out" ||
+  { cat "$work/out"; echo "FAIL the home stack summary does not name its four bind mounts (Files, the power requests, the films and series), the GPU and the media group"; exit 1; }
 echo "ok   the seven checked-in stacks pass the compose guard"
 [ -f "$state/stack/releases/$first_id/.verified" ] || { echo "FAIL the release was not marked verified"; exit 1; }
 for file in ghcr.env database/postgres.env database/provision.sql portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env home/.env home/home-server.env home/home-keys.env manifest.sha256; do
@@ -348,7 +380,8 @@ grep -qxF "curl tls home.arbikullakshi.com:443:$tailscale_ip https://home.arbiku
 for name in files.home status.home s3.home; do
   grep -qxF "curl tls $name.arbikullakshi.com:443:$tailscale_ip https://$name.arbikullakshi.com/" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not ask home-tls for $name.arbikullakshi.com on the tailnet address"; exit 1; }
 done
-grep -qF "infra-apply: home-tls serves https with a trusted certificate on $tailscale_ip for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com" "$work/out" || { cat "$work/out"; echo "FAIL verify did not report home-tls's certificate for every name"; exit 1; }
+grep -qF "infra-apply: home-tls serves https with a trusted certificate on $tailscale_ip for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/" "$work/out" || { cat "$work/out"; echo "FAIL verify did not report home-tls's certificate for every name and Home's web app"; exit 1; }
+grep -qxF "curl tls home.arbikullakshi.com:443:$tailscale_ip https://home.arbikullakshi.com/app/" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not ask home-tls for Home's web app on the tailnet address"; exit 1; }
 [ ! -e "$state/stack/previous" ] || { echo "FAIL a first release has no previous release"; exit 1; }
 printf '%s\n' "portfolio=$portfolio_repo@$(d 11)" "prizm-provider=$provider_repo@$(d 21)" "prizm-web=$web_repo@$(d 31)" "home-server=$home_repo@$(d 51)" |
   cmp -s - "$state/stack/current/running-images.env" || { cat "$state/stack/current/running-images.env"; echo "FAIL running-images.env does not record the running digests"; exit 1; }
@@ -474,6 +507,11 @@ new_state
 printf '403' >"$state/curl.tls.s3.home.arbikullakshi.com"
 printf '302' >"$state/curl.tls.files.home.arbikullakshi.com"
 expect_ok "S3 refusing an unsigned request and the file manager redirecting to its login count as routed" "home-tls serves https with a trusted certificate" "$work/good.tgz" release
+
+new_state
+printf '404' >"$state/curl.tls-app.home.arbikullakshi.com"
+expect_refused "a Home image without its web app" "https://home\\.arbikullakshi\\.com/app/ on $tailscale_ip answered 404, expected 200: Home's web app" "$work/good.tgz" release
+[ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release without Home's web app was marked verified"; exit 1; }
 echo "ok   verify requires https://home.arbikullakshi.com/healthz from home-server with a trusted certificate on the Tailscale address"
 
 new_state
@@ -612,7 +650,11 @@ refused_bundle "garage-setup.env with a malformed key ID" "media/garage-setup\\.
 variant badhomekeys
 printf 'HOME_SECRET_KEY=SGFybmVzc0hvbWVTZWNyZXRLZXkwMTIzNDU2Nzg5YWI=\nHOME_DATA_KEY=SGFybmVzc0hvbWVEYXRhS2V5MDEyMzQ1Njc4OWFiY2Q=\nHOME_SMTP_PASSWORD=HarnessHomeResendKey0123\nHOME_BESZEL_PASSWORD=\nHOME_POWER_KEY=\nHOME_DATABASE_PATH=/etc/passwd\n' >"$work/badhomekeys/home/home-keys.env"
 repack badhomekeys
-refused_bundle "home-keys.env with an extra key" "home/home-keys\\.env must set exactly HOME_SECRET_KEY HOME_DATA_KEY HOME_SMTP_PASSWORD HOME_BESZEL_PASSWORD HOME_POWER_KEY" "$work/badhomekeys.tgz"
+refused_bundle "home-keys.env with an extra key" "home/home-keys\\.env must set exactly HOME_SECRET_KEY HOME_DATA_KEY HOME_SMTP_PASSWORD HOME_BESZEL_PASSWORD HOME_POWER_KEY HOME_TMDB_READ_TOKEN" "$work/badhomekeys.tgz"
+variant badtmdb
+sed -i 's,^HOME_TMDB_READ_TOKEN=.*,HOME_TMDB_READ_TOKEN=0123456789abcdef0123456789abcdef,' "$work/badtmdb/home/home-keys.env"
+repack badtmdb
+refused_bundle "a TMDB API key where the Read Access Token belongs" "home/home-keys\\.env must set exactly .* HOME_TMDB_READ_TOKEN" "$work/badtmdb.tgz"
 
 # The power key: the bundle's must be the one provisioning made on the host, or none.
 variant powerkey
@@ -788,19 +830,26 @@ compose_case "a volume on the tunnel" tunnel 'the volumes are \["state"\]; the t
 compose_case "an unpinned cloudflared" tunnel 'service cloudflared runs "cloudflare/cloudflared:latest"' "import re; text = re.sub(r'image: cloudflare/cloudflared:\S+', 'image: cloudflare/cloudflared:latest', text)"
 # The ai stack: hardened, nothing published, the GPU for Ollama alone.
 compose_case "Ollama published on the tailnet" ai "service ollama sets ports, which publishes a host port" "text = text.replace('    container_name: ollama\n', '    container_name: ollama\n    ports:\n      - \"\${TAILSCALE_IP}:11434:11434\"\n')"
-compose_case "the GPU for ollama-pull" ai "service ollama-pull sets deploy, which can reserve host devices; only beszel-agent, ollama may reserve the GPU" "text = text.replace('    container_name: ollama-pull\n', '    container_name: ollama-pull\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
+compose_case "the GPU for ollama-pull" ai "service ollama-pull sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: ollama-pull\n', '    container_name: ollama-pull\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
 compose_case "Ollama with deploy labels" ai "service ollama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('    deploy:\n      resources:', '    deploy:\n      labels:\n        x-extra: \"1\"\n      resources:', 1)"
 compose_case "Ollama reserving more than the GPU" ai "service ollama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('capabilities: [gpu]', 'capabilities: [gpu, utility]', 1)"
 compose_case "Ollama as root" ai 'service ollama runs as "0:0"; it must run as 2001:2001' "text = text.replace('    container_name: ollama\n    user: \"\${AI_UID}:\${AI_GID}\"\n', '    container_name: ollama\n    user: \"0:0\"\n')"
 compose_case "ollama-pull without a memory limit" ai "service ollama-pull sets no mem_limit" "text = text.replace('    mem_limit: 128m\n', '')"
 compose_case "ollama-pull keeping its capabilities" ai "service ollama-pull does not drop every capability" "text = text.replace('    restart: \"no\"\n    read_only: true\n    cap_drop: [ALL]\n', '    restart: \"no\"\n    read_only: true\n')"
 compose_case "Ollama on the data network" ai 'network data is "data"; the ai stack may only join' "text = text.replace('      - ai\n      - llm\n', '      - ai\n      - llm\n      - data\n', 1).replace('networks:\n  ai:\n', 'networks:\n  data:\n    name: data\n    external: true\n  ai:\n')"
-compose_case "ollama-pull on llm" ai "service ollama-pull joins llm; ollama-pull may only join ai" "text = text.replace('    networks:\n      - ai\n\nnetworks:', '    networks:\n      - ai\n      - llm\n\nnetworks:')"
+compose_case "ollama-pull on llm" ai "service ollama-pull joins llm; ollama-pull may only join ai" "text = text.replace('    networks:\n      - ai\n\n  # llama.cpp', '    networks:\n      - ai\n      - llm\n\n  # llama.cpp')"
 compose_case "Ollama reading another stack's secret" ai 'service ollama reads env_file ".*home-tls.env"' "text = text.replace('    environment:\n      # The models', '    env_file: ../media/home-tls.env\n    environment:\n      # The models')"
 compose_case "a bind mount into Ollama" ai 'service ollama has a "bind" mount of "/srv/media"' "text = text.replace('    volumes:\n      - type: volume\n        source: ollama-models\n', '    volumes:\n      - /srv/media:/media:ro\n      - type: volume\n        source: ollama-models\n')"
 compose_case "a Watchtower label on Ollama" ai "service ollama sets the label com.centurylinklabs.watchtower.enable" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - com.centurylinklabs.watchtower.enable=true\n', 1)"
 compose_case "a service named apart from its container" ai 'service pull names its container "ollama-pull"' "text = text.replace('  ollama-pull:\n    image:', '  pull:\n    image:')"
 compose_case "the models volume created by the release" ai 'volume ollama-models is "ollama-models"; the ai stack keeps its data in "ollama-models" \(external\)' "text = text.replace('  ollama-models:\n    name: ollama-models\n    external: true\n', '  ollama-models:\n    name: ollama-models\n')"
+# llama-server: on home-llm alone, hardened as the ai account, published nowhere.
+compose_case "llama-server on llm, Ollama's line" ai "service llama joins llm; llama may only join home-llm" "text = text.replace('    networks:\n      - home-llm\n    healthcheck:', '    networks:\n      - home-llm\n      - llm\n    healthcheck:')"
+compose_case "llama-server on the ai network, with a route out" ai "service llama joins ai; llama may only join home-llm" "text = text.replace('    networks:\n      - home-llm\n    healthcheck:', '    networks:\n      - home-llm\n      - ai\n    healthcheck:')"
+compose_case "llama-server published on the tailnet" ai "service llama sets ports, which publishes a host port" "text = text.replace('    container_name: llama\n', '    container_name: llama\n    ports:\n      - \"\${TAILSCALE_IP}:8080:8080\"\n')"
+compose_case "llama-server as root" ai 'service llama runs as "0:0"; it must run as 2001:2001' "text = text.replace('    container_name: llama\n    user: \"\${AI_UID}:\${AI_GID}\"\n', '    container_name: llama\n    user: \"0:0\"\n')"
+compose_case "llama-server unpinned" ai 'service llama runs "ghcr.io/ggml-org/llama.cpp:server-cuda"' "import re; text = re.sub(r'image: ghcr.io/ggml-org/llama.cpp:\S+', 'image: ghcr.io/ggml-org/llama.cpp:server-cuda', text)"
+compose_case "llama-server reading the film library" ai 'service llama has a "bind" mount of "/srv/media/movies"' "text = text.replace('      - type: volume\n        source: llama-models\n', '      - type: bind\n        source: /srv/media/movies\n        target: /films\n        bind:\n          create_host_path: false\n      - type: volume\n        source: llama-models\n', 1)"
 compose_case "hypernova's web app on llm" hypernova "service web joins llm; prizm-web may only join edge" "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - llm\n    labels:')"
 
 # The media stack: tailnet-only, hardened, only Garage's objects and Beszel's two size folders bound.
@@ -822,23 +871,40 @@ compose_case "a bind mount in the short syntax" media 'service garage mounts /sr
 compose_case "a shared mount propagation" media 'service garage mounts /srv/media/s3 as' "text = text.replace('        target: /data\n        bind:\n          create_host_path: false\n', '        target: /data\n        bind:\n          create_host_path: false\n          propagation: rshared\n')"
 compose_case "the host's /etc in Beszel's agent" media 'service beszel-agent has a "bind" mount of "/etc"' "text = text.replace('        source: /srv/media/.beszel\n', '        source: /etc\n')"
 compose_case "the file manager as root" media 'service sftpgo runs as "0:0"; it must run as 2000:2000' "text = text.replace('    container_name: sftpgo\n    user: \"\${MEDIA_UID}:\${MEDIA_GID}\"\n', '    container_name: sftpgo\n    user: \"0:0\"\n')"
-compose_case "the GPU for the file manager" media "service sftpgo sets deploy, which can reserve host devices; only beszel-agent, ollama may reserve the GPU" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
+compose_case "the GPU for the file manager" media "service sftpgo sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
 compose_case "the links page on the edge network" media 'network edge is "edge"; the media stack may only join the existing network\(s\) beszel-socket and media' "text = text.replace('$home_networks', '    networks:\n      - media\n      - edge\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  media:\n')"
 compose_case "a Traefik route to the links page" media "service home sets the label traefik.enable" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - traefik.enable=true\n', 1)"
 compose_case "the links page on the agent's socket network" media 'service home joins beszel-socket; home may only join media' "text = text.replace('$home_networks', '    networks:\n      - media\n      - beszel-socket\n    healthcheck:', 1)"
 compose_case "an env file from another stack in the media stack" media 'service home reads env_file ".*"; the media stack may only read' "text = text.replace('    container_name: home\n', '    container_name: home\n    env_file: ../ai/.env\n')"
 compose_case "the links page reading home-tls's secret" media 'service home reads env_file ".*home-tls.env"; in the media stack beszel, beszel-agent, beszel-pair, garage, garage-setup, home-tls, sftpgo may read an env file' "text = text.replace('    container_name: home\n', '    container_name: home\n    env_file: home-tls.env\n')"
 # The home stack: tailnet-only behind home-tls, hardened as 65532, only its Files folder bound.
-compose_case "home-server on the edge network" home 'network edge is "edge"; the home stack may only join the existing network\(s\) media' "text = text.replace('    networks:\n      - media\n    healthcheck:', '    networks:\n      - media\n      - edge\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  media:\n')"
+compose_case "home-server on the edge network" home 'network edge is "edge"; the home stack may only join the existing network\(s\) home-llm and media' "text = text.replace('    networks:\n      - media\n      - home-llm\n    healthcheck:', '    networks:\n      - media\n      - home-llm\n      - edge\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  media:\n')"
 compose_case "home-server as root" home 'service home-server runs as "0:0"; it must run as 65532:65532' "text = text.replace('    container_name: home-server\n    user: \"\${HOME_UID}:\${HOME_GID}\"\n', '    container_name: home-server\n    user: \"0:0\"\n')"
 compose_case "home-server reading its keys' env file" home 'service home-server reads env_file ".*home-keys.env"; in the home stack home-keys, home-server may read an env file, each its own' "text = text.replace('    env_file: home-server.env\n', '    env_file: [home-server.env, home-keys.env]\n')"
-compose_case "the whole media disk in home-server" home 'service home-server has a "bind" mount of "/srv/media"; a release may only use its named volumes and tmpfs, and /run/home-power, /srv/media/home-files' "text = text.replace('        source: /srv/media/home-files\n', '        source: /srv/media\n')"
+compose_case "the whole media disk in home-server" home 'service home-server has a "bind" mount of "/srv/media"; a release may only use its named volumes and tmpfs, and /run/home-power, /srv/media/home-files, /srv/media/movies, /srv/media/shows' "text = text.replace('        source: /srv/media/home-files\n', '        source: /srv/media\n')"
 compose_case "an edge route to home-server" home "service home-server sets the label traefik.enable; the home stack is never routed by the edge Traefik" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - traefik.enable=true\n', 1)"
 compose_case "the power directory read-only" home 'service home-server mounts /run/home-power as .*; it may only mount it at /run/power, with' "text = text.replace('        target: /run/power\n', '        target: /run/power\n        read_only: true\n')"
 compose_case "the power directory at another path" home 'service home-server mounts /run/home-power as .*; it may only mount it at /run/power' "text = text.replace('        target: /run/power\n', '        target: /run/keys/power\n')"
-compose_case "all of /run in home-server" home 'service home-server has a "bind" mount of "/run"; a release may only use its named volumes and tmpfs, and /run/home-power, /srv/media/home-files' "text = text.replace('        source: /run/home-power\n', '        source: /run\n')"
+compose_case "all of /run in home-server" home 'service home-server has a "bind" mount of "/run"; a release may only use its named volumes and tmpfs, and /run/home-power, /srv/media/home-files, /srv/media/movies, /srv/media/shows' "text = text.replace('        source: /run/home-power\n', '        source: /run\n')"
 compose_case "the power directory in home-keys" home 'service home-keys has a "bind" mount of "/run/home-power"; a release may only use its named volumes and tmpfs' "text = text.replace('        target: /keys\n', '        target: /keys\n      - type: bind\n        source: /run/home-power\n        target: /run/power\n        bind:\n          create_host_path: false\n', 1)"
 compose_case "a published Home port" home "service home-server sets ports, which publishes a host port" "text = text.replace('    container_name: home-server\n', '    container_name: home-server\n    ports:\n      - \"\${TAILSCALE_IP}:8080:8080\"\n')"
+# Home's media library, its GPU and the media group: home-server's alone, at fixed paths, nothing more.
+films_mount='        source: /srv/media/movies\n        target: /data/media/films\n'
+gpu_reservation='    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n'
+compose_case "the GPU for home-keys" home "service home-keys sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: home-keys\n', '    container_name: home-keys\n$gpu_reservation')"
+compose_case "home-server reserving more than the GPU" home "service home-server sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('capabilities: [gpu]', 'capabilities: [gpu, video]', 1)"
+compose_case "home-server reserving one GPU by id" home "service home-server sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('              count: all\n', '              device_ids: [\"GPU-0\"]\n', 1)"
+compose_case "the film library read-only in home-server" home 'service home-server mounts /srv/media/movies as .*; it may only mount it at /data/media/films, with' "text = text.replace('$films_mount', '$films_mount        read_only: true\n')"
+compose_case "the series library at another path" home 'service home-server mounts /srv/media/shows as .*; it may only mount it at /data/media/series' "text = text.replace('        target: /data/media/series\n', '        target: /series\n')"
+compose_case "the film library created by Docker when missing" home 'service home-server mounts /srv/media/movies as .*with bind.create_host_path: false' "text = text.replace('$films_mount        bind:\n          create_host_path: false\n', '$films_mount')"
+compose_case "the film library in home-keys" home 'service home-keys has a "bind" mount of "/srv/media/movies"; a release may only use its named volumes and tmpfs' "text = text.replace('        target: /keys\n', '        target: /keys\n      - type: bind\n$films_mount        bind:\n          create_host_path: false\n', 1)"
+compose_case "the film library in Garage" media 'service garage has a "bind" mount of "/srv/media/movies"; a release may only use its named volumes and tmpfs, and /srv/media/s3' "text = text.replace('        source: /srv/media/s3\n', '        source: /srv/media/movies\n')"
+compose_case "the media group for home-keys" home "service home-keys sets group_add, which gives it the files of another account's group; only home-server may add a group" "text = text.replace('    container_name: home-keys\n', '    container_name: home-keys\n    group_add: [\"2000\"]\n')"
+compose_case "the root group for home-server" home 'service home-server adds the groups \["0"\]; it may add exactly \["2000"\], the media account' "text = text.replace('      - \"\${MEDIA_GID}\"\n', '      - \"0\"\n')"
+compose_case "a second group for home-server" home 'service home-server adds the groups \["2000", "2001"\]' "text = text.replace('      - \"\${MEDIA_GID}\"\n', '      - \"\${MEDIA_GID}\"\n      - \"2001\"\n')"
+compose_case "the media group for the file manager" media "service sftpgo sets group_add, which gives it the files of another account's group" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    group_add: [\"2000\"]\n')"
+compose_case "home-server on llm, Ollama's line" home 'network llm is "llm"; the home stack may only join the existing network\(s\) home-llm and media' "text = text.replace('      - home-llm\n    healthcheck:', '      - home-llm\n      - llm\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  media:\n')"
+compose_case "home-keys on home-llm" home "service home-keys joins home-llm; home-keys may only join media" "text = text.replace('    networks:\n      - media\n\n  home-server:', '    networks:\n      - media\n      - home-llm\n\n  home-server:')"
 # The guard on its own, against the resolved models of the checked-in stacks.
 for stack in database portfolio hypernova tunnel ai media home; do
   repos=()
@@ -847,7 +913,7 @@ for stack in database portfolio hypernova tunnel ai media home; do
     hypernova) repos=("$provider_repo" "$web_repo") ;;
     ai) repos=(--service-user=2001:2001) ;;
     media) repos=(--service-user=2000:2000) ;;
-    home) repos=(--service-user=65532:65532 "$home_repo") ;;
+    home) repos=(--service-user=65532:65532 --media-gid=2000 "$home_repo") ;;
   esac
   TAILSCALE_IP="$tailscale_ip" "$REAL_DOCKER" compose --file "$work/good/$stack/docker-compose.yml" --project-directory "$work/good/$stack" config --no-env-resolution --format json >"$work/$stack.json"
   python3 -I "$guard" "$work/$stack.json" "$work/good/$stack" "$stack" "--tailscale-ip=$tailscale_ip" "${repos[@]}" >"$work/guard.out" || { cat "$work/guard.out"; echo "FAIL the guard refuses the checked-in $stack stack"; exit 1; }
@@ -858,7 +924,11 @@ if python3 -I "$guard" "$work/media.json" "$work/good/media" media --tailscale-i
 grep -qF "on 100.101.102.104" "$work/guard.out" || { cat "$work/guard.out"; echo "FAIL wrong refusal for a port on another address"; exit 1; }
 if python3 -I "$guard" "$work/media.json" "$work/good/media" media --tailscale-ip=192.168.1.50 --service-user=2000:2000 >"$work/guard.out"; then echo "FAIL the guard took a LAN address for the Tailscale one"; exit 1; fi
 if python3 -I "$guard" "$work/media.json" "$work/good/media" media "--tailscale-ip=$tailscale_ip" --service-user=2001:2001 >"$work/guard.out"; then echo "FAIL the guard ran the media stack as the ai account"; exit 1; fi
-if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 >"$work/guard.out"; then echo "FAIL the guard accepted Home's image with no host.env repository"; exit 1; fi
+if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 --media-gid=2000 >"$work/guard.out"; then echo "FAIL the guard accepted Home's image with no host.env repository"; exit 1; fi
+if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard let home-server add a group with no media gid given"; exit 1; fi
+grep -qF "no media gid was given" "$work/guard.out" || { cat "$work/guard.out"; echo "FAIL wrong refusal for a missing media gid"; exit 1; }
+if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 --media-gid=2001 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard let home-server join a group other than the media account's"; exit 1; fi
+if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 --media-gid=0 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard took root's group for the media group"; exit 1; fi
 if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=2000:2000 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard ran the home stack as the media account"; exit 1; fi
 if python3 -I "$guard" "$work/hypernova.json" "$work/good/hypernova" hypernova >"$work/guard.out"; then echo "FAIL the guard accepted app images no host.env names"; exit 1; fi
 if python3 -I "$guard" "$work/portfolio.json" "$work/good/portfolio" crm >"$work/guard.out"; then echo "FAIL the guard accepted an unknown stack"; exit 1; fi
@@ -952,14 +1022,14 @@ expect_refused "a container with an unreadable StartedAt" "not ready after 1s: p
 installed_state
 sleep 1
 touch "$state/vanished/c4"
-expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 18 listed containers could not be inspected" "$work/second.tgz" release
+expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 19 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with an uninspected container was marked verified"; exit 1; }
 grep -q '^curl ' "$state/calls" && { echo "FAIL the routes were checked before every container was inspected"; exit 1; }
 
 installed_state
 sleep 1
 for c in c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29; do touch "$state/vanished/$c"; done
-expect_refused "every listed container is gone before the inspect" "not ready after 1s: 18 of 18 listed containers could not be inspected" "$work/second.tgz" release
+expect_refused "every listed container is gone before the inspect" "not ready after 1s: 19 of 19 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with no inspected container was marked verified"; exit 1; }
 
 installed_state

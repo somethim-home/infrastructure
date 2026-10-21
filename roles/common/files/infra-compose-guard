@@ -2,7 +2,7 @@
 """Refuse a release's compose model that could reach past its stack.
 
     python3 -I infra-compose-guard <model.json> <stack_dir> <stack> [--tailscale-ip=<IPv4>]
-        [--service-user=<uid>:<gid>] [<app image repository>...]
+        [--service-user=<uid>:<gid>] [--media-gid=<gid>] [<app image repository>...]
 
 <model.json> is `docker compose config --no-env-resolution --format json` for
 <stack_dir>/docker-compose.yml; <stack> is database, portfolio, hypernova,
@@ -13,9 +13,13 @@ only address a port may be published on, and only by the services TAILNET_PORTS
 names, as "${TAILSCALE_IP}:<port>:<port>". --service-user is the account the
 host made for a hardened stack (ai, media, home): every service there runs as
 it, with a mem_limit, cap_drop ALL and no-new-privileges. Bind mounts: only the
-BIND_MOUNTS folders (Garage's /srv/media/s3, Home's /srv/media/home-files and
-/run/home-power, and the two folders Beszel's agent reads disk sizes through),
-each at its fixed target, read-only except Garage's s3 and Home's two.
+BIND_MOUNTS folders (Garage's /srv/media/s3, Home's /srv/media/home-files,
+/run/home-power and the film and series library /srv/media/movies and
+/srv/media/shows, and the two folders Beszel's agent reads disk sizes through),
+each at its fixed target, read-only except Garage's s3 and Home's four. The GPU:
+only GPU_SERVICES (Ollama and llama-server, Beszel's agent, home-server for its
+video work). Extra groups: only GROUP_ADD (home-server joins the media group,
+--media-gid, to write into the library), and only that one.
 infra-apply runs this on every stack of a bundle before anything changes.
 Prints one summary line on success; prints `docker-compose.yml: <reason>` and
 exits 1 on a refusal. Installed as /usr/local/libexec/infra-compose-guard.
@@ -44,7 +48,9 @@ TAILNET_PORTS = {
 TAILNET_PORT_FORM = "${{TAILSCALE_IP}}:{port}:{port}"
 TAILSCALE_IPV4 = re.compile(r"^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$")
 # The only services that may reserve a device: the NVIDIA GPU, all of it, nothing else.
-GPU_SERVICES = {("ai", "ollama"), ("media", "beszel-agent")}
+# Ollama (hypernova's model), llama-server (Home's AI), Beszel's agent (NVML readings) and
+# home-server (NVENC/NVDEC for Home's media; NVIDIA_DRIVER_CAPABILITIES picks what it gets).
+GPU_SERVICES = {("ai", "ollama"), ("ai", "llama"), ("media", "beszel-agent"), ("home", "home-server")}
 GPU_DEVICE = {"driver": "nvidia", "count": -1, "capabilities": ["gpu"]}
 # The only bind mounts: (stack, service) -> {host source: (container target, read-only)}.
 BIND_MOUNTS = {
@@ -54,11 +60,19 @@ BIND_MOUNTS = {
     # backup disk's mountpoint (root-only inside, 0700).
     ("media", "beszel-agent"): {"/srv/media/.beszel": ("/extra-filesystems/media", True),
                                 "/srv/backup": ("/extra-filesystems/backup", True)},
-    # Home Files: ciphertext the server stores for the family; and the tmpfs it
-    # writes signed power requests into, which only the host's home-power reads.
+    # Home Files: ciphertext the server stores for the family; the tmpfs it
+    # writes signed power requests into, which only the host's home-power reads;
+    # and the family's films and series, which Home's Media scans and adds to
+    # (HOME_MEDIA_FILMS, HOME_MEDIA_SERIES).
     ("home", "home-server"): {"/srv/media/home-files": ("/files", False),
-                              "/run/home-power": ("/run/power", False)},
+                              "/run/home-power": ("/run/power", False),
+                              "/srv/media/movies": ("/data/media/films", False),
+                              "/srv/media/shows": ("/data/media/series", False)},
 }
+# The only supplementary groups: (stack, service) -> the account whose gid it may add.
+# home-server (65532) joins the media group so it can write added films and Home's
+# pictures into the setgid, group-writable library folders (roles/host).
+GROUP_ADD = {("home", "home-server"): "media"}
 
 STACKS = {
     "database": {
@@ -93,15 +107,18 @@ STACKS = {
         "env_files": ("tunnel.env",),
         "labels": AUTOHEAL_LABEL,
     },
-    # Ollama, never published, routed or auto-updated (pinned images), never on
-    # edge or data; llm is its line to hypernova's provider.
+    # Ollama and llama-server, never published, routed or auto-updated (pinned
+    # images), never on edge or data; llm is Ollama's line to hypernova's provider,
+    # home-llm llama-server's to home-server, and llama-server joins nothing else
+    # (internal: no route out; its models are copied into llama-models by hand).
     "ai": {
-        "networks": {"ai", "llm"},
-        "volumes": {"ollama-models": {"name": "ollama-models", "external": True}},
-        "containers": {"ollama", "ollama-pull"},
+        "networks": {"ai", "llm", "home-llm"},
+        "volumes": {"ollama-models": {"name": "ollama-models", "external": True},
+                    "llama-models": {"name": "llama-models", "external": True}},
+        "containers": {"ollama", "ollama-pull", "llama"},
         "env_files": (),
         "labels": AUTOHEAL_LABEL,
-        "container_networks": {"ollama": {"ai", "llm"}, "ollama-pull": {"ai"}},
+        "container_networks": {"ollama": {"ai", "llm"}, "ollama-pull": {"ai"}, "llama": {"home-llm"}},
         "container_env_files": {},
         "hardened": True,
     },
@@ -129,16 +146,17 @@ STACKS = {
         "hardened": True,
     },
     # Home, the owner's app, over the tailnet only: on media for home-tls,
-    # never on edge or data, never routed by the edge Traefik. Its keys and
-    # passwords are read by home-keys alone, which writes them into home-keys
-    # for home-server; home-server.env holds no secret.
+    # never on edge or data, never routed by the edge Traefik; home-server also on
+    # the internal home-llm, its line to llama-server. Its keys and passwords are
+    # read by home-keys alone, which writes them into home-keys for home-server;
+    # home-server.env holds no secret.
     "home": {
-        "networks": {"media"},
+        "networks": {"media", "home-llm"},
         "volumes": {name: {"name": name, "external": True} for name in ("home-data", "home-keys")},
         "containers": {"home-keys", "home-server"},
         "env_files": ("home-server.env", "home-keys.env"),
         "labels": APP_LABELS,
-        "container_networks": {"home-keys": {"media"}, "home-server": {"media"}},
+        "container_networks": {"home-keys": {"media"}, "home-server": {"media", "home-llm"}},
         "container_env_files": {"home-keys": {"home-keys.env"}, "home-server": {"home-server.env"}},
         "hardened": True,
     },
@@ -149,7 +167,7 @@ SERVICE_FIELDS = {
     "environment", "extra_hosts", "healthcheck", "image", "labels", "mem_limit", "networks",
     "restart", "stop_grace_period", "stop_signal", "volumes", "profiles",
     "user", "security_opt", "cap_drop", "read_only", "init", "working_dir", "tmpfs",
-    "ports", "deploy",
+    "ports", "deploy", "group_add",
 }
 FIELD_REASONS = {
     "privileged": "which gives it root on the host",
@@ -168,10 +186,11 @@ FIELD_REASONS = {
     "build": "which builds an image from files on the host",
     "label_file": "which reads a file on the host",
 }
-# Refused unless TAILNET_PORTS or GPU_SERVICES name the service (checked separately).
+# Refused unless TAILNET_PORTS, GPU_SERVICES or GROUP_ADD name the service (checked separately).
 GATED_FIELDS = {
     "ports": "which publishes a host port past the firewall",
     "deploy": "which can reserve host devices",
+    "group_add": "which gives it the files of another account's group",
 }
 PORT_FIELDS = {"mode", "host_ip", "target", "published", "protocol"}
 BIND_FIELDS = {"type", "source", "target", "read_only", "bind"}
@@ -314,7 +333,7 @@ def env_keys(path):
 
 def usage():
     print("usage: infra-compose-guard <model.json> <stack_dir> " + "|".join(STACKS)
-          + " [--tailscale-ip=<IPv4>] [--service-user=<uid>:<gid>] [<app image repository>...]")
+          + " [--tailscale-ip=<IPv4>] [--service-user=<uid>:<gid>] [--media-gid=<gid>] [<app image repository>...]")
     sys.exit(64)
 
 
@@ -399,6 +418,21 @@ def check_mounts(stack, name, spec, raw_binds):
     return binds
 
 
+def check_groups(stack, name, spec, media_gid):
+    """Only GROUP_ADD services add a group, and only the one account's gid it names."""
+    groups = spec.get("group_add")
+    if groups is None:
+        return None
+    account = GROUP_ADD.get((stack, name))
+    if account is None:
+        refuse(f"service {name} sets group_add, {GATED_FIELDS['group_add']}; only {', '.join(sorted(s for _, s in GROUP_ADD))} may add a group")
+    if not media_gid:
+        refuse(f"service {name} adds a group, but no {account} gid was given (MEDIA_USER in /etc/infra/host.env; run provisioning)")
+    if not isinstance(groups, list) or [str(g) for g in groups] != [media_gid]:
+        refuse(f"service {name} adds the groups {show(groups)}; it may add exactly [\"{media_gid}\"], the {account} account's group")
+    return f"{name} +{account}"
+
+
 def check_hardened(name, spec, service_user):
     """A hardened stack's services run as the host's service account, bounded and with no privileges."""
     if not service_user:
@@ -417,7 +451,7 @@ def main():
     if len(sys.argv) < 4 or sys.argv[3] not in STACKS:
         usage()
     model_path, project, stack = sys.argv[1], os.path.normpath(sys.argv[2]), sys.argv[3]
-    tailscale_ip = service_user = None
+    tailscale_ip = service_user = media_gid = None
     app_repos = set()
     for arg in sys.argv[4:]:
         if arg.startswith("--tailscale-ip="):
@@ -429,6 +463,10 @@ def main():
             uid, _, gid = service_user.partition(":")
             if not (uid.isdigit() and gid.isdigit() and int(uid) > 0 and int(gid) > 0):
                 refuse(f"the service account {show(service_user)} is not <uid>:<gid> of an account other than root")
+        elif arg.startswith("--media-gid="):
+            media_gid = arg.split("=", 1)[1]
+            if not (media_gid.isdigit() and int(media_gid) > 0):
+                refuse(f"the media group {show(media_gid)} is not the gid of an account other than root")
         elif arg.startswith("--"):
             usage()
         else:
@@ -504,7 +542,7 @@ def main():
         if spec.get("name") != want["name"] or bool(spec.get("external")) != want["external"]:
             refuse(f"volume {key} is {show(spec.get('name'))}{' (external)' if spec.get('external') else ''}; the {stack} stack keeps its data in {show(want['name'])}{' (external)' if want['external'] else ''}")
 
-    published, gpus, binds = [], [], []
+    published, gpus, binds, groups = [], [], [], []
     container_networks = spec_for.get("container_networks")
     container_env_files = spec_for.get("container_env_files")
     for name, spec in sorted(services.items()):
@@ -536,6 +574,9 @@ def main():
             published.append(port)
         if check_deploy(stack, name, spec):
             gpus.append(name)
+        group = check_groups(stack, name, spec, media_gid)
+        if group:
+            groups.append(group)
         binds += [f"{name} {b}" for b in check_mounts(stack, name, spec, raw_binds)]
         user = spec.get("user")
         if user is not None:
@@ -576,9 +617,11 @@ def main():
         if name not in services:
             refuse(f"service {name} publishes ports the checked model does not show")
     summary = f"{len(services)} service(s) in the {stack} stack, no privileged settings"
-    if published or gpus or binds:
+    if published or gpus or binds or groups:
         summary += (f", no host port but {', '.join(published) or 'none'} on the tailnet, no bind mount but {', '.join(binds) or 'none'}, "
                     f"the GPU only for {', '.join(gpus) or 'none'}, no Docker socket")
+        if groups:
+            summary += f", no extra group but {', '.join(groups)}"
     else:
         summary += ", host ports, bind mounts or Docker socket"
     print(summary)

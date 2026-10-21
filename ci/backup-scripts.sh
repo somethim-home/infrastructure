@@ -98,7 +98,7 @@ new_state() {
   state="$work/state$count"
   mkdir -p "$state/backup" "$state/running" "$state/stopped" "$state/volumes"
   touch "$state/mounted" "$state/calls"
-  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data immich-pgdata portfolio-media hypernova_prizm-storage ollama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
+  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data immich-pgdata portfolio-media hypernova_prizm-storage ollama-models llama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
     mkdir -p "$state/volumes/$volume"
     echo "$volume data" >"$state/volumes/$volume/data.db"
   done
@@ -110,11 +110,30 @@ new_state() {
   echo page >"$state/volumes/kavita-config/cache/page.png"
   echo cover >"$state/volumes/audiobookshelf-metadata/cache/cover.jpg"
   echo weights >"$state/volumes/ollama-models/blob"
-  mkdir -p "$state/media/audiobooks/Author/Book" "$state/media/books" "$state/media/podcasts/Show" "$state/media/movies"
+  mkdir -p "$state/media/audiobooks/Author/Book" "$state/media/books" "$state/media/podcasts/Show" "$state/media/movies/Film (2001)" \
+    "$state/media/movies/.home-uploads" "$state/media/shows/Show (2019)/Season 01"
   echo chapter >"$state/media/audiobooks/Author/Book/01.mp3"
   echo epub >"$state/media/books/novel.epub"
   echo episode >"$state/media/podcasts/Show/ep1.mp3"
   echo film >"$state/media/movies/film.mkv"
+  echo film >"$state/media/movies/Film (2001)/Film (2001).mkv"
+  echo '<movie/>' >"$state/media/movies/Film (2001)/Film (2001).nfo"
+  echo poster >"$state/media/movies/Film (2001)/poster.jpg"
+  echo subs >"$state/media/movies/Film (2001)/Film (2001).en.SRT"
+  echo partial >"$state/media/movies/.home-uploads/partial.mkv"
+  echo cover >"$state/media/movies/.home-uploads/cover.jpg"
+  echo episode >"$state/media/shows/Show (2019)/Season 01/Show - S01E01 - Pilot.mkv"
+  echo still >"$state/media/shows/Show (2019)/Season 01/Show - S01E01 - Pilot-thumb.jpg"
+  echo '<tvshow/>' >"$state/media/shows/Show (2019)/tvshow.nfo"
+  mkdir -p "$state/volumes/home-data/media-cache/trickplay" "$state/volumes/home-data/books/files" "$state/volumes/home-data/books/catalog-covers" \
+    "$state/volumes/home-data/books/.tmp"
+  echo sheet >"$state/volumes/home-data/media-cache/trickplay/1.jpg"
+  echo epub >"$state/volumes/home-data/books/files/abc.epub"
+  echo db >"$state/volumes/home-data/books/books.db"
+  echo cover >"$state/volumes/home-data/books/catalog-covers/1.png"
+  echo half >"$state/volumes/home-data/books/.tmp/upload"
+  echo chats >"$state/volumes/home-data/ai.db"
+  echo catalogue >"$state/volumes/home-data/media.db"
   mkdir -p "$state/media/s3/ab/cd"
   echo object >"$state/media/s3/ab/cd/abcdef"
   mkdir -p "$state/media/home-files/spaces/1/objects/ab"
@@ -196,6 +215,7 @@ echo "ok   a run writes snapshots/<date> with .complete, latest points at it, du
 want_volumes="$(printf '%s\n' audiobookshelf-config audiobookshelf-metadata hypernova_prizm-storage jellyfin-config kavita-config open-webui-data immich-pgdata portfolio-media beszel-data garage-meta sftpgo-data home-data | LC_ALL=C sort)"
 [ "$(find "$s1/volumes" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = "$want_volumes" ] || { ls "$s1/volumes"; echo "FAIL the snapshot does not hold exactly the app volumes"; exit 1; }
 grep -q 'ollama-models' "$state/calls" && { echo "FAIL the Ollama models were looked at"; exit 1; }
+grep -q 'llama-models' "$state/calls" && { echo "FAIL Home's AI models were looked at"; exit 1; }
 grep -q 'home-keys' "$state/calls" && { echo "FAIL Home's keys were looked at"; exit 1; }
 [ -f "$s1/volumes/jellyfin-config/metadata/poster.jpg" ] && [ ! -e "$s1/volumes/jellyfin-config/log" ] || { find "$s1/volumes/jellyfin-config"; echo "FAIL jellyfin-config: logs left in, or data missing"; exit 1; }
 [ ! -e "$s1/volumes/open-webui-data/cache" ] && [ ! -e "$s1/volumes/kavita-config/cache" ] && [ ! -e "$s1/volumes/audiobookshelf-metadata/cache" ] ||
@@ -223,21 +243,32 @@ bracket home-server "$state/volumes/home-data" "$state/media/home-files"
 for name in beszel garage sftpgo home-server; do
   [ -f "$state/running/$name" ] || { echo "FAIL $name does not run after the backup"; exit 1; }
 done
-[ "$(grep -c '^rsync ' "$state/calls")" -eq 18 ] || { cat "$state/calls"; echo "FAIL not 18 copies (12 volumes, 6 media folders)"; exit 1; }
+[ "$(grep -c '^rsync ' "$state/calls")" -eq 20 ] || { cat "$state/calls"; echo "FAIL not 20 copies (12 volumes, 6 media folders, the metadata of 2 libraries)"; exit 1; }
 diff -r "$state/media/s3" "$s1/media/s3" >/dev/null || { echo "FAIL Garage's objects are not in the snapshot"; exit 1; }
 diff -r "$state/media/home-files" "$s1/media/home-files" >/dev/null || { echo "FAIL Home's Files are not in the snapshot"; exit 1; }
+for kept in books/books.db books/files/abc.epub ai.db media.db; do
+  [ -f "$s1/volumes/home-data/$kept" ] || { find "$s1/volumes/home-data"; echo "FAIL Home's $kept is not in the snapshot"; exit 1; }
+done
+for cache in media-cache books/catalog-covers books/.tmp; do
+  [ ! -e "$s1/volumes/home-data/$cache" ] || { find "$s1/volumes/home-data"; echo "FAIL Home's cache $cache was copied"; exit 1; }
+done
 echo "ok   Beszel, Garage, SFTPGo, Home: each stopped only while its own data is copied (Garage for garage-meta and its objects, Home for home-data and its Files), one at a time, started right after"
 for name in audiobooks books podcasts; do
   diff -r "$state/media/$name" "$s1/media/$name" >/dev/null || { echo "FAIL $name is not in the snapshot"; exit 1; }
 done
-[ ! -e "$s1/media/movies" ] || { echo "FAIL movies were copied"; exit 1; }
+[ -f "$s1/media/movies/Film (2001)/Film (2001).nfo" ] && [ -f "$s1/media/movies/Film (2001)/poster.jpg" ] && [ -f "$s1/media/movies/Film (2001)/Film (2001).en.SRT" ] &&
+  [ -f "$s1/media/shows/Show (2019)/tvshow.nfo" ] && [ -f "$s1/media/shows/Show (2019)/Season 01/Show - S01E01 - Pilot-thumb.jpg" ] ||
+  { find "$s1/media/movies" "$s1/media/shows"; echo "FAIL the films' and series' metadata is not in the snapshot"; exit 1; }
+[ -z "$(find "$s1/media/movies" "$s1/media/shows" -name '*.mkv' -print -quit)" ] && [ ! -e "$s1/media/movies/.home-uploads" ] ||
+  { find "$s1/media/movies" "$s1/media/shows"; echo "FAIL a video or an upload in progress was copied"; exit 1; }
 gzip -cd "$s1/immich.sql.gz" | grep -q "CREATE TABLE public.asset" && [ "$(stat -c %a "$s1/immich.sql.gz")" = 600 ] || { echo "FAIL no 0600 Immich dump in the snapshot"; exit 1; }
 [ -f "$s1/media/photos/library/admin/2024/2024-05-01/IMG_0001.jpg" ] && [ -f "$s1/media/photos/backups/immich-db-backup.sql.gz" ] &&
   [ ! -e "$s1/media/photos/thumbs" ] && [ ! -e "$s1/media/photos/encoded-video" ] || { find "$s1/media/photos"; echo "FAIL Immich's photos copied wrong"; exit 1; }
 dump_line="$(grep -n '^exec immich-postgres' "$state/calls" | head -n 1 | cut -d: -f1)"
 photos_line="$(grep -n "^rsync $state/media/photos/$" "$state/calls" | head -n 1 | cut -d: -f1)"
 [ -n "$dump_line" ] && [ -n "$photos_line" ] && [ "$dump_line" -lt "$photos_line" ] || { cat "$state/calls"; echo "FAIL Immich's database was not dumped before its photos were copied"; exit 1; }
-echo "ok   media and Immich: libraries copied (not movies), Immich dumped before its photos, without thumbs and encoded video"
+echo "ok   media and Immich: libraries copied, films and series as metadata only, Immich dumped before its photos, without thumbs and encoded video"
+echo "ok   Home: its databases and Books' library copied, Media's cache and Books' covers cache and downloads left out, never the AI models"
 
 ### A second night: hard links for what did not change, deletions stay recoverable
 

@@ -1,0 +1,182 @@
+---
+# Encrypted DNS (docs/host.md, "Encrypted DNS"): the host's own lookups go to
+# dns_over_tls_servers (production.yml: Cloudflare, then Quad9) over
+# DNS-over-TLS only, and the resolver the LAN announces (the ISP's, which blocks
+# some sites) is ignored. systemd-resolved does it: Ubuntu's own stub resolver
+# at 127.0.0.53, which /etc/resolv.conf already points at. Two drop-ins, each
+# removed again with dns_over_tls_enabled: false:
+#   /etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf   the servers, TLS only,
+#     every name (~.), no fallback; applied now by restarting resolved, which
+#     cuts no connection;
+#   /etc/systemd/network/10-netplan-<id>.network.d/60-infra-dns.conf   no DNS
+#     server from DHCP, DHCPv6, router advertisements or netplan on the LAN
+#     interface; applied at the next boot, like Wake-on-LAN (wake.yml), so the
+#     run never re-applies the network it came in over.
+# Tailscale's MagicDNS is untouched: provisioning keeps the host at
+# --accept-dns=false (roles/tailscale), so tailscale0 carries no DNS server and
+# nothing here applies to it; the owner's devices keep MagicDNS as they are.
+# Containers use Docker's embedded DNS, which forwards to the same servers
+# (plain DNS, never the ISP's); docs/host.md says why that is enough.
+- name: Require DNS-over-TLS resolvers as <IPv4>#<the name on their certificate>
+  ansible.builtin.assert:
+    that:
+      - dns_over_tls_servers is sequence and dns_over_tls_servers is not string and dns_over_tls_servers | length > 0
+      - dns_over_tls_servers | select('match', '^([0-9]{1,3}\.){3}[0-9]{1,3}#[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$') | list | length == dns_over_tls_servers | length
+    fail_msg: >-
+      production.yml dns_over_tls_servers must list resolvers as <IPv4>#<name>, such as 1.1.1.1#cloudflare-dns.com:
+      the name is what systemd-resolved checks their certificate against (got {{ dns_over_tls_servers }}).
+    quiet: true
+  when: dns_over_tls_enabled | bool
+
+- name: Create resolved's and the LAN interface's drop-in directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/systemd/resolved.conf.d
+    - "{{ dns_lan_dropin_dir }}"
+
+- name: Ask only the encrypted resolvers, over TLS, for every name
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf
+    content: |
+      # Managed by Ansible (roles/host/tasks/dns.yml). See docs/host.md, "Encrypted DNS".
+      # Rollback: sudo rm this file && sudo systemctl restart systemd-resolved
+      [Resolve]
+      DNS={{ dns_over_tls_servers | join(' ') }}
+      FallbackDNS=
+      Domains=~.
+      DNSOverTLS=yes
+    owner: root
+    group: root
+    mode: "0644"
+  register: dns_resolved_conf
+  when: dns_over_tls_enabled | bool
+
+- name: Remove the encrypted resolvers when they are turned off
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf
+    state: absent
+  register: dns_resolved_conf_removed
+  when: not (dns_over_tls_enabled | bool)
+
+# Clears every DNS server the LAN interface would bring: an empty DNS= drops the
+# ones netplan's own file sets, and the three UseDNS=no the ones the router
+# announces. Read at the next boot (systemd-networkd).
+- name: Ignore the DNS servers the LAN announces, from the next boot
+  ansible.builtin.copy:
+    dest: "{{ dns_lan_dropin_dir }}/60-infra-dns.conf"
+    content: |
+      # Managed by Ansible (roles/host/tasks/dns.yml). See docs/host.md, "Encrypted DNS".
+      # Rollback: sudo rm this file, then reboot (or sudo networkctl reload && sudo networkctl reconfigure {{ lan_interface }}).
+      [Network]
+      DNS=
+      [DHCPv4]
+      UseDNS=no
+      [DHCPv6]
+      UseDNS=no
+      [IPv6AcceptRA]
+      UseDNS=no
+    owner: root
+    group: root
+    mode: "0644"
+  register: dns_lan_dropin
+  when: dns_over_tls_enabled | bool
+
+- name: Use the DNS servers the LAN announces again when encrypted DNS is turned off, from the next boot
+  ansible.builtin.file:
+    path: "{{ dns_lan_dropin_dir }}/60-infra-dns.conf"
+    state: absent
+  register: dns_lan_dropin_removed
+  when: not (dns_over_tls_enabled | bool)
+
+# /run is emptied at boot, so the flag lasts until the reboot that applies the
+# LAN setting; verify.yml forgives the ISP's resolver on the LAN interface while
+# it is there.
+- name: Remember that the LAN interface's DNS setting waits for a reboot
+  ansible.builtin.file:
+    path: "{{ dns_reboot_flag }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  when: dns_lan_dropin is changed or dns_lan_dropin_removed is changed
+
+- name: Restart systemd-resolved with the new settings (open connections are not cut)
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
+  when: dns_resolved_conf is changed or dns_resolved_conf_removed is changed
+
+- name: Keep systemd-resolved running after every boot
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    enabled: true
+    state: started
+
+# If the resolvers cannot be reached over TLS (port 853 blocked on the way out,
+# say), the host would resolve nothing at all: no image pulls, no apt, no
+# tunnel. So a lookup is tried right away, and on failure the resolved drop-in
+# is taken out again and the run stops (the LAN drop-in is harmless until a
+# reboot, and goes too).
+- name: Prove a name resolves over TLS, or put the previous resolver back
+  when: dns_over_tls_enabled | bool
+  block:
+    - name: Look a name up through the encrypted resolvers
+      ansible.builtin.command:
+        argv: [resolvectl, query, --cache=no, --legend=no, "{{ dns_check_name }}"]
+      register: dns_lookup
+      retries: 3
+      delay: 5
+      until: dns_lookup.rc == 0
+      changed_when: false
+      check_mode: false
+  rescue:
+    - name: Take the encrypted DNS settings out again
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/resolved.conf.d/60-infra-dns-over-tls.conf
+        - "{{ dns_lan_dropin_dir }}/60-infra-dns.conf"
+
+    - name: Restart systemd-resolved on the previous settings
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted
+
+    - name: Stop with the reason
+      ansible.builtin.fail:
+        msg: >-
+          {{ dns_check_name }} did not resolve over TLS through {{ dns_over_tls_servers | join(', ') }}
+          ({{ dns_lookup.stderr | default('') | trim }}), so the encrypted DNS settings were removed again and the host
+          uses the LAN's resolver as before. Check that outbound tcp 853 is open (nc -vz 1.1.1.1 853 on the host),
+          then provision again; or set dns_over_tls_enabled: false (docs/host.md, "Encrypted DNS").
+
+- name: Read where /etc/resolv.conf leads
+  ansible.builtin.stat:
+    path: /etc/resolv.conf
+  register: dns_resolv_conf
+
+- name: Require /etc/resolv.conf to be resolved's stub, so every lookup on the host goes through it
+  ansible.builtin.assert:
+    that:
+      - dns_resolv_conf.stat.islnk | default(false)
+      - dns_resolv_conf.stat.lnk_source | default('') in ['/run/systemd/resolve/stub-resolv.conf', '/run/systemd/resolve/resolv.conf']
+    fail_msg: >-
+      /etc/resolv.conf is not systemd-resolved's ({{ dns_resolv_conf.stat.lnk_source | default('a plain file') }}), so
+      programs on the host would bypass the encrypted resolvers: sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf.
+    quiet: true
+  when: dns_over_tls_enabled | bool
+
+- name: Say that the LAN interface's DNS setting needs a reboot
+  ansible.builtin.debug:
+    msg: >-
+      The host now asks {{ dns_over_tls_servers | join(', ') if dns_over_tls_enabled | bool else "the LAN's resolver" }}
+      {{ 'over TLS' if dns_over_tls_enabled | bool else '' }}; the LAN interface's own DNS setting ({{ lan_interface }})
+      changes at the next boot. Reboot when it suits you (ssh -t admin@infra-host sudo reboot), then provision with
+      --tags host to verify.
+  when: dns_lan_dropin is changed or dns_lan_dropin_removed is changed

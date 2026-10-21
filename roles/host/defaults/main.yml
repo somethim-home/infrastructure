@@ -27,6 +27,8 @@ service_accounts:
 # but they stay listed (and backed up) until the owner has audited their data.
 service_volumes:
   - { name: ollama-models, account: ai }
+  # Home's AI models (GGUF files for llama-server), downloaded by the owner.
+  - { name: llama-models, account: ai }
   - { name: open-webui-data, account: ai }
   - { name: comfyui-data, account: ai }
   - { name: jellyfin-config, account: media }
@@ -59,3 +61,11 @@ disk_mount_options: nofail,x-systemd.device-timeout=10s,noatime,nodev,nosuid,noe
 home_power_dir: /run/home-power
 home_power_key_file: /etc/infra/home-power.key
 home_power_mount_options: "size=64k,nr_inodes=64,mode=0700,uid={{ home_uid }},gid={{ home_gid }},nosuid,nodev,noexec"
+
+# Encrypted DNS (tasks/dns.yml, docs/host.md "Encrypted DNS"): the drop-in
+# directory of the network file netplan writes for the LAN interface, and the
+# flag that says its DNS setting waits for the next boot (/run: gone at boot).
+dns_lan_dropin_dir: "/etc/systemd/network/10-netplan-{{ lan_netplan_ids[0] | default(lan_interface) }}.network.d"
+dns_reboot_flag: /run/infra-dns-reboot-pending
+# A name the host must resolve through them (Home's Books catalog needs it too).
+dns_check_name: www.gutenberg.org

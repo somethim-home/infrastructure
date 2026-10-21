@@ -1,14 +1,17 @@
-# Home, the owner's own app: its web pages, sign-in, the dashboard API and
-# Home Files (end-to-end encrypted family storage), for the owner and his
-# family over the tailnet only. See docs/stacks.md. home-server publishes no
-# port: home-tls (the media stack) serves it at https://home.<domain> over the
-# media network, the only network it joins. It follows :latest with Watchtower
-# like the portfolio; a rollback pins it. It runs as 65532, the account its
-# image runs as, which owns home-data, home-keys, /srv/media/home-files and
-# /run/home-power, the directory it hands power requests to the host through.
-# .env (image, uid, gid) feeds interpolation only; home-server.env holds its
-# settings and no secret, home-keys.env the secrets home-keys writes into
-# files for it.
+# Home, the owner's own app: its web pages and web app (/app), sign-in, the
+# dashboard API, Home Files (end-to-end encrypted family storage), Media (the
+# family's films and series), Books and AI, for the owner and his family over
+# the tailnet only. See docs/stacks.md. home-server publishes no port: home-tls
+# (the media stack) serves it at https://home.<domain> over the media network;
+# its only other network is the internal home-llm, its line to llama-server
+# (stack/ai). It follows :latest with Watchtower like the portfolio; a rollback
+# pins it. It runs as 65532, the account its image runs as, which owns
+# home-data, home-keys, /srv/media/home-files and /run/home-power, the
+# directory it hands power requests to the host through, and joins the media
+# group (2000) to write into the film and series library.
+# .env (image, uid, gid, the media gid) feeds interpolation only;
+# home-server.env holds its settings and no secret, home-keys.env the secrets
+# home-keys writes into files for it.
 # A literal dollar sign is written $$ (Compose would interpolate it).
 name: home
 
@@ -44,6 +47,7 @@ services:
         write smtp_password "$$HOME_SMTP_PASSWORD"
         write beszel_password "$$HOME_BESZEL_PASSWORD"
         write power_key "$$HOME_POWER_KEY"
+        write tmdb_read_token "$$HOME_TMDB_READ_TOKEN"
         echo "home-keys: the keys and passwords are in place"
     volumes:
       - type: volume
@@ -58,7 +62,14 @@ services:
     image: ${HOME_IMAGE}
     container_name: home-server
     user: "${HOME_UID}:${HOME_GID}"
-    mem_limit: 384m
+    # The media group: the library folders are setgid media and group-writable,
+    # so Home can file added films and write .nfo files and pictures next to them.
+    group_add:
+      - "${MEDIA_GID}"
+    # 1.5 GiB: the server, ffmpeg remuxing or transcoding one 1080p film for HLS
+    # (HOME_MEDIA_TRANSCODES), an EPUB being checked (up to 128 MiB) and the AI
+    # history it streams; Home's README sizes it so (Media on the home server).
+    mem_limit: 1536m
     restart: always
     read_only: true
     tmpfs:
@@ -67,8 +78,13 @@ services:
     security_opt:
       - no-new-privileges:true
     env_file: home-server.env
+    environment:
+      # What the NVIDIA runtime mounts for the GPU reservation below: CUDA
+      # (compute), NVENC and NVDEC (video), and nvidia-smi's library (utility).
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
     volumes:
-      # The SQLite database and its WAL files.
+      # The SQLite databases (home.db, media.db, ai.db) and their WAL files,
+      # Books' library (/data/books) and Media's cache (/data/media-cache).
       - type: volume
         source: home-data
         target: /data
@@ -93,8 +109,32 @@ services:
         target: /run/power
         bind:
           create_host_path: false
+      # The family's films and series on the media disk (media:media 2775),
+      # read-write: Home adds films there and keeps .nfo files and pictures
+      # next to the videos (HOME_MEDIA_FILMS, HOME_MEDIA_SERIES).
+      - type: bind
+        source: /srv/media/movies
+        target: /data/media/films
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /srv/media/shows
+        target: /data/media/series
+        bind:
+          create_host_path: false
+    # The GPU for NVENC/NVDEC (transcodes, previews, trickplay); llama-server
+    # and Ollama share it (docs/stacks.md, "The GPU, shared"). Quiet hours cap
+    # the whole card at the host (roles/quiet).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - media
+      - home-llm
     healthcheck:
       test: ["CMD", "/home-server", "healthcheck"]
       interval: 30s
@@ -111,6 +151,11 @@ services:
 networks:
   media:
     name: media
+    external: true
+  # Created by provisioning (roles/host), internal: home-server and
+  # llama-server (stack/ai) only, no route out.
+  home-llm:
+    name: home-llm
     external: true
 
 volumes:

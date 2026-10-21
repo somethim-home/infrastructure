@@ -1,7 +1,8 @@
-# Ollama on the GPU, for hypernova's provider (over llm) and later the owner's
-# own apps. See docs/stacks.md. Nothing here is public or published: no port,
-# no Traefik label, no Watchtower label (the images are pinned and move only
-# with a reviewed re-pin and a release). .env (uid, gid, models) feeds
+# Ollama on the GPU, for hypernova's provider (over llm), and llama-server, the
+# engine of Home's AI (over home-llm, to home-server alone). See docs/stacks.md.
+# Nothing here is public or published: no port, no Traefik label, no Watchtower
+# label (the images are pinned and move only with a reviewed re-pin and a
+# release). .env (uid, gid, the Ollama models, llama-server's model files) feeds
 # interpolation only. Open WebUI, SearXNG and ComfyUI were retired on
 # 2026-10-20 (their data volumes open-webui-data and comfyui-data are kept);
 # the owner's own apps replace them.
@@ -101,6 +102,90 @@ services:
     networks:
       - ai
 
+  # llama.cpp's llama-server in router mode, the engine of Home's AI: one
+  # server that holds several models and loads the one a request names, one at
+  # a time (--models-max 1), unloading it after 5 idle minutes, so the 12 GB
+  # card is free for Ollama and Home's video work the rest of the time
+  # (docs/stacks.md, "The GPU, shared"). On the internal home-llm network only:
+  # home-server reaches it at http://llama:8080, and it has no route out (the
+  # models are downloaded into llama-models by the owner, RUNBOOK.md "Home's AI
+  # models"). The preset (the settings every model shares, then one section per
+  # model, named by the id Home asks for) is written to tmpfs at every start
+  # from PRESET and LLAMA_MODELS (.env, production.yml's home_ai_models). A
+  # missing file is named in the log; that model then fails to load, the rest
+  # work. Router mode loads a model only when asked, so the server starts and
+  # answers /health with none loaded.
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b11429@sha256:883915ea20a4b350e98f7284098f4d400c21e9b366e248d397cd42d90602a84c
+    container_name: llama
+    user: "${AI_UID}:${AI_GID}"
+    # The weights sit in VRAM; RAM holds the runner, a model's mmap while it
+    # loads and whatever does not fit on the card.
+    mem_limit: 6g
+    restart: always
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /tmp
+      LLAMA_CACHE: /tmp/llama-cache
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      LLAMA_MODELS: "${LLAMA_MODELS}"
+      # Two slots of 8k (Home's HOME_AI_CONCURRENT and HOME_AI_CONTEXT_TOKENS),
+      # every layer on the GPU, flash attention and a q8_0 KV cache (half the
+      # context's VRAM), the models' own chat templates, and Qwen3's thinking
+      # kept apart from the answer.
+      PRESET: |
+        version = 1
+        [*]
+        c = 16384
+        np = 2
+        ngl = all
+        fa = on
+        ctk = q8_0
+        ctv = q8_0
+        jinja = true
+        reasoning-format = deepseek
+    entrypoint: [/bin/sh, -c]
+    command:
+      - |
+        set -eu
+        printf '%s' "$$PRESET" >/tmp/presets.ini
+        for spec in $$LLAMA_MODELS; do
+          id="$${spec%%:*}"
+          file="$${spec#*:}"
+          [ -f "/models/$$file" ] || echo "llama: /models/$$file is missing, so $$id cannot load; download it (RUNBOOK.md, Home's AI models)" >&2
+          printf '[%s]\nmodel = /models/%s\n' "$$id" "$$file" >>/tmp/presets.ini
+        done
+        exec /app/llama-server --host 0.0.0.0 --port 8080 --models-preset /tmp/presets.ini --models-max 1 --sleep-idle-seconds 300
+    volumes:
+      - type: volume
+        source: llama-models
+        target: /models
+        read_only: true
+        volume:
+          nocopy: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - home-llm
+    healthcheck:
+      test: [CMD, curl, -fsS, -o, /dev/null, "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    labels:
+      - autoheal=true
+
 networks:
   ai:
     name: ai
@@ -108,8 +193,18 @@ networks:
   llm:
     name: llm
     external: true
+  # Created by provisioning (roles/host), internal: llama-server and
+  # home-server only, no route out.
+  home-llm:
+    name: home-llm
+    external: true
 
 volumes:
   ollama-models:
     name: ollama-models
+    external: true
+  # Home's GGUF models, owned by the ai account (roles/host), downloaded by the
+  # owner; not backed up (they download again).
+  llama-models:
+    name: llama-models
     external: true

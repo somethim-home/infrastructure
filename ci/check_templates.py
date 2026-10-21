@@ -28,6 +28,12 @@ Rules (each problem is printed as a ::error:: line):
      address), and HOST_NETWORK_SERVICES: the Snowflake proxy, which publishes nothing but needs the
      host network for WebRTC NAT traversal and is fenced by uid in roles/snowflake. The tunnel token
      reaches only tunnel/tunnel.env (rule 2) and only cloudflared reads it.
+ 10. home-tls, the Traefik in front of Home, passes Home through untouched: its entrypoint has no read
+     or write deadline (Home's live updates are one long Server-Sent Events response, uploads are big),
+     no middleware exists anywhere in its configuration (no buffering, which would hold the event
+     stream; no compression; no header or prefix rewriting), Home's name is routed whole to
+     home-server:8080, and no other router on Home's name takes /app or /api (the web app, the API
+     and the event stream are Home's).
 
 --self-test first seeds at least one violation per rule into a temp copy of the tree and requires
 each to be caught, then checks the real tree.
@@ -75,6 +81,7 @@ SECRET_PREFIX_FILES = {
     "home_data_": {"home/home-keys.env"},
     "home_resend_": {"home/home-keys.env"},
     "home_power_": {"home/home-keys.env"},
+    "home_tmdb_": {"home/home-keys.env"},
     "home_beszel_": {"home/home-keys.env"},
 }
 # Set at apply time from /etc/infra/host.env (infra-apply exports them), never by a bundle file.
@@ -449,6 +456,45 @@ def check_no_published_ports(root: pathlib.Path) -> list[str]:
     return problems
 
 
+# Rule 10
+HOME_TLS_COMPOSE = "stack/media/docker-compose.yml"
+
+
+def check_home_tls_streaming(root: pathlib.Path) -> list[str]:
+    problems = []
+    service = ((load_yaml(root / HOME_TLS_COMPOSE) or {}).get("services") or {}).get("home-tls") or {}
+    env = service.get("environment") or {}
+    static = yaml.safe_load(str(env.get("HOME_TLS_STATIC", ""))) or {}
+    dynamic = yaml.safe_load(str(env.get("HOME_TLS_DYNAMIC", ""))) or {}
+    entry = ((static.get("entryPoints") or {}).get("websecure") or {})
+    timeouts = ((entry.get("transport") or {}).get("respondingTimeouts") or {})
+    for name in ("readTimeout", "writeTimeout"):
+        if str(timeouts.get(name)) not in ("0", "0s"):
+            problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls's websecure {name} is {timeouts.get(name)!r}; it must be 0s, or Home's "
+                            "event stream (/api/events) and long uploads are cut")
+    if (entry.get("http") or {}).get("middlewares"):
+        problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls's websecure entrypoint applies middlewares; Home must pass untouched")
+    http = dynamic.get("http") or {}
+    if http.get("middlewares"):
+        problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls defines middlewares ({', '.join(sorted(http['middlewares']))}); none may exist "
+                        "(buffering holds Home's event stream, compression and rewrites change what Home sends)")
+    routers = http.get("routers") or {}
+    for name, router in sorted(routers.items()):
+        if (router or {}).get("middlewares"):
+            problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls router {name} uses middlewares; none may")
+    home = routers.get("home") or {}
+    if home.get("rule") != "Host(`${HOME_DOMAIN}`)" or home.get("service") != "home-server":
+        problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls router home must route Host(`${{HOME_DOMAIN}}`) whole to home-server")
+    servers = ((((http.get("services") or {}).get("home-server") or {}).get("loadBalancer") or {}).get("servers") or [])
+    if [s.get("url") for s in servers] != ["http://home-server:8080"]:
+        problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls service home-server must be exactly http://home-server:8080")
+    for name, router in sorted(routers.items()):
+        rule = str((router or {}).get("rule", ""))
+        if name != "home" and "${HOME_DOMAIN}" in rule and re.search(r"Path(Prefix)?\(`/(app|api)", rule):
+            problems.append(f"rule 10: {HOME_TLS_COMPOSE}: home-tls router {name} takes {rule}; /app and /api on Home's name are home-server's")
+    return problems
+
+
 def run_checks(root: pathlib.Path) -> list[str]:
     try:
         workflow_text = (root / WORKFLOW).read_text()
@@ -463,6 +509,7 @@ def run_checks(root: pathlib.Path) -> list[str]:
         problems += check_asserts(root, workflow_text, extra)
         problems += check_sample(root, extra)
         problems += check_no_published_ports(root)
+        problems += check_home_tls_streaming(root)
         return problems
     except CheckError as e:
         return [str(e)]
@@ -572,6 +619,18 @@ def self_test() -> None:
          "renders 'home_resend_api_key' into media/sftpgo.env"),
         ("2", "Garage's RPC secret rendered into the file manager's env", append("stack/media/sftpgo.env.j2", "RPC={{ garage_rpc_secret }}\n"),
          "renders 'garage_rpc_secret' into media/sftpgo.env"),
+        ("2", "TMDB's token rendered into home-server's settings", append("stack/home/home-server.env.j2", "TMDB={{ home_tmdb_read_token }}\n"),
+         "renders 'home_tmdb_read_token' into home/home-server.env"),
+        ("10", "Traefik's 60-second read deadline back on home-tls", edit(HOME_TLS_COMPOSE, "                readTimeout: 0s\n", "                readTimeout: 60s\n"),
+         "websecure readTimeout is '60s'"),
+        ("10", "a compression middleware on home-tls", edit(HOME_TLS_COMPOSE, "        http:\n          routers:\n",
+                                                            "        http:\n          middlewares:\n            gzip:\n              compress: {}\n          routers:\n"),
+         "home-tls defines middlewares (gzip)"),
+        ("10", "a buffering middleware on Home's router", edit(HOME_TLS_COMPOSE, "              service: home-server\n",
+                                                             "              service: home-server\n              middlewares: [buffer]\n"),
+         "home-tls router home uses middlewares"),
+        ("10", "/app sent to the links page", edit(HOME_TLS_COMPOSE, "Path(`/files.html`)", "PathPrefix(`/app`)"),
+         "/app and /api on Home's name are home-server's"),
     ]
     caught_rules = set()
     for rule, name, mutate, expected in cases:
@@ -584,7 +643,7 @@ def self_test() -> None:
                 raise SystemExit(f"self-test FAILED: rule {rule}: {name}: expected a problem containing {expected!r}, got {problems}")
             caught_rules.add(rule)
             print(f"ok   rule {rule} caught: {name}")
-    missing = {str(n) for n in range(1, 10)} - caught_rules
+    missing = {str(n) for n in range(1, 11)} - caught_rules
     if missing:
         raise SystemExit(f"self-test FAILED: no seeded violation for rules {sorted(missing)}")
     print("self-test: every seeded violation was caught")
@@ -600,7 +659,8 @@ def main() -> int:
         return 1
     print("deploy templates: every variable has a source and every extra var a use, secrets reach only their own env files, "
           "compose interpolations and env files are rendered, images pinned, host keys checked, docker.sock only in the "
-          "socket proxies (read-only), release.yml's asserts match the workflow, the sample vars are fake, no host port is published but the tailnet-only ones on the Tailscale address")
+          "socket proxies (read-only), release.yml's asserts match the workflow, the sample vars are fake, no host port is published but the tailnet-only ones on the Tailscale address, "
+          "home-tls passes Home (its web app and event stream) through with no deadline, buffering or compression")
     return 0
 
 

@@ -156,7 +156,8 @@ SH
 # (default 200); the public check (a URL by name, no Host header) gets
 # state/curl.public.<scheme>.<host> (default 301 for www. and plain http, else 200);
 # home-tls's certificate check (--resolve <name>:443:<tailnet ip>) gets
-# state/curl.tls.<host> (default 200). state/curl.<key>.rc sets the exit status.
+# state/curl.tls.<host> (default 200), and its check of Home's web app (/app/)
+# state/curl.tls-app.<host> (default 200). state/curl.<key>.rc sets the exit status.
 cat >"$work/bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -175,7 +176,12 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-if [ -n "$resolve" ] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/ ]]; then
+if [ -n "$resolve" ] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/app/$ ]]; then
+  # home-tls's check of Home's web app.
+  key="tls-app.${BASH_REMATCH[1]}"
+  default=200
+  printf 'curl tls %s %s\n' "$resolve" "$url" >>"$FAKE_STATE/calls"
+elif [ -n "$resolve" ] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/ ]]; then
   # home-tls's certificate check: https by name, pinned to the Tailscale address.
   key="tls.${BASH_REMATCH[1]}"
   default=200
@@ -252,6 +258,7 @@ new_state() {
     "c5 /cloudflared running always healthy tunnel" \
     "c6 /ollama running always healthy ai" \
     "c7 /ollama-pull exited no none ai" \
+    "c8 /llama running always healthy ai" \
     "c12 /home running always healthy media" \
     "c13 /home-tls running always healthy media" \
     "c18 /beszel running always healthy media" \
@@ -263,7 +270,7 @@ new_state() {
     "c24 /sftpgo running always healthy media" \
     "c25 /home-keys exited no none home" \
     "c26 /home-server running always healthy home" >"$state/containers"
-  for name in edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy cloudflared ollama home home-tls beszel beszel-agent garage sftpgo home-server; do
+  for name in edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy cloudflared ollama llama home home-tls beszel beszel-agent garage sftpgo home-server; do
     echo "true false" >"$state/running/$name"
   done
   tailnet_binding home 80

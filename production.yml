@@ -121,6 +121,48 @@ home_files_capacity: 600G
 # Status card. The owner creates the user in Beszel first (RUNBOOK.md, "Home").
 home_beszel_user: ""
 
+# Home's Media (stack/home, HOME_MEDIA_TRANSCODES and _QUIET): HLS transcodes
+# ffmpeg may run at once, by day and in quiet hours (quiet_hours_* above, which
+# Home's Media and AI follow too). Each 1080p transcode takes about 300 MB of
+# home-server's 1.5 GiB and a slice of the GPU's NVENC (docs/stacks.md).
+home_media_transcodes: 2
+home_media_transcodes_quiet: 1
+# Home's AI (stack/ai's llama-server, stack/home's HOME_AI_MODELS): the models,
+# in the order Home's picker shows them; the first is the default and may not be
+# day_only. id is what Home asks llama-server for (its preset section), label
+# and about what the picker shows (no ; | = or #), file the GGUF the owner
+# downloads into the llama-models volume (RUNBOOK.md, "Home's AI models").
+# day_only models are left out in quiet hours. llama-server holds one at a
+# time on the 12 GB card (docs/stacks.md, "The GPU, shared").
+home_ai_models:
+  - id: qwen3-8b
+    label: Qwen3 8B
+    about: Fast everyday answers, any hour
+    file: Qwen3-8B-Q5_K_M.gguf
+    day_only: false
+  - id: gemma-3-12b
+    label: Gemma 3 12B
+    about: Writing and explaining, careful with kids
+    file: gemma-3-12b-it-q4_0.gguf
+    day_only: false
+  - id: qwen3-14b
+    label: Qwen3 14B
+    about: Code and reasoning, by day only
+    file: Qwen3-14B-Q4_K_M.gguf
+    day_only: true
+
+# Encrypted DNS for the host (roles/host, docs/host.md "Encrypted DNS"):
+# systemd-resolved asks these resolvers over DNS-over-TLS (port 853) only, in
+# this order, and the LAN's DHCP-announced resolver (the ISP's, which blocks
+# some sites) is ignored. <IPv4>#<name the certificate must carry>. false:
+# provisioning removes the settings and the ISP's resolver is used again.
+dns_over_tls_enabled: true
+dns_over_tls_servers:
+  - 1.1.1.1#cloudflare-dns.com
+  - 1.0.0.1#cloudflare-dns.com
+  - 9.9.9.9#dns.quad9.net
+  - 149.112.112.112#dns.quad9.net
+
 portfolio_image_repo: ghcr.io/somethim/portfolio
 home_image_repo: ghcr.io/somethim-home/home-server
 hypernova_provider_image_repo: ghcr.io/hypernova3643725/hypernova-provider

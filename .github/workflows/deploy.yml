@@ -220,6 +220,7 @@ jobs:
           HOME_DATA_KEY: ${{ secrets.HOME_DATA_KEY }}
           HOME_RESEND_API_KEY: ${{ secrets.HOME_RESEND_API_KEY }}
           HOME_POWER_KEY: ${{ secrets.HOME_POWER_KEY }}
+          HOME_TMDB_READ_TOKEN: ${{ secrets.HOME_TMDB_READ_TOKEN }}
           HOME_BESZEL_PASSWORD: ${{ secrets.HOME_BESZEL_PASSWORD }}
         run: |
           jq -n '{
@@ -249,6 +250,7 @@ jobs:
             home_data_key: env.HOME_DATA_KEY,
             home_resend_api_key: env.HOME_RESEND_API_KEY,
             home_power_key: env.HOME_POWER_KEY,
+            home_tmdb_read_token: env.HOME_TMDB_READ_TOKEN,
             home_beszel_password: env.HOME_BESZEL_PASSWORD
           }' > "${RUNNER_TEMP}/extra-vars.json"
           chmod 600 "${RUNNER_TEMP}/extra-vars.json"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the verify tasks of edge, watchtower, autoheal, beszel, docker, gpu, host and quiet
 # (roles/*/tasks/verify.yml) on localhost against fake docker, iptables,
-# swapon, systemctl, sysctl, ethtool, findmnt and nvidia-smi that answer from per-case state files, and the provision
+# swapon, systemctl, sysctl, ethtool, findmnt, nvidia-smi and resolvectl that answer from per-case state files, and the provision
 # SSH route (tasks/ssh-route.yml) for LAN, other and tailnet SSH_CONNECTION
 # values. Nothing here touches the local Docker daemon, firewall, swap or
 # systemd.
@@ -101,6 +101,20 @@ cat >"$work/bin/nvidia-smi" <<'SH'
 if [ -f "$FAKE_DOCKER_STATE/nvidia-smi.err" ]; then cat "$FAKE_DOCKER_STATE/nvidia-smi.err" >&2; exit 9; fi
 echo "NVIDIA GeForce RTX 2060, 580.95.05, 12288 MiB"
 SH
+# resolvectl: dnsovertls and dns print state/resolvectl.<verb>; query exits with state/resolvectl.query.rc (default 0).
+cat >"$work/bin/resolvectl" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  dnsovertls | dns) [ "$#" -eq 1 ] || { echo "fake resolvectl: unsupported: $*" >&2; exit 2; }; cat "$FAKE_DOCKER_STATE/resolvectl.$1" ;;
+  query)
+    [ "$*" = "query --cache=no --legend=no www.gutenberg.org" ] || { echo "fake resolvectl: unsupported: $*" >&2; exit 2; }
+    rc="$(cat "$FAKE_DOCKER_STATE/resolvectl.query.rc" 2>/dev/null || echo 0)"
+    if [ "$rc" = 0 ]; then echo "www.gutenberg.org: 152.19.134.47"; else echo "www.gutenberg.org: resolve call failed: All attempts to contact name servers or networks failed" >&2; fi
+    exit "$rc" ;;
+  *) echo "fake resolvectl: unsupported: $*" >&2; exit 2 ;;
+esac
+SH
+chmod +x "$work/bin/resolvectl"
 chmod +x "$work/bin/ethtool" "$work/bin/findmnt" "$work/bin/docker" "$work/bin/iptables" "$work/bin/swapon" "$work/bin/systemctl" "$work/bin/sysctl" "$work/bin/nvidia-smi"
 
 session_ok='time="2026-10-13T10:01:00Z" level=info msg="Update session completed" failed=0 notify=no scanned=3 skipped=0 updated=1'
@@ -132,6 +146,9 @@ scenario() {
   echo enabled >"$work/state/home-power.path.enabled"
   echo active >"$work/state/home-power.path.active"
   echo "tmpfs rw,nosuid,nodev,noexec,relatime,size=64k,nr_inodes=64,mode=700,uid=65532,gid=65532,inode64" >"$work/state/home-power.mount"
+  echo active >"$work/state/systemd-resolved.active"
+  printf '%s\n' "Global: yes" "Link 2 (enp8s0): no" "Link 3 (tailscale0): no" "Link 4 (docker0): no" >"$work/state/resolvectl.dnsovertls"
+  resolvectl_dns ""
   printf '%s\n' "ollama 11434/tcp" "ollama-pull " "edge-traefik 80/tcp" "postgresql 5432/tcp" \
     "home $ts_ip:80->80/tcp" "home-tls $ts_ip:443->443/tcp, 80/tcp" \
     "beszel $ts_ip:8090->8090/tcp" "beszel-agent " "garage $ts_ip:3900->3900/tcp, 3901/tcp, 3903/tcp" \
@@ -143,6 +160,11 @@ scenario() {
   echo "{ OnCalendar=*-*-* 08:00:00 Europe/Berlin ; next_elapse=Wed 2026-10-21 08:00:00 CEST }" >"$work/state/infra-quiet-end.timer.calendar"
   echo '[{"next":1,"left":1,"last":null,"passed":null,"unit":"infra-quiet-start.timer","activates":"infra-quiet-start.service"},{"next":2,"left":2,"last":null,"passed":null,"unit":"infra-quiet-end.timer","activates":"infra-quiet-end.service"}]' >"$work/state/timers.json"
 }
+# resolvectl_dns <LAN servers> [<tailscale0 servers>] [<global servers>]: what resolvectl dns prints.
+resolvectl_dns() {
+  printf '%s\n' "Global: ${3-1.1.1.1#cloudflare-dns.com 1.0.0.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net}" \
+    "Link 2 (enp8s0):${1:+ $1}" "Link 3 (tailscale0):${2:+ $2}" "Link 4 (docker0):" >"$work/state/resolvectl.dns"
+}
 # ethtool_out <Wake-on> [<Supports Wake-on>]: what ethtool enp8s0 prints, trimmed.
 ethtool_out() {
   printf '%s\n' "Settings for enp8s0:" "	Supported ports: [ TP MII ]" "	Speed: 1000Mb/s" "	Duplex: Full" \
@@ -153,7 +175,7 @@ run() {
   shift
   PATH="$work/bin:$PATH" FAKE_DOCKER_STATE="$work/state" \
     ansible-playbook -i localhost, -c local "$here/verify-tasks.yml" -e "verify_role=$role" \
-    -e '{"ansible_facts": {"default_ipv4": {"interface": "eth0"}}}' -e "tailscale_ipv4=$ts_ip" "$@" \
+    -e '{"ansible_facts": {"default_ipv4": {"interface": "eth0"}}}' -e "tailscale_ipv4=$ts_ip" -e "dns_reboot_flag=$work/state/dns-reboot-pending" "$@" \
     </dev/null >"$work/out.log" 2>&1
 }
 expect_pass() {
@@ -306,7 +328,39 @@ expect_fail "gpu: driver installed before the last boot but not loaded" "couldn'
 ### host
 
 scenario
-expect_pass "host: INFRA-PUBLIC hooked first and for the tailnet, 2 GiB swap, sleep masked, the tailnet ports, Wake-on: g, the power request watch and its tmpfs" host
+expect_pass "host: INFRA-PUBLIC hooked first and for the tailnet, 2 GiB swap, sleep masked, the tailnet ports, Wake-on: g, the power request watch and its tmpfs, DNS over TLS" host
+
+scenario
+resolvectl_dns 192.168.1.1
+expect_fail "host: the ISP's resolver still on the LAN interface after the reboot" "enp8s0 still has the LAN-announced resolver 192.168.1.1" host
+
+scenario
+resolvectl_dns 192.168.1.1
+touch "$work/state/dns-reboot-pending"
+expect_pass "host: the ISP's resolver on the LAN interface while its setting waits for the reboot" host
+
+scenario
+resolvectl_dns "" "100.100.100.100"
+expect_fail "host: Tailscale's DNS accepted on tailscale0" "tailscale0 has the resolver 100.100.100.100 (Tailscale DNS was accepted)" host
+
+scenario
+printf '%s\n' "Global: no" "Link 2 (enp8s0): no" >"$work/state/resolvectl.dnsovertls"
+expect_fail "host: DNS-over-TLS off" "DNS-over-TLS is not on for every lookup" host
+
+scenario
+resolvectl_dns "" "" "192.168.1.1"
+expect_fail "host: the ISP's resolver as the global one" 'The global resolvers are "192.168.1.1"' host
+
+scenario
+echo inactive >"$work/state/systemd-resolved.active"
+expect_fail "host: systemd-resolved stopped" "systemd-resolved is inactive, not active" host
+
+scenario
+echo 1 >"$work/state/resolvectl.query.rc"
+expect_fail "host: no lookup answers over TLS" "www.gutenberg.org does not resolve through 1.1.1.1#cloudflare-dns.com" host
+
+scenario
+expect_pass "host: encrypted DNS turned off, nothing about it checked" host -e dns_over_tls_enabled=false
 
 scenario
 printf '%s\n' "home $ts_ip:8091->8091/tcp" >"$work/state/docker.ps"

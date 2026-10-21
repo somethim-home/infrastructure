@@ -25,5 +25,6 @@
   "home_data_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=",
   "home_resend_api_key": "fake-home-resend-key-0000",
   "home_power_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM=",
+  "home_tmdb_read_token": "eyJhbGciOiJub25lIn0.eyJmYWtlIjoiY2kifQ.ZmFrZS1zaWduYXR1cmUtMDAwMA",
   "home_beszel_password": ""
 }

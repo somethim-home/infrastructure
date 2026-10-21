@@ -168,3 +168,75 @@
       {{ home_power_dir }} is {{ home_power_mount_now.stdout | trim or 'not a mountpoint' }}; it must be a tmpfs with
       nosuid, nodev, noexec, mode=700, uid={{ home_uid }} and gid={{ home_gid }} (provision with --tags host).
     quiet: true
+
+# Encrypted DNS (tasks/dns.yml, docs/host.md "Encrypted DNS").
+- name: Read whether systemd-resolved runs
+  ansible.builtin.command:
+    argv: [systemctl, is-active, systemd-resolved]
+  register: resolved_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Read resolved's DNS-over-TLS mode and its servers
+  ansible.builtin.command:
+    argv: [resolvectl, "{{ item }}"]
+  loop: [dnsovertls, dns]
+  register: resolved_settings
+  changed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Read whether the LAN interface's DNS setting still waits for a reboot
+  ansible.builtin.stat:
+    path: "{{ dns_reboot_flag }}"
+  register: dns_reboot_pending
+  when: dns_over_tls_enabled | bool
+
+# resolvectl dnsovertls prints "Global: yes" first; resolvectl dns one line per
+# scope, "Global: <server>…" then "Link <n> (<interface>): <server>…".
+- name: Require every lookup to go to the encrypted resolvers over TLS, and none to the LAN's or Tailscale's
+  vars:
+    tls_lines: "{{ resolved_settings.results[0].stdout_lines }}"
+    dns_lines: "{{ resolved_settings.results[1].stdout_lines }}"
+    global_servers: "{{ (dns_lines | select('match', '^Global:') | first | default('Global:'))[7:] | trim }}"
+    lan_servers: "{{ ((dns_lines | select('match', '^Link [0-9]+ ' ~ ('(' ~ lan_interface ~ '):') | regex_escape) | first | default('x: ')).split(':', 1)[1]) | trim }}"
+    tailnet_servers: "{{ ((dns_lines | select('match', '^Link [0-9]+ ' ~ ('(' ~ tailnet_interface ~ '):') | regex_escape) | first | default('x: ')).split(':', 1)[1]) | trim }}"
+  ansible.builtin.assert:
+    that:
+      - resolved_state.stdout | trim == 'active'
+      - "tls_lines | select('match', '^Global: yes$') | list | length == 1"
+      - global_servers.split() == dns_over_tls_servers
+      - lan_servers == '' or dns_reboot_pending.stat.exists
+      - tailnet_servers == ''
+    fail_msg: >-
+      {{ 'systemd-resolved is ' ~ (resolved_state.stdout | trim) ~ ', not active. ' if resolved_state.stdout | trim != 'active' else '' -}}
+      {{ 'DNS-over-TLS is not on for every lookup (resolvectl dnsovertls: ' ~ (tls_lines | join('; ')) ~ '). ' if tls_lines | select('match', '^Global: yes$') | list | length != 1 else '' -}}
+      {{ 'The global resolvers are "' ~ global_servers ~ '", not ' ~ (dns_over_tls_servers | join(' ')) ~ '. ' if global_servers.split() != dns_over_tls_servers else '' -}}
+      {{ lan_interface ~ ' still has the LAN-announced resolver ' ~ lan_servers ~ ', which lookups may reach unencrypted; reboot (the setting applies at boot). ' if lan_servers != '' and not dns_reboot_pending.stat.exists else '' -}}
+      {{ tailnet_interface ~ ' has the resolver ' ~ tailnet_servers ~ ' (Tailscale DNS was accepted), which DNS-over-TLS would break; tailscale set --accept-dns=false, or provision. ' if tailnet_servers != '' else '' -}}
+      Provision with --tags host (docs/host.md, "Encrypted DNS").
+    quiet: true
+  when: dns_over_tls_enabled | bool
+
+- name: Look a name up through the encrypted resolvers
+  ansible.builtin.command:
+    argv: [resolvectl, query, --cache=no, --legend=no, "{{ dns_check_name }}"]
+  register: dns_verify_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Require the lookup to answer
+  ansible.builtin.assert:
+    that:
+      - dns_verify_lookup.rc == 0
+    fail_msg: >-
+      {{ dns_check_name }} does not resolve through {{ dns_over_tls_servers | join(', ') }} over TLS
+      ({{ dns_verify_lookup.stderr | trim }}). Is outbound tcp 853 open (nc -vz 1.1.1.1 853)? To go back to the
+      LAN's resolver: dns_over_tls_enabled: false and provision with --tags host, or by hand as docs/host.md
+      ("Encrypted DNS", Rollback) says.
+    quiet: true
+  when: dns_over_tls_enabled | bool
