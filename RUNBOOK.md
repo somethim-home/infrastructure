@@ -36,11 +36,11 @@ for the account the Ubuntu installer creates; use yours.
 Restoring anything from the backup disk is in
 [Restoring from the backup disk](#restoring-from-the-backup-disk) (section 11).
 
-**Deploying Home** (its web app, Files, Media, Books, AI, live updates and power control, and the
-host's encrypted DNS) from a server set up by sections 1 to 10 is one checklist of its own:
-[docs/deploy-home.md](docs/deploy-home.md). It uses [Home](#home), [Home's AI
-models](#homes-ai-models), [Home's power control](#homes-power-control) and [Encrypted
-DNS](#encrypted-dns) below.
+**Reinstalling the server from a blank machine** (a fresh OS, no users, no data, with the media
+and backup disks kept) and bringing everything live, Home included (its web app, Files, Media,
+Books, AI, live updates and power control, and the host's encrypted DNS), is one ordered
+checklist of its own: [docs/deploy-home.md](docs/deploy-home.md). It links to the sections below
+in the order a reinstall needs them.
 
 Tailscale (4) comes before the first provision (5) because that run joins the server to the
 tailnet and asks for the auth key made in 4.

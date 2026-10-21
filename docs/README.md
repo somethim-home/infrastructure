@@ -7,7 +7,7 @@ Why this server is built the way it is. The code says *what* happens; these file
 | Document | Covers |
 | --- | --- |
 | [architecture.md](architecture.md) | The deployment model: the home server behind a Cloudflare Tunnel, one deployer, three access paths, provision vs release, the stacks and their order, the releases directory, env files, networks, public vs tailnet-only services, why no port is public, host keys |
-| [deploy-home.md](deploy-home.md) | **Deploying Home**, as a checklist: from a running server to the web app, Files, Media, Books, AI, live updates and power control live; provisioning tags, BIOS, the secrets, the AI models, the release, first-run checks, the down page, rollback |
+| [deploy-home.md](deploy-home.md) | **A clean-slate reinstall**, as one ordered checklist: from a blank machine (the media and backup disks kept) to everything live, Home included; the OS install, BIOS, both provisionings, Tailscale, which secrets to keep and which to make fresh, the AI models, the release, Home's owner setup, first-run checks, restoring from the old backups, the down page, retiring the old, rollback |
 | [deploying.md](deploying.md) | The Deploy workflow and its inputs, every secret and variable (and where production keeps each), where each secret lands, what `infra-apply` checks, provisioning tags, adding a project |
 | [stacks.md](stacks.md) | What is peculiar about hypernova and portfolio individually, the tailnet-only `ai` (llama-server) and `media` (`home-tls`, status dashboard, S3 and file manager) and `home` (Home, the owner's app: web app, Files, Media, Books, AI, live updates) stacks: hardening, bind mounts, the GPU shared and its VRAM budget; the apps retired on 2026-10-20 |
 | [database.md](database.md) | The shared PostgreSQL — the volume, the superuser, how roles and databases are provisioned at release time, upgrades |
@@ -36,7 +36,7 @@ format and [threat model](https://github.com/somethim-home/home-crypto/blob/mast
 
 New to the repo: [architecture.md](architecture.md), then [deploying.md](deploying.md).
 
-Deploying Home on the running server: [deploy-home.md](deploy-home.md).
+Reinstalling the server from a blank machine and deploying everything, Home included: [deploy-home.md](deploy-home.md).
 
 Reusing it for your own server: [variables.md](variables.md).
 

@@ -115,8 +115,9 @@ Environment ([stacks.md](stacks.md#retired-apps-2026-10-20)).
 
 ### Everything production needs, and where it lives
 
-As of 2026-10-21 (`gh secret list --env production`, `gh variable list`), with the four Home
-secrets that are not set yet marked **to set**. "1P" is the 1Password item; "infra" is the
+As of 2026-10-21 (`gh secret list --env production`, `gh variable list`), every secret the
+Deploy workflow reads is set. A reinstall changes `SSH_KNOWN_HOSTS` and `HOME_POWER_KEY` and may
+make the generated ones fresh ([deploy-home.md](deploy-home.md#5-the-secrets)). "1P" is the 1Password item; "infra" is the
 **"infra production secrets"** item in the **"Home Server"** vault, one field per secret, named
 like it. [deploy-home.md](deploy-home.md#5-the-secrets) sets the Home ones without printing them.
 
@@ -131,20 +132,20 @@ like it. [deploy-home.md](deploy-home.md#5-the-secrets) sets the Home ones witho
 | `POSTGRES_SUPERUSER_PASSWORD`, `PRIZM_DB_PASSWORD`, `PORTFOLIO_DB_PASSWORD` | secret | yes | set | `openssl rand -hex 24` each | none (nobody types them) |
 | `PORTFOLIO_TOTP_ENCRYPTION_KEY`, `HYPERNOVA_SESSION_SECRET` | secret | yes | set | `openssl rand -base64 32`, `openssl rand -hex 24` | none (generated straight into GitHub, RUNBOOK section 7) |
 | `PORTFOLIO_ADMIN_PASSWORD`, `HYPERNOVA_ADMIN_PASSWORD` | secret | yes | set | `openssl rand -hex 16` | your password manager |
-| `PORTFOLIO_RESEND_API_KEY`, `PORTFOLIO_GOOGLE_CLIENT_SECRET` / `PORTFOLIO_GOOGLE_CLIENT_ID` | secret / variable | optional | not set | Resend; Google Cloud OAuth client | where you keep them |
+| `PORTFOLIO_RESEND_API_KEY`, `PORTFOLIO_GOOGLE_CLIENT_SECRET` / `PORTFOLIO_GOOGLE_CLIENT_ID` | secret / variable | optional | set | Resend; Google Cloud OAuth client | where you keep them |
 | `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN` | secret | yes | set | `openssl rand -hex 16`, `-hex 24` | infra |
 | `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN` | secret | yes | set | `openssl rand -hex 32` each | infra |
 | `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY` | secret | yes | set | `GK$(openssl rand -hex 12)`, `openssl rand -hex 32` | infra |
 | `FILES_PASSWORD` | secret | yes | set | `openssl rand -hex 16` | infra |
 | `HOME_OWNER_EMAIL` | **repository** variable | yes | set | your address | – |
-| `HOME_SECRET_KEY` | secret | yes | **to set** | `openssl rand -base64 32` | infra |
-| `HOME_DATA_KEY` | secret | yes | **to set** | `openssl rand -base64 32`, unlike the one above | infra (its only copy besides GitHub) |
-| `HOME_RESEND_API_KEY` | secret | yes | **to set** | Resend → API Keys, sending access, "infra Home" | infra |
-| `HOME_TMDB_READ_TOKEN` | secret | optional (production sets it) | **to set** | themoviedb.org → Settings → API → API Read Access Token | infra |
-| `HOME_POWER_KEY` | secret | optional (production sets it) | not set | a copy of the host's `/etc/infra/home-power.key` after provisioning `--tags host` | infra |
-| `HOME_BESZEL_PASSWORD` | secret | optional | not set | `openssl rand -hex 16`, with `home_beszel_user` | infra |
+| `HOME_SECRET_KEY` | secret | yes | set | `openssl rand -base64 32` | infra |
+| `HOME_DATA_KEY` | secret | yes | set | `openssl rand -base64 32`, unlike the one above | infra (its only copy besides GitHub) |
+| `HOME_RESEND_API_KEY` | secret | yes | set | Resend → API Keys, sending access, "infra Home" | infra |
+| `HOME_TMDB_READ_TOKEN` | secret | optional (production sets it) | set | themoviedb.org → Settings → API → API Read Access Token | infra |
+| `HOME_POWER_KEY` | secret | optional (production sets it) | set | a copy of the host's `/etc/infra/home-power.key` after provisioning `--tags host` | infra |
+| `HOME_BESZEL_PASSWORD` | secret | optional | set (read only with `home_beszel_user`) | `openssl rand -hex 16`, with `home_beszel_user` | infra |
 | `HF_TOKEN` | **not** a GitHub secret | for the Gemma download only | – | Hugging Face → Access Tokens, read, after accepting Gemma's licence | infra |
-| `IMMICH_ADMIN_PASSWORD`, `IMMICH_DB_PASSWORD`, `SEARXNG_SECRET`, `WEBUI_SECRET_KEY` | secret | no (retired apps) | set, unused | – | delete ([deploy-home.md](deploy-home.md#10-clean-up)) |
+| `IMMICH_ADMIN_PASSWORD`, `IMMICH_DB_PASSWORD`, `SEARXNG_SECRET`, `WEBUI_SECRET_KEY` | secret | no (retired apps) | set, unused | – | delete ([deploy-home.md](deploy-home.md#12-retire-the-old)) |
 
 The domains (including `home_hosts`, the tailnet services' https names under `home_domain`),
 the app image repositories, the `ai`, `media` and `home-server` accounts' uids and gids, Home's AI

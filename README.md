@@ -149,7 +149,7 @@ shows what provisioning would change.
    Watchtower pulls it and recreates the container.
 
 [RUNBOOK.md](RUNBOOK.md) goes from BIOS settings to the first release, and covers recovery.
-[docs/deploy-home.md](docs/deploy-home.md) takes a running server to every Home app live.
+[docs/deploy-home.md](docs/deploy-home.md) takes a blank machine (a clean-slate reinstall) to everything live, Home included.
 
 ## Security model, in short
 
@@ -269,7 +269,7 @@ tasks/                 placeholder-guards · provision-checks · ssh-route
 ci/                    the release path, verify tasks and access/template rules, tested against fakes
 .github/workflows/     deploy.yml, the Deploy workflow; checks.yml, the deploy lint
 RUNBOOK.md             BIOS to first release, DNS switch-over, releases, rollback, recovery, GPU, AI, media, disks, restore
-docs/deploy-home.md    the owner's checklist from a running server to every Home app live
+docs/deploy-home.md    the owner's clean-slate reinstall: a blank machine to everything live
 docs/                  why any of it is the way it is
 cloudflare/down-page/  the "server is down" Worker (Rust, workers-rs), deployed by hand with wrangler
 production.example.yml production.yml with example values (read by nothing; for forks)
@@ -282,7 +282,7 @@ SECURITY.md            how to report a problem
 [`docs/`](docs/README.md) says why, and what breaks if you change it.
 
 - [architecture.md](docs/architecture.md) — the home server and the tunnel, access paths, stacks and their order, releases, env files, networks, public vs tailnet-only, no public ports
-- [deploy-home.md](docs/deploy-home.md) — **deploying Home**: provisioning tags, BIOS, the secrets, the AI models, the release, the first-run checks, the down page, rollback
+- [deploy-home.md](docs/deploy-home.md) — **a clean-slate reinstall**: the OS, BIOS, provisioning, Tailscale, the secrets, the AI models, the release, Home's setup, the first-run checks, restoring old backups, the down page, rollback
 - [deploying.md](docs/deploying.md) — the Deploy workflow, every secret and variable, what the host checks, provisioning tags, adding a project
 - [database.md](docs/database.md) — the shared PostgreSQL
 - [stacks.md](docs/stacks.md) — what is peculiar about each application, the tailnet-only `ai`, `media` and `home` stacks, and the apps retired on 2026-10-20
