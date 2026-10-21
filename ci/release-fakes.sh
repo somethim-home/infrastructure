@@ -247,7 +247,7 @@ new_state() {
     "HOME_IMAGE_REPO=$home_repo" >"$state/host.env"
   # The power key provisioning made on the host; HOME_POWER_KEY in a bundle must match it.
   printf '%s\n' "${host_power_key:?}" >"$state/home-power.key"
-  # ollama-pull, beszel-pair, garage-config, garage-setup and home-keys are one-shots (restart: "no"):
+  # beszel-pair, garage-config, garage-setup and home-keys are one-shots (restart: "no"):
   # verify does not wait for them to run, but checks that beszel-pair, garage-setup and home-keys
   # ended with status 0 (state/oneshot/<name>).
   printf '%s\n' \
@@ -256,8 +256,6 @@ new_state() {
     "c3 /prizm-provider running always healthy hypernova" \
     "c4 /prizm-web running always none hypernova" \
     "c5 /cloudflared running always healthy tunnel" \
-    "c6 /ollama running always healthy ai" \
-    "c7 /ollama-pull exited no none ai" \
     "c8 /llama running always healthy ai" \
     "c12 /home running always healthy media" \
     "c13 /home-tls running always healthy media" \
@@ -270,7 +268,7 @@ new_state() {
     "c24 /sftpgo running always healthy media" \
     "c25 /home-keys exited no none home" \
     "c26 /home-server running always healthy home" >"$state/containers"
-  for name in edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy cloudflared ollama llama home home-tls beszel beszel-agent garage sftpgo home-server; do
+  for name in edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy cloudflared llama home home-tls beszel beszel-agent garage sftpgo home-server; do
     echo "true false" >"$state/running/$name"
   done
   tailnet_binding home 80

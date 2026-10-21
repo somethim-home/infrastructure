@@ -492,7 +492,7 @@ def self_test() -> None:
         ("5", "public SSH in ufw_allowed", edit("roles/common/defaults/main.yml", "  - in on tailscale0 proto tcp to any port 22\n", "  - in on tailscale0 proto tcp to any port 22\n  - 22/tcp\n"), "ufw_allowed must be exactly"),
         ("5", "the web ports opened again", edit("roles/common/defaults/main.yml", "  - in on tailscale0 proto tcp to any port 22\n", "  - in on tailscale0 proto tcp to any port 22\n  - 80/tcp\n  - 443/tcp\n"), "ufw_allowed must be exactly"),
         ("5", "a tailnet port opened on every interface", edit("roles/common/defaults/main.yml", "  - in on tailscale0 proto tcp to any port 8090\n", "  - 8090/tcp\n"), "ufw_allowed must be exactly"),
-        ("5", "a tailnet port the guard does not know", edit("roles/host/defaults/main.yml", "  - { container: beszel, port: 8090 }\n", "  - { container: beszel, port: 8090 }\n  - { container: ollama, port: 11434 }\n"),
+        ("5", "a tailnet port the guard does not know", edit("roles/host/defaults/main.yml", "  - { container: beszel, port: 8090 }\n", "  - { container: beszel, port: 8090 }\n  - { container: llama, port: 8080 }\n"),
          "roles/common/files/infra-compose-guard TAILNET_PORTS lists"),
         ("5", "infra-apply checking another port", edit("roles/common/files/infra-apply", '"beszel 8090" "garage 3900"', '"beszel 8091" "garage 3900"'),
          "roles/common/files/infra-apply tailnet_ports lists [('beszel', 8091), ('garage', 3900), ('home', 80), ('home-tls', 443), ('sftpgo', 8091)]"),

@@ -184,11 +184,10 @@ for secret in "${secrets[@]}"; do
   [ "$found" = "$want" ] || { echo "FAIL a secret is in '$found', expected only '$want'"; exit 1; }
 done
 for file in portfolio/.env hypernova/.env ai/.env media/.env home/.env; do
-  if grep -vqE '^(PORTFOLIO_IMAGE|PROVIDER_IMAGE|WEB_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|WEB_DOMAIN|AI_UID|AI_GID|OLLAMA_MODELS|LLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|HOST_[A-Z0-9]+|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/good/$file"; then
+  if grep -vqE '^(PORTFOLIO_IMAGE|PROVIDER_IMAGE|WEB_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|WEB_DOMAIN|AI_UID|AI_GID|LLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|HOST_[A-Z0-9]+|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/good/$file"; then
     cat "$work/good/$file"; echo "FAIL $file holds more than image references, domains, the service accounts, the models and the contact addresses"; exit 1
   fi
 done
-grep -qx 'OLLAMA_MODELS=qwen3:4b qwen2.5-coder:14b qwen3:14b' "$work/good/ai/.env" || { echo "FAIL ai/.env does not list production.yml's ollama_models"; exit 1; }
 grep -qx 'LLAMA_MODELS=qwen3-8b:Qwen3-8B-Q5_K_M.gguf gemma-3-12b:gemma-3-12b-it-q4_0.gguf qwen3-14b:Qwen3-14B-Q4_K_M.gguf' "$work/good/ai/.env" ||
   { cat "$work/good/ai/.env"; echo "FAIL ai/.env does not list production.yml's home_ai_models for llama-server"; exit 1; }
 grep -qx 'MEDIA_GID=2000' "$work/good/home/.env" || { cat "$work/good/home/.env"; echo "FAIL home/.env does not name the media group home-server joins"; exit 1; }
@@ -207,8 +206,8 @@ for want in HOME_OWNER_EMAIL=owner@example.com HOME_PUBLIC_ORIGIN=https://home.a
 done
 grep -qx 'HOME_BESZEL_PASSWORD=' "$work/good/home/home-keys.env" || { echo "FAIL home-keys.env holds a Beszel password while production.yml names no Beszel user"; exit 1; }
 grep -q 'HOME_WEB_APP_DIR' "$work/good/home/home-server.env" && { echo "FAIL home-server.env sets HOME_WEB_APP_DIR, which Home's image sets to its own /app"; exit 1; }
-grep -qx 'OLLAMA_MODEL=qwen3:4b' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not ask for production.yml's hypernova_ollama_model"; exit 1; }
-grep -qx 'OLLAMA_HOST=http://ollama:11434' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not reach Ollama on llm"; exit 1; }
+grep -qx 'AI_DISABLED=true' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not have its AI off, with Ollama gone"; exit 1; }
+grep -q '^OLLAMA_' "$work/good/hypernova/provider.env" && { echo "FAIL hypernova's provider still names Ollama"; exit 1; }
 echo "ok   bundle: each secret is only in the env file of the container that reads it"
 
 jq '.portfolio_admin_password = "second-admin-password"' "$work/vars.json" >"$work/vars-second.json"
@@ -322,8 +321,6 @@ if ! grep -qx 'HOME_BESZEL_URL=http://beszel:8090' "$work/beszel/home/home-serve
   echo "FAIL a Beszel user for Home does not turn on its Status card"; exit 1
 fi
 echo "ok   bundle: a Beszel user in production.yml turns on Home's Status card, its password only in home-keys.env"
-render_refused "a hypernova model ollama-pull does not fetch" '.hypernova_ollama_model = "llama3.2:3b"'
-render_refused "an Ollama model without a tag" '.ollama_models = ["qwen3:4b", "qwen3"]'
 printf 'REPLACE_ME_BEFORE_DEPLOYING\n' >"$work/placeholder.pub"
 render_refused "the placeholder deploy key" ".deploy_key_file = \"$work/placeholder.pub\""
 
@@ -348,8 +345,8 @@ first_id="$(current_release)"
 for stack in database portfolio hypernova tunnel ai media home; do
   grep -q "compose model accepted: .* in the $stack stack, no privileged settings" "$work/out" || { cat "$work/out"; echo "FAIL the checked-in $stack stack did not pass the compose guard"; exit 1; }
 done
-grep -qF "compose model accepted: 3 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, no bind mount but none, the GPU only for llama, ollama, no Docker socket" "$work/out" ||
-  { cat "$work/out"; echo "FAIL the ai stack summary does not say it publishes nothing and gives the GPU to Ollama and llama-server alone"; exit 1; }
+grep -qF "compose model accepted: 1 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, no bind mount but none, the GPU only for llama, no Docker socket" "$work/out" ||
+  { cat "$work/out"; echo "FAIL the ai stack summary does not say it publishes nothing and gives the GPU to llama-server alone"; exit 1; }
 grep -qF "compose model accepted: 9 service(s) in the media stack, no privileged settings, no host port but beszel $tailscale_ip:8090, garage $tailscale_ip:3900, home $tailscale_ip:80, home-tls $tailscale_ip:443, sftpgo $tailscale_ip:8091 on the tailnet, no bind mount but beszel-agent /srv/media/.beszel (ro), beszel-agent /srv/backup (ro), garage /srv/media/s3, the GPU only for beszel-agent, no Docker socket" "$work/out" ||
   { cat "$work/out"; echo "FAIL the media stack summary does not name its tailnet ports, its bind mounts and the GPU"; exit 1; }
 grep -qF "compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, no Docker socket, no extra group but home-server +media" "$work/out" ||
@@ -610,7 +607,7 @@ refused_bundle "a manifest that names an extra file" "names an unexpected file" 
 variant badenv
 printf 'export EVIL=1\n' >>"$work/badenv/hypernova/provider.env"
 repack badenv
-refused_bundle "an env line that is not KEY=value" "hypernova/provider\\.env line 14 is not KEY=value" "$work/badenv.tgz"
+refused_bundle "an env line that is not KEY=value" "hypernova/provider\\.env line 12 is not KEY=value" "$work/badenv.tgz"
 
 variant comment
 sed -i '1i # a comment' "$work/comment/portfolio/.env"
@@ -828,29 +825,26 @@ compose_case "a published metrics port" tunnel "service cloudflared sets ports, 
 compose_case "cloudflared on the data network" tunnel 'network data is "data"; the tunnel stack may only join the existing network\(s\) edge' "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - data\n    labels:').replace('networks:\n  edge:\n    name: edge\n    external: true\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  data:\n    name: data\n    external: true\n')"
 compose_case "a volume on the tunnel" tunnel 'the volumes are \["state"\]; the tunnel stack uses exactly \[\]' "text = text.replace('    labels:\n      - autoheal', '    volumes:\n      - state:/state\n    labels:\n      - autoheal') + 'volumes:\n  state:\n'"
 compose_case "an unpinned cloudflared" tunnel 'service cloudflared runs "cloudflare/cloudflared:latest"' "import re; text = re.sub(r'image: cloudflare/cloudflared:\S+', 'image: cloudflare/cloudflared:latest', text)"
-# The ai stack: hardened, nothing published, the GPU for Ollama alone.
-compose_case "Ollama published on the tailnet" ai "service ollama sets ports, which publishes a host port" "text = text.replace('    container_name: ollama\n', '    container_name: ollama\n    ports:\n      - \"\${TAILSCALE_IP}:11434:11434\"\n')"
-compose_case "the GPU for ollama-pull" ai "service ollama-pull sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: ollama-pull\n', '    container_name: ollama-pull\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
-compose_case "Ollama with deploy labels" ai "service ollama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('    deploy:\n      resources:', '    deploy:\n      labels:\n        x-extra: \"1\"\n      resources:', 1)"
-compose_case "Ollama reserving more than the GPU" ai "service ollama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('capabilities: [gpu]', 'capabilities: [gpu, utility]', 1)"
-compose_case "Ollama as root" ai 'service ollama runs as "0:0"; it must run as 2001:2001' "text = text.replace('    container_name: ollama\n    user: \"\${AI_UID}:\${AI_GID}\"\n', '    container_name: ollama\n    user: \"0:0\"\n')"
-compose_case "ollama-pull without a memory limit" ai "service ollama-pull sets no mem_limit" "text = text.replace('    mem_limit: 128m\n', '')"
-compose_case "ollama-pull keeping its capabilities" ai "service ollama-pull does not drop every capability" "text = text.replace('    restart: \"no\"\n    read_only: true\n    cap_drop: [ALL]\n', '    restart: \"no\"\n    read_only: true\n')"
-compose_case "Ollama on the data network" ai 'network data is "data"; the ai stack may only join' "text = text.replace('      - ai\n      - llm\n', '      - ai\n      - llm\n      - data\n', 1).replace('networks:\n  ai:\n', 'networks:\n  data:\n    name: data\n    external: true\n  ai:\n')"
-compose_case "ollama-pull on llm" ai "service ollama-pull joins llm; ollama-pull may only join ai" "text = text.replace('    networks:\n      - ai\n\n  # llama.cpp', '    networks:\n      - ai\n      - llm\n\n  # llama.cpp')"
-compose_case "Ollama reading another stack's secret" ai 'service ollama reads env_file ".*home-tls.env"' "text = text.replace('    environment:\n      # The models', '    env_file: ../media/home-tls.env\n    environment:\n      # The models')"
-compose_case "a bind mount into Ollama" ai 'service ollama has a "bind" mount of "/srv/media"' "text = text.replace('    volumes:\n      - type: volume\n        source: ollama-models\n', '    volumes:\n      - /srv/media:/media:ro\n      - type: volume\n        source: ollama-models\n')"
-compose_case "a Watchtower label on Ollama" ai "service ollama sets the label com.centurylinklabs.watchtower.enable" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - com.centurylinklabs.watchtower.enable=true\n', 1)"
-compose_case "a service named apart from its container" ai 'service pull names its container "ollama-pull"' "text = text.replace('  ollama-pull:\n    image:', '  pull:\n    image:')"
-compose_case "the models volume created by the release" ai 'volume ollama-models is "ollama-models"; the ai stack keeps its data in "ollama-models" \(external\)' "text = text.replace('  ollama-models:\n    name: ollama-models\n    external: true\n', '  ollama-models:\n    name: ollama-models\n')"
-# llama-server: on home-llm alone, hardened as the ai account, published nowhere.
-compose_case "llama-server on llm, Ollama's line" ai "service llama joins llm; llama may only join home-llm" "text = text.replace('    networks:\n      - home-llm\n    healthcheck:', '    networks:\n      - home-llm\n      - llm\n    healthcheck:')"
-compose_case "llama-server on the ai network, with a route out" ai "service llama joins ai; llama may only join home-llm" "text = text.replace('    networks:\n      - home-llm\n    healthcheck:', '    networks:\n      - home-llm\n      - ai\n    healthcheck:')"
+# The ai stack: llama-server alone, hardened as the ai account, on home-llm alone, published nowhere.
+llama_networks='    networks:\n      - home-llm\n    healthcheck:'
+compose_case "Ollama back in the ai stack" ai 'service ollama sets container_name "ollama"; the ai stack names its containers llama' "text = text.replace('services:\n', 'services:\n  ollama:\n    image: ollama/ollama:0.40.4@sha256:926d40fd6eeeebd346b5c358a63de2a10ec995371cd93dd22f1843200694b1a6\n    container_name: ollama\n    user: \"\${AI_UID}:\${AI_GID}\"\n    mem_limit: 8g\n    read_only: true\n    cap_drop: [ALL]\n    security_opt:\n      - no-new-privileges:true\n    networks:\n      - home-llm\n\n', 1)"
+compose_case "Ollama's old models volume in llama-server" ai 'the volumes are \["llama-models", "ollama-models"\]; the ai stack uses exactly \["llama-models"\]' "text = text.replace('          nocopy: true\n    deploy:', '          nocopy: true\n      - type: volume\n        source: ollama-models\n        target: /ollama\n    deploy:', 1) + '  ollama-models:\n    name: ollama-models\n    external: true\n'"
+compose_case "llama-server with deploy labels" ai "service llama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('    deploy:\n      resources:', '    deploy:\n      labels:\n        x-extra: \"1\"\n      resources:', 1)"
+compose_case "llama-server reserving more than the GPU" ai "service llama sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('capabilities: [gpu]', 'capabilities: [gpu, utility]', 1)"
+compose_case "llama-server without a memory limit" ai "service llama sets no mem_limit" "text = text.replace('    mem_limit: 6g\n', '')"
+compose_case "llama-server keeping its capabilities" ai "service llama does not drop every capability" "text = text.replace('    cap_drop: [ALL]\n', '')"
+compose_case "llama-server on the data network" ai 'network data is "data"; the ai stack may only join the existing network\(s\) home-llm' "text = text.replace('$llama_networks', '    networks:\n      - home-llm\n      - data\n    healthcheck:').replace('networks:\n  # Created', 'networks:\n  data:\n    name: data\n    external: true\n  # Created')"
+compose_case "llama-server on llm, Ollama's old line" ai 'network llm is "llm"; the ai stack may only join the existing network\(s\) home-llm' "text = text.replace('$llama_networks', '    networks:\n      - home-llm\n      - llm\n    healthcheck:').replace('networks:\n  # Created', 'networks:\n  llm:\n    name: llm\n    external: true\n  # Created')"
+compose_case "llama-server reading another stack's secret" ai 'service llama reads env_file ".*home-tls.env"' "text = text.replace('    environment:\n      HOME: /tmp\n', '    env_file: ../media/home-tls.env\n    environment:\n      HOME: /tmp\n')"
+compose_case "a Watchtower label on llama-server" ai "service llama sets the label com.centurylinklabs.watchtower.enable" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - com.centurylinklabs.watchtower.enable=true\n', 1)"
+compose_case "a service named apart from its container" ai 'service server names its container "llama"' "text = text.replace('  llama:\n    image:', '  server:\n    image:')"
+compose_case "the models volume created by the release" ai 'volume llama-models is "llama-models"; the ai stack keeps its data in "llama-models" \(external\)' "text = text.replace('  llama-models:\n    name: llama-models\n    external: true\n', '  llama-models:\n    name: llama-models\n')"
 compose_case "llama-server published on the tailnet" ai "service llama sets ports, which publishes a host port" "text = text.replace('    container_name: llama\n', '    container_name: llama\n    ports:\n      - \"\${TAILSCALE_IP}:8080:8080\"\n')"
 compose_case "llama-server as root" ai 'service llama runs as "0:0"; it must run as 2001:2001' "text = text.replace('    container_name: llama\n    user: \"\${AI_UID}:\${AI_GID}\"\n', '    container_name: llama\n    user: \"0:0\"\n')"
 compose_case "llama-server unpinned" ai 'service llama runs "ghcr.io/ggml-org/llama.cpp:server-cuda"' "import re; text = re.sub(r'image: ghcr.io/ggml-org/llama.cpp:\S+', 'image: ghcr.io/ggml-org/llama.cpp:server-cuda', text)"
 compose_case "llama-server reading the film library" ai 'service llama has a "bind" mount of "/srv/media/movies"' "text = text.replace('      - type: volume\n        source: llama-models\n', '      - type: bind\n        source: /srv/media/movies\n        target: /films\n        bind:\n          create_host_path: false\n      - type: volume\n        source: llama-models\n', 1)"
-compose_case "hypernova's web app on llm" hypernova "service web joins llm; prizm-web may only join edge" "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - llm\n    labels:')"
+compose_case "hypernova's web app on the data network" hypernova "service web joins data; prizm-web may only join edge" "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - data\n    labels:')"
+compose_case "hypernova's provider on llm, Ollama's old line" hypernova 'network llm is "llm"; the hypernova stack may only join the existing network\(s\) data and edge' "text = text.replace('      - edge\n    healthcheck:', '      - edge\n      - llm\n    healthcheck:', 1).replace('networks:\n  edge:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  edge:\n', 1)"
 
 # The media stack: tailnet-only, hardened, only Garage's objects and Beszel's two size folders bound.
 # shellcheck disable=SC2016 # the compose text, ${TAILSCALE_IP} literal
@@ -871,7 +865,7 @@ compose_case "a bind mount in the short syntax" media 'service garage mounts /sr
 compose_case "a shared mount propagation" media 'service garage mounts /srv/media/s3 as' "text = text.replace('        target: /data\n        bind:\n          create_host_path: false\n', '        target: /data\n        bind:\n          create_host_path: false\n          propagation: rshared\n')"
 compose_case "the host's /etc in Beszel's agent" media 'service beszel-agent has a "bind" mount of "/etc"' "text = text.replace('        source: /srv/media/.beszel\n', '        source: /etc\n')"
 compose_case "the file manager as root" media 'service sftpgo runs as "0:0"; it must run as 2000:2000' "text = text.replace('    container_name: sftpgo\n    user: \"\${MEDIA_UID}:\${MEDIA_GID}\"\n', '    container_name: sftpgo\n    user: \"0:0\"\n')"
-compose_case "the GPU for the file manager" media "service sftpgo sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
+compose_case "the GPU for the file manager" media "service sftpgo sets deploy, which can reserve host devices; only beszel-agent, home-server, llama may reserve the GPU" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n')"
 compose_case "the links page on the edge network" media 'network edge is "edge"; the media stack may only join the existing network\(s\) beszel-socket and media' "text = text.replace('$home_networks', '    networks:\n      - media\n      - edge\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  media:\n')"
 compose_case "a Traefik route to the links page" media "service home sets the label traefik.enable" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - traefik.enable=true\n', 1)"
 compose_case "the links page on the agent's socket network" media 'service home joins beszel-socket; home may only join media' "text = text.replace('$home_networks', '    networks:\n      - media\n      - beszel-socket\n    healthcheck:', 1)"
@@ -891,7 +885,7 @@ compose_case "a published Home port" home "service home-server sets ports, which
 # Home's media library, its GPU and the media group: home-server's alone, at fixed paths, nothing more.
 films_mount='        source: /srv/media/movies\n        target: /data/media/films\n'
 gpu_reservation='    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              count: all\n              capabilities: [gpu]\n'
-compose_case "the GPU for home-keys" home "service home-keys sets deploy, which can reserve host devices; only beszel-agent, home-server, llama, ollama may reserve the GPU" "text = text.replace('    container_name: home-keys\n', '    container_name: home-keys\n$gpu_reservation')"
+compose_case "the GPU for home-keys" home "service home-keys sets deploy, which can reserve host devices; only beszel-agent, home-server, llama may reserve the GPU" "text = text.replace('    container_name: home-keys\n', '    container_name: home-keys\n$gpu_reservation')"
 compose_case "home-server reserving more than the GPU" home "service home-server sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('capabilities: [gpu]', 'capabilities: [gpu, video]', 1)"
 compose_case "home-server reserving one GPU by id" home "service home-server sets deploy .*; it may only reserve all NVIDIA GPUs" "text = text.replace('              count: all\n', '              device_ids: [\"GPU-0\"]\n', 1)"
 compose_case "the film library read-only in home-server" home 'service home-server mounts /srv/media/movies as .*; it may only mount it at /data/media/films, with' "text = text.replace('$films_mount', '$films_mount        read_only: true\n')"
@@ -903,7 +897,7 @@ compose_case "the media group for home-keys" home "service home-keys sets group_
 compose_case "the root group for home-server" home 'service home-server adds the groups \["0"\]; it may add exactly \["2000"\], the media account' "text = text.replace('      - \"\${MEDIA_GID}\"\n', '      - \"0\"\n')"
 compose_case "a second group for home-server" home 'service home-server adds the groups \["2000", "2001"\]' "text = text.replace('      - \"\${MEDIA_GID}\"\n', '      - \"\${MEDIA_GID}\"\n      - \"2001\"\n')"
 compose_case "the media group for the file manager" media "service sftpgo sets group_add, which gives it the files of another account's group" "text = text.replace('    container_name: sftpgo\n', '    container_name: sftpgo\n    group_add: [\"2000\"]\n')"
-compose_case "home-server on llm, Ollama's line" home 'network llm is "llm"; the home stack may only join the existing network\(s\) home-llm and media' "text = text.replace('      - home-llm\n    healthcheck:', '      - home-llm\n      - llm\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  media:\n')"
+compose_case "home-server on llm, Ollama's old line" home 'network llm is "llm"; the home stack may only join the existing network\(s\) home-llm and media' "text = text.replace('      - home-llm\n    healthcheck:', '      - home-llm\n      - llm\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  media:\n')"
 compose_case "home-keys on home-llm" home "service home-keys joins home-llm; home-keys may only join media" "text = text.replace('    networks:\n      - media\n\n  home-server:', '    networks:\n      - media\n      - home-llm\n\n  home-server:')"
 # The guard on its own, against the resolved models of the checked-in stacks.
 for stack in database portfolio hypernova tunnel ai media home; do
@@ -1022,14 +1016,14 @@ expect_refused "a container with an unreadable StartedAt" "not ready after 1s: p
 installed_state
 sleep 1
 touch "$state/vanished/c4"
-expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 19 listed containers could not be inspected" "$work/second.tgz" release
+expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 17 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with an uninspected container was marked verified"; exit 1; }
 grep -q '^curl ' "$state/calls" && { echo "FAIL the routes were checked before every container was inspected"; exit 1; }
 
 installed_state
 sleep 1
 for c in c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29; do touch "$state/vanished/$c"; done
-expect_refused "every listed container is gone before the inspect" "not ready after 1s: 19 of 19 listed containers could not be inspected" "$work/second.tgz" release
+expect_refused "every listed container is gone before the inspect" "not ready after 1s: 17 of 17 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with no inspected container was marked verified"; exit 1; }
 
 installed_state

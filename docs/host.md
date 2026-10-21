@@ -147,7 +147,7 @@ the `media` group added by the release instead (`group_add`, which the guard all
 `home-server` alone and only with `MEDIA_USER`'s gid), so Home can write into the film and
 series library and nowhere else that group reaches.
 
-Their data lives in volumes provisioning creates (`ollama-models`, `llama-models` (Home's AI
+Their data lives in volumes provisioning creates (`llama-models` (Home's AI
 models, the `ai` account's, filled by the owner: [RUNBOOK.md](../RUNBOOK.md#homes-ai-models)), `home-tls-acme`,
 `beszel-data`, `beszel-agent-data`, `garage-meta`, `sftpgo-data`, Home's `home-data` and
 `home-keys`, and the volumes of the apps
@@ -162,7 +162,7 @@ an empty volume the first time it is mounted.
 
 | Disk | Mounted at | `production.yml` | Holds |
 | --- | --- | --- | --- |
-| 225 GB SSD | `/` | — | Ubuntu, Docker's data root (images, every volume: PostgreSQL, app configs, Ollama's models), swap |
+| 225 GB SSD | `/` | — | Ubuntu, Docker's data root (images, every volume: PostgreSQL, app configs, Home's AI models), swap |
 | 1 TB internal HDD | `/srv/media` | `media_disk_uuid` | Garage's objects (`s3`), Home Files' ciphertext (`home-files`, at most `home_files_capacity` of it), Home's film and series library (`movies`, `shows`), and the retired apps' library folders, kept: `audiobooks`, `podcasts`, `books`, `photos` |
 | 1 TB external USB HDD | `/srv/backup` | `backup_disk_uuid` | the nightly backup ([operations.md](operations.md#backups)) |
 
@@ -388,8 +388,8 @@ summer time; every other time on this host is UTC) the fans have less heat to mo
   A GPU without persistence mode gets it first (`nvidia-smi -pm 1`): without it the driver
   unloads when the GPU is idle and drops the limit. At the end the limit goes back to the
   card's `power.default_limit`; persistence mode stays on. Skipped where `nvidia-smi` does not
-  exist. The cap is the whole card's, so everything on it is slower in those hours: Ollama
-  (hypernova's AI answers), llama-server (Home's AI) and home-server's NVENC transcodes. No
+  exist. The cap is the whole card's, so everything on it is slower in those hours: llama-server
+  (Home's AI) and home-server's NVENC transcodes. No
   container can raise it (none has the rights `nvidia-smi -pl` needs); Home asks for less on its
   own in the same hours (`HOME_AI_QUIET_HOURS`, `HOME_MEDIA_QUIET_HOURS`, both from
   `quiet_hours_*`: one answer at a time with a 4k context and no day-only model, one transcode

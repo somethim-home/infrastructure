@@ -98,7 +98,7 @@ new_state() {
   state="$work/state$count"
   mkdir -p "$state/backup" "$state/running" "$state/stopped" "$state/volumes"
   touch "$state/mounted" "$state/calls"
-  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data immich-pgdata portfolio-media hypernova_prizm-storage ollama-models llama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
+  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data immich-pgdata portfolio-media hypernova_prizm-storage llama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
     mkdir -p "$state/volumes/$volume"
     echo "$volume data" >"$state/volumes/$volume/data.db"
   done
@@ -109,7 +109,7 @@ new_state() {
   echo model >"$state/volumes/open-webui-data/cache/embedding/model.bin"
   echo page >"$state/volumes/kavita-config/cache/page.png"
   echo cover >"$state/volumes/audiobookshelf-metadata/cache/cover.jpg"
-  echo weights >"$state/volumes/ollama-models/blob"
+  echo weights >"$state/volumes/llama-models/model.gguf"
   mkdir -p "$state/media/audiobooks/Author/Book" "$state/media/books" "$state/media/podcasts/Show" "$state/media/movies/Film (2001)" \
     "$state/media/movies/.home-uploads" "$state/media/shows/Show (2019)/Season 01"
   echo chapter >"$state/media/audiobooks/Author/Book/01.mp3"
@@ -214,13 +214,12 @@ done
 echo "ok   a run writes snapshots/<date> with .complete, latest points at it, dumps 0600 in 0700 directories"
 want_volumes="$(printf '%s\n' audiobookshelf-config audiobookshelf-metadata hypernova_prizm-storage jellyfin-config kavita-config open-webui-data immich-pgdata portfolio-media beszel-data garage-meta sftpgo-data home-data | LC_ALL=C sort)"
 [ "$(find "$s1/volumes" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = "$want_volumes" ] || { ls "$s1/volumes"; echo "FAIL the snapshot does not hold exactly the app volumes"; exit 1; }
-grep -q 'ollama-models' "$state/calls" && { echo "FAIL the Ollama models were looked at"; exit 1; }
 grep -q 'llama-models' "$state/calls" && { echo "FAIL Home's AI models were looked at"; exit 1; }
 grep -q 'home-keys' "$state/calls" && { echo "FAIL Home's keys were looked at"; exit 1; }
 [ -f "$s1/volumes/jellyfin-config/metadata/poster.jpg" ] && [ ! -e "$s1/volumes/jellyfin-config/log" ] || { find "$s1/volumes/jellyfin-config"; echo "FAIL jellyfin-config: logs left in, or data missing"; exit 1; }
 [ ! -e "$s1/volumes/open-webui-data/cache" ] && [ ! -e "$s1/volumes/kavita-config/cache" ] && [ ! -e "$s1/volumes/audiobookshelf-metadata/cache" ] ||
   { echo "FAIL an app cache was copied"; exit 1; }
-echo "ok   apps: one tree per app volume, caches and logs left out, never the Ollama models"
+echo "ok   apps: one tree per app volume, caches and logs left out, never the AI models"
 grep -qE '^(stop|start) .*(jellyfin|audiobookshelf|kavita|open-webui|immich)' "$state/calls" && { cat "$state/calls"; echo "FAIL a retired app was stopped or started"; exit 1; }
 echo "ok   retired apps: their volumes are still copied, no container of theirs is touched"
 want_stops="$(printf '%s\n' 'stop --time 60 beszel' 'start beszel' 'stop --time 60 garage' 'start garage' 'stop --time 60 sftpgo' 'start sftpgo' 'stop --time 60 home-server' 'start home-server')"

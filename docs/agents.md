@@ -41,8 +41,8 @@ to `:latest` is a deploy.
   that schema unattended, and a rollback to an image older than the migration may not start;
   the nightly backup is the way back. PostgreSQL and Traefik carry no such label and are never touched. **Never
   label a database**: an unattended image swap on a stateful container is a restore, not an
-  update. The `ai` stack carries none either: its Ollama and llama.cpp images are digest-pinned
-  third-party ones, so they move only with a reviewed re-pin and a
+  update. The `ai` stack carries none either: its llama.cpp image is a digest-pinned
+  third-party one, so it moves only with a reviewed re-pin and a
   release ([stacks.md](stacks.md#ai)); the compose guard refuses the label there.
 - **Digest pins are skipped.** A rollback runs an app as `<repo>:latest@sha256:<digest>`,
   which Watchtower cannot move, so auto-updates pause for exactly the pinned apps until
@@ -122,9 +122,8 @@ Containers are not pruned at all, so a deliberately stopped one survives. Run it
 ## Re-pinning third-party images
 
 Every image that is not an app image is pinned `<image>:<tag>@sha256:<digest>`: PostgreSQL
-(`stack/database/docker-compose.yml`), cloudflared (`stack/tunnel/docker-compose.yml`), Ollama
-and llama.cpp's server (`stack/ai/docker-compose.yml`; Ollama's pin appears twice, for `ollama`
-and `ollama-pull`; llama.cpp's tags are `server-cuda-b<build>`, and a re-pin checks the
+(`stack/database/docker-compose.yml`), cloudflared (`stack/tunnel/docker-compose.yml`),
+llama.cpp's server (`stack/ai/docker-compose.yml`; llama.cpp's tags are `server-cuda-b<build>`, and a re-pin checks the
 router-mode flags and preset keys in its release notes, [stacks.md](stacks.md#ai)), busybox,
 Traefik, Beszel (hub and the NVIDIA agent), curl, Garage and SFTPGo
 (`stack/media/docker-compose.yml`: busybox for `home` and `garage-config`, Traefik for `home-tls`,
@@ -151,6 +150,6 @@ To move one:
    `master`.
 3. Apply it: provision with that role's tag (`--tags edge`, `--tags watchtower` or
    `--tags autoheal`; the socket proxy needs all three), or run `release` for PostgreSQL,
-   cloudflared, Ollama and llama.cpp. A PostgreSQL pin may move only within the major
+   cloudflared and llama.cpp. A PostgreSQL pin may move only within the major
    ([database.md](database.md#upgrades)). Pick a cloudflared release that has been out for a
    couple of weeks; it is never auto-updated (`--no-autoupdate`, no Watchtower label).

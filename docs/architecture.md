@@ -149,8 +149,6 @@ refuses any env line that is not `KEY=value`.
 | --- | --- | --- |
 | `edge` | `roles/host` | Traefik, `cloudflared`, plus every container that serves a public domain |
 | `data` | `roles/host` | PostgreSQL, plus every container that talks to it |
-| `ai` | `roles/host` | Ollama, `ollama-pull` (a plain bridge: Ollama downloads models) |
-| `llm` | `roles/host`, `--internal` | Ollama and hypernova's `prizm-provider`, nothing else; no route out |
 | `home-llm` | `roles/host`, `--internal` | llama-server (`llama`, the `ai` stack) and Home's `home-server`, nothing else; no route out |
 | `media` | `roles/host` | `home`, `home-tls`, Beszel, Garage, SFTPGo (their tailnet ports, `home-tls`'s certificate), and `home-server` and `home-keys` of the `home` stack (`home-tls` reaches Home there; Home's mail goes out through it) |
 | `edge-socket`, `watchtower-socket`, `autoheal-socket` | their compose projects, `internal: true` | one agent and its socket proxy each |
@@ -174,7 +172,7 @@ Two audiences, two ways in, and nothing else:
 | Beszel, the status dashboard (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8090) | `https://status.home.arbikullakshi.com` |
 | Garage, S3 storage (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 3900) | `https://s3.home.arbikullakshi.com` (S3, path-style, region `garage`) |
 | SFTPGo, the file manager on Garage's `files` bucket (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8091) | `https://files.home.arbikullakshi.com/web/client`, WebDAV at `/dav` |
-| Ollama, llama-server, PostgreSQL, Traefik | containers only | Docker networks (`llm`, `home-llm`, `data`, `edge`) | none on the host |
+| llama-server, PostgreSQL, Traefik | containers only | Docker networks (`home-llm`, `data`, `edge`) | none on the host |
 
 Each tailnet service's https name is `<label>.home.arbikullakshi.com` (`home_hosts` in
 `production.yml`), all on one Let's Encrypt certificate for `home.` and `*.home.` that `home-tls`

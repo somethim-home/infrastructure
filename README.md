@@ -32,7 +32,6 @@ flowchart LR
     traefik --> hypernova[hypernova]
     portfolio --> pg[(PostgreSQL)]
     hypernova --> pg
-    hypernova --> ollama[ai: Ollama on the GPU]
     hometls[home-tls<br/>Traefik + Let's Encrypt] --> home[Home: home-server<br/>web app, Files, Media, Books, AI]
     home -- internal home-llm --> llama[ai: llama-server on the GPU]
     home --> library[(films and series<br/>on the media disk)]
@@ -84,7 +83,7 @@ one only runs their images.
   Quad9 over TLS. See [docs/host.md](docs/host.md) and
   [docs/agents.md](docs/agents.md).
 - **Stacks** (`stack/`, started by a release in this order): `database` (the shared
-  PostgreSQL), `portfolio`, `hypernova`, `tunnel` (`cloudflared`), `ai` (Ollama and llama-server), `media`
+  PostgreSQL), `portfolio`, `hypernova`, `tunnel` (`cloudflared`), `ai` (llama-server), `media`
   (`home-tls`, Beszel, Garage, SFTPGo) and `home`. See [docs/stacks.md](docs/stacks.md),
   [docs/database.md](docs/database.md) and [docs/edge.md](docs/edge.md).
 - **Release flow.** Actions → Deploy renders a bundle from the `production` Environment's
@@ -201,8 +200,8 @@ Ubuntu Server 26.04 LTS, with no port open to the internet. The public reaches t
 through a **Cloudflare Tunnel** the server dials out to; SSH works only over **Tailscale**. It
 provisions the host, runs the edge Traefik proxy and the autonomous agents, and releases every
 stack: the shared `database`, two applications, `portfolio` and `hypernova`, the `tunnel`, and
-for the owner alone, over the tailnet only, `ai` (Ollama on the GPU for hypernova, and
-llama-server for Home's AI), `media`
+for the owner alone, over the tailnet only, `ai` (llama-server on the GPU, the engine of Home's
+AI), `media`
 (the Beszel status dashboard, Garage S3 storage with the SFTPGo file manager on top, and
 `home-tls`, which serves each at its own https name under `home.arbikullakshi.com` on the
 tailnet) and `home` (Home, the owner's own app, at `https://home.arbikullakshi.com/`). It also

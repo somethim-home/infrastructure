@@ -149,7 +149,7 @@ scenario() {
   echo active >"$work/state/systemd-resolved.active"
   printf '%s\n' "Global: yes" "Link 2 (enp8s0): no" "Link 3 (tailscale0): no" "Link 4 (docker0): no" >"$work/state/resolvectl.dnsovertls"
   resolvectl_dns ""
-  printf '%s\n' "ollama 11434/tcp" "ollama-pull " "edge-traefik 80/tcp" "postgresql 5432/tcp" \
+  printf '%s\n' "llama 8080/tcp" "edge-traefik 80/tcp" "postgresql 5432/tcp" \
     "home $ts_ip:80->80/tcp" "home-tls $ts_ip:443->443/tcp, 80/tcp" \
     "beszel $ts_ip:8090->8090/tcp" "beszel-agent " "garage $ts_ip:3900->3900/tcp, 3901/tcp, 3903/tcp" \
     "sftpgo $ts_ip:8091->8091/tcp" >"$work/state/docker.ps"
@@ -387,8 +387,8 @@ printf '%s\n' "sftpgo 0.0.0.0:8091->8091/tcp, [::]:8091->8091/tcp" >"$work/state
 expect_fail "host: the file manager on every interface" "A container publishes a port that is not a tailnet-only one" host
 
 scenario
-printf '%s\n' "sftpgo $ts_ip:8091->8091/tcp" "ollama $ts_ip:11434->11434/tcp" >"$work/state/docker.ps"
-expect_fail "host: Ollama published on the tailnet" "ollama 100.101.102.103:11434->11434/tcp" host
+printf '%s\n' "sftpgo $ts_ip:8091->8091/tcp" "llama $ts_ip:8080->8080/tcp" >"$work/state/docker.ps"
+expect_fail "host: llama-server published on the tailnet" "llama 100.101.102.103:8080->8080/tcp" host
 
 scenario
 printf '%s\n' "sftpgo 192.168.1.50:8091->8091/tcp" >"$work/state/docker.ps"

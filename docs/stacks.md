@@ -14,6 +14,12 @@ stack name — `prizm-lodge` was the original project — which is why the conta
 says `hypernova`. Its secrets are in `provider.env`; `prizm-web` has none, and starts only
 once the provider reports healthy.
 
+Its AI features (the chat assistant and intake extraction) are **off**: `provider.env` sets
+`AI_DISABLED=true` and no `OLLAMA_*`. The provider speaks Ollama's API, and Ollama is no longer
+on the server; llama-server, the only AI engine, is on `home-llm` for Home alone. With AI off the
+chat answers with a notice and intake skips extraction; nothing else changes. The provider joins
+`data` and `edge` only.
+
 Its only image tag is `:latest`, so a rollback names a digest (see
 [RUNBOOK.md](../RUNBOOK.md#releases-status-rollback-resume)).
 
@@ -81,25 +87,11 @@ image and the stack entry are all gone.
 
 ## ai
 
-Ollama, for hypernova's provider, and llama-server, the engine of Home's AI. Nothing in this
-stack is public or published: it is not on `edge`, has no Traefik label, publishes no port and
-is never behind the tunnel.
-
-- **`ollama`** serves models on `11434` inside Docker only: it publishes no port. It joins
-  `ai` (a plain bridge, which it needs to download models) and `llm`, an **internal** network
-  (no route out) whose only other member is hypernova's `prizm-provider`. Its models and key
-  live in the external `ollama-models` volume (`HOME=/ollama`), on the SSD.
-- **`ollama-pull`** is a one-shot on every release, once Ollama is healthy: `ollama pull` for
-  each model in `ollama_models` (`production.yml`, passed as `OLLAMA_MODELS`), in order. A model
-  Ollama already has costs a manifest check. Only when every pull finished does it remove the
-  models the list no longer names (`ollama rm`), so the volume does not keep models nobody uses;
-  a failed pull removes nothing. A model pulled by hand is removed by the next release unless it
-  is added to the list. It exits; verify does not wait for it (restart `"no"`).
-  `sudo docker logs ollama-pull` shows each pull and removal.
-
-To add a model: append it to `ollama_models` (`<model>:<tag>`, sized for 12 GB) and release.
-The 14B models in the list were kept for the owner's own apps; Home's AI uses llama-server
-instead, so they can go (about 18 GB of the SSD) once nothing else asks for them.
+llama.cpp's `llama-server`, the engine of Home's AI and the only AI engine on the server. Nothing
+in this stack is public or published: it is not on `edge`, has no Traefik label, publishes no
+port and is never behind the tunnel. (Ollama, which served hypernova's provider, was removed;
+hypernova's AI features are off, `AI_DISABLED=true`. A server that still has Ollama's old
+`ollama-models` volume: [RUNBOOK.md](../RUNBOOK.md#removing-ollamas-models).)
 
 - **`llama`** is llama.cpp's `llama-server` (the official CUDA image, `server-cuda-b11429`,
   pinned by digest; its CUDA build covers the RTX 2060's sm_75) in **router mode**: one server
@@ -107,7 +99,7 @@ instead, so they can go (about 18 GB of the SSD) once nothing else asks for them
   (`--models-max 1`), and unloads it after 5 idle minutes (`--sleep-idle-seconds 300`). Home's
   `home-server` is its only client, at `http://llama:8080` over **`home-llm`**, an internal
   network (no route out) whose only other member is `home-server`; `llama` joins nothing else,
-  so it can reach neither the internet nor Ollama, hypernova or the database. Its models are the
+  so it can reach neither the internet nor hypernova or the database. Its models are the
   GGUF files `production.yml`'s `home_ai_models` names, in the `llama-models` volume (the `ai`
   account's, mounted read-only at `/models`), which the owner downloads once
   ([RUNBOOK.md](../RUNBOOK.md#homes-ai-models)); they are not backed up (they download again).
@@ -120,66 +112,50 @@ instead, so they can go (about 18 GB of the SSD) once nothing else asks for them
   ("…is missing"); that model then fails to load and the others work. With no model loaded the
   server still answers `/health`, which is its healthcheck and what Home's AI card asks.
 
-**Hardening.** Every container runs as the `ai` account (`ai_uid:ai_gid` in `production.yml`,
+**Hardening.** `llama` runs as the `ai` account (`ai_uid:ai_gid` in `production.yml`,
 `2001:2001`, created by `roles/host` with no login), never root, with `cap_drop: [ALL]`,
-`no-new-privileges`, a `mem_limit` and a read-only root filesystem (`ollama` and `llama` with a
-tmpfs `/tmp`); the compose guard refuses the stack otherwise, and lets `llama` join `home-llm`
-alone. `ollama-models` and `llama-models` are created by provisioning with their root owned by
-that account (0700) and mounted with `nocopy`, so Docker never copies an image's root-owned
-directory over them.
+`no-new-privileges`, a `mem_limit` and a read-only root filesystem with a tmpfs `/tmp`; the
+compose guard refuses the stack otherwise, and lets `llama` join `home-llm` alone.
+`llama-models` is created by provisioning with its root owned by that account (0700) and
+mounted with `nocopy`, so Docker never copies an image's root-owned directory over it.
 
-**hypernova.** The provider reaches Ollama on `llm` (`OLLAMA_HOST=http://ollama:11434`,
-`OLLAMA_MODEL` = `hypernova_ollama_model`, which must be in `ollama_models`;
-`AI_DISABLED=false` in `provider.env`). `prizm-web` is not on `llm`; the guard refuses it there.
+**The GPU.** The RTX 2060 has 12 GB of VRAM, shared by llama-server and Home's video work
+([The GPU, shared](#the-gpu-shared)). `llama` reserves the GPU
+(`deploy.resources.reservations.devices`, driver `nvidia`, `count: all`, `capabilities: [gpu]`;
+it gets the `compute` and `utility` driver capabilities through `NVIDIA_DRIVER_CAPABILITIES`);
+the guard allows that only to it, `beszel-agent` (in `media`) and `home-server` (in `home`).
+`gpu_enabled: false` makes the release refuse to render, since the stacks could not start.
 
-**The GPU.** The RTX 2060 has 12 GB of VRAM, shared by Ollama, llama-server and Home's video
-work ([The GPU, shared](#the-gpu-shared)). Ollama keeps **one** model loaded
-(`OLLAMA_MAX_LOADED_MODELS=1`, one request at a time) and unloads it after **2 minutes** idle
-(`OLLAMA_KEEP_ALIVE=2m`), with flash attention and a q8_0 KV cache, so a 14B model and a 16k
-context take about 11 GB. The first request after 2 idle minutes waits a few seconds while the
-model loads again. `ollama` and `llama` reserve the GPU (`deploy.resources.reservations.devices`,
-driver `nvidia`, `count: all`, `capabilities: [gpu]`; `llama` gets the `compute` and `utility`
-driver capabilities through `NVIDIA_DRIVER_CAPABILITIES`); the guard allows that only to them,
-`beszel-agent` (in `media`) and `home-server` (in `home`). `gpu_enabled: false` makes the release
-refuse to render, since the stacks could not start.
+**Memory.** `mem_limit`: `llama` 6 GiB (the weights sit in VRAM; RAM covers the runner, a
+model's mapped file while it loads and whatever does not fit on the card).
 
-**Memory.** `mem_limit`: `ollama` 8 GiB, `llama` 6 GiB (the weights sit in VRAM; RAM covers the
-runner, a model's mapped file while it loads and whatever does not fit on the card),
-`ollama-pull` 128 MiB.
-
-**Updates.** The images are pinned `<tag>@sha256:<digest>` and carry no Watchtower label, on
-purpose: Ollama and llama.cpp change their model handling and flags now and then and should not
-change unattended. Move them with a re-pin and a release
-([agents.md](agents.md#re-pinning-third-party-images)); for llama.cpp read the release notes
-for the router-mode flags (`--models-preset`, `--models-max`, `--sleep-idle-seconds`) and the
-preset keys first. `autoheal` restarts either if it turns unhealthy.
+**Updates.** The image is pinned `<tag>@sha256:<digest>` and carries no Watchtower label, on
+purpose: llama.cpp changes its model handling and flags now and then and should not change
+unattended. Move it with a re-pin and a release
+([agents.md](agents.md#re-pinning-third-party-images)); read the release notes for the
+router-mode flags (`--models-preset`, `--models-max`, `--sleep-idle-seconds`) and the preset
+keys first. `autoheal` restarts it if it turns unhealthy.
 
 ### The GPU, shared
 
 One RTX 2060 with 12 GB (12288 MiB; each process that uses it also takes about 0.3 GB of its
-own) serves four containers. What each holds, about:
+own) serves three containers. What each holds, about:
 
 | Who | Holds | When |
 | --- | --- | --- |
 | `llama`, `qwen3-8b` (Q5_K_M), 2 × 8k q8_0 context | 5.9 GB weights + 1.2 GB context + 0.5 GB work ≈ **7.6 GB** | from Home's first question until 5 idle minutes later |
 | `llama`, `gemma-3-12b` (QAT q4_0) | 8.1 + ~1.5 + 0.5 ≈ **10 GB** | the same |
 | `llama`, `qwen3-14b` (Q4_K_M), by day only | 9.0 + 1.3 + 0.5 ≈ **10.8 GB** | the same; never in quiet hours |
-| `ollama`, `qwen3:4b` (hypernova) | ≈ **3.5 GB** | from a hypernova AI request until 2 idle minutes later |
-| `ollama`, a 14B model | ≈ 11 GB | only if something asks for one (nothing does now) |
 | `home-server`, NVENC/NVDEC | ≈ **0.3 GB** per transcode (`home_media_transcodes`: 2 by day, 1 at night) | while someone watches a film the browser cannot play as it is, and briefly for previews and trickplay |
 | `beszel-agent` | 0 (NVML readings only) | always |
 
-**The rules that keep it inside 12 GB.** llama-server holds **one** model at a time
-(`--models-max 1`: asking for another unloads the first) and lets it go after 5 idle minutes;
-Ollama holds one and lets it go after 2. So the usual day is one Home model plus, now and then,
-hypernova's 3.5 GB and a transcode or two: `qwen3-8b` (7.6) + `qwen3:4b` (3.5) + one transcode
-(0.3) is about 11.4 GB and fits. The two larger Home models do not fit beside Ollama's: while
-`gemma-3-12b` or `qwen3-14b` is loaded and hypernova asks Ollama, Ollama puts what does not fit
-on the CPU (slower, but it answers), and while Ollama's model is loaded, loading a large Home
-model can fail (Home then says the model is offline for that answer; asked again two minutes
-later it loads). A transcode that finds no room falls back to the CPU (x264) by itself
-(`HOME_MEDIA_HWACCEL=auto`). That is why `qwen3-8b` is Home's default, `qwen3-14b` is day-only,
-and the 14B Ollama models are best dropped. `nvidia-smi` on the host shows who holds what.
+**The rules that keep it inside 12 GB.** llama-server is the only AI engine and holds **one**
+model at a time (`--models-max 1`: asking for another unloads the first), and lets it go after
+5 idle minutes. So the most the card holds is one Home model and a transcode or two: the largest,
+`qwen3-14b` (10.8) + two transcodes (0.6), is about 11.4 GB and fits. A transcode that finds no
+room falls back to the CPU (x264) by itself (`HOME_MEDIA_HWACCEL=auto`). `qwen3-8b` is Home's
+default because it answers fastest; `qwen3-14b` is day-only because of quiet hours, not VRAM.
+`nvidia-smi` on the host shows who holds what.
 
 **Quiet hours** (23:00 to 08:00 Berlin time, `quiet_hours_*`): the host caps the whole card at
 130 W ([host.md](host.md#quiet-hours)), which slows every one of them, and no container can
@@ -188,11 +164,9 @@ time with a 4k context and 1k-token answers and leaves out `qwen3-14b` (`HOME_AI
 Media runs one transcode instead of two (`home_media_transcodes_quiet`). The CPU's 70 % cap
 slows a CPU transcode too.
 
-**RAM.** The memory limits of every container add up to about 17 GiB, more than the host's
-16 GB, on purpose: they are ceilings against a runaway, not reservations, and the two engines
-use little RAM while their models are on the card (their mapped model files are page cache,
-which the kernel reclaims). Should the host run short, `ollama` (8 GiB) is the first to lower,
-once its 14B models are gone. `docker stats` shows what each uses.
+**RAM.** The memory limits are ceilings against a runaway, not reservations; `llama` (6 GiB)
+is the largest, and uses little RAM while its model is on the card (the mapped model file is
+page cache, which the kernel reclaims). `docker stats` shows what each uses.
 
 ## media
 
@@ -329,14 +303,12 @@ uid and gid, Home's https name, each service's https name (`HOST_*`), the ACME c
 the dashboard's login name.
 
 **GPU.** `beszel-agent` reserves the GPU to read its state through NVML; it uses none of the
-GPU's memory. The guard allows a GPU reservation to exactly `ollama`, `llama`, `beszel-agent` and
+GPU's memory. The guard allows a GPU reservation to exactly `llama`, `beszel-agent` and
 `home-server`.
 
 **Memory.** `garage` 512 MiB, `sftpgo` 256 MiB, `beszel` 192 MiB, `beszel-agent` 128 MiB,
 `home-tls` 128 MiB, `home` 32 MiB, the one-shots 16–32 MiB (and `home-server` 1.5 GiB in the
-`home` stack). With `ollama` at 8 GiB and `llama` at 6 GiB the limits add up to more than a 16 GB
-machine, on purpose ([The GPU, shared](#the-gpu-shared), "RAM"); give Ollama less if the server
-has less RAM.
+`home` stack), and `llama` 6 GiB in `ai` ([The GPU, shared](#the-gpu-shared), "RAM").
 
 **Updates and backups.** Pinned images, no Watchtower label, as in `ai`. Re-pin, read the
 release notes, make sure last night's backup ran, then release. The nightly backup copies each

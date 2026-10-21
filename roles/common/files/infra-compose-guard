@@ -17,7 +17,7 @@ BIND_MOUNTS folders (Garage's /srv/media/s3, Home's /srv/media/home-files,
 /run/home-power and the film and series library /srv/media/movies and
 /srv/media/shows, and the two folders Beszel's agent reads disk sizes through),
 each at its fixed target, read-only except Garage's s3 and Home's four. The GPU:
-only GPU_SERVICES (Ollama and llama-server, Beszel's agent, home-server for its
+only GPU_SERVICES (llama-server, Beszel's agent, home-server for its
 video work). Extra groups: only GROUP_ADD (home-server joins the media group,
 --media-gid, to write into the library), and only that one.
 infra-apply runs this on every stack of a bundle before anything changes.
@@ -48,9 +48,9 @@ TAILNET_PORTS = {
 TAILNET_PORT_FORM = "${{TAILSCALE_IP}}:{port}:{port}"
 TAILSCALE_IPV4 = re.compile(r"^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$")
 # The only services that may reserve a device: the NVIDIA GPU, all of it, nothing else.
-# Ollama (hypernova's model), llama-server (Home's AI), Beszel's agent (NVML readings) and
-# home-server (NVENC/NVDEC for Home's media; NVIDIA_DRIVER_CAPABILITIES picks what it gets).
-GPU_SERVICES = {("ai", "ollama"), ("ai", "llama"), ("media", "beszel-agent"), ("home", "home-server")}
+# llama-server (Home's AI), Beszel's agent (NVML readings) and home-server
+# (NVENC/NVDEC for Home's media; NVIDIA_DRIVER_CAPABILITIES picks what it gets).
+GPU_SERVICES = {("ai", "llama"), ("media", "beszel-agent"), ("home", "home-server")}
 GPU_DEVICE = {"driver": "nvidia", "count": -1, "capabilities": ["gpu"]}
 # The only bind mounts: (stack, service) -> {host source: (container target, read-only)}.
 BIND_MOUNTS = {
@@ -90,13 +90,13 @@ STACKS = {
         "labels": HOST_LABELS,
     },
     "hypernova": {
-        "networks": {"data", "edge", "llm"},
+        "networks": {"data", "edge"},
         "volumes": {"prizm-storage": {"name": "hypernova_prizm-storage", "external": False}},
         "containers": {"prizm-provider", "prizm-web"},
         "env_files": ("provider.env",),
         "labels": HOST_LABELS,
-        # llm is the provider's private line to Ollama; the web app needs neither it nor the database.
-        "container_networks": {"prizm-provider": {"data", "edge", "llm"}, "prizm-web": {"edge"}},
+        # The web app does not need the database.
+        "container_networks": {"prizm-provider": {"data", "edge"}, "prizm-web": {"edge"}},
     },
     # The tunnel holds no data, is never routed (it is the way in) and is never
     # auto-updated (its image is pinned); autoheal may restart it.
@@ -107,18 +107,16 @@ STACKS = {
         "env_files": ("tunnel.env",),
         "labels": AUTOHEAL_LABEL,
     },
-    # Ollama and llama-server, never published, routed or auto-updated (pinned
-    # images), never on edge or data; llm is Ollama's line to hypernova's provider,
-    # home-llm llama-server's to home-server, and llama-server joins nothing else
-    # (internal: no route out; its models are copied into llama-models by hand).
+    # llama-server, never published, routed or auto-updated (pinned image), never
+    # on edge or data; it joins home-llm, its line to home-server, and nothing
+    # else (internal: no route out; its models are copied into llama-models by hand).
     "ai": {
-        "networks": {"ai", "llm", "home-llm"},
-        "volumes": {"ollama-models": {"name": "ollama-models", "external": True},
-                    "llama-models": {"name": "llama-models", "external": True}},
-        "containers": {"ollama", "ollama-pull", "llama"},
+        "networks": {"home-llm"},
+        "volumes": {"llama-models": {"name": "llama-models", "external": True}},
+        "containers": {"llama"},
         "env_files": (),
         "labels": AUTOHEAL_LABEL,
-        "container_networks": {"ollama": {"ai", "llm"}, "ollama-pull": {"ai"}, "llama": {"home-llm"}},
+        "container_networks": {"llama": {"home-llm"}},
         "container_env_files": {},
         "hardened": True,
     },

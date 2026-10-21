@@ -147,8 +147,8 @@ like it. [deploy-home.md](deploy-home.md#5-the-secrets) sets the Home ones witho
 | `IMMICH_ADMIN_PASSWORD`, `IMMICH_DB_PASSWORD`, `SEARXNG_SECRET`, `WEBUI_SECRET_KEY` | secret | no (retired apps) | set, unused | – | delete ([deploy-home.md](deploy-home.md#10-clean-up)) |
 
 The domains (including `home_hosts`, the tailnet services' https names under `home_domain`),
-the app image repositories, the `ai`, `media` and `home-server` accounts' uids and gids, the
-Ollama models, Home's Files pool (`home_files_capacity`) and Beszel user (`home_beszel_user`) and
+the app image repositories, the `ai`, `media` and `home-server` accounts' uids and gids, Home's AI
+models (`home_ai_models`), Home's Files pool (`home_files_capacity`) and Beszel user (`home_beszel_user`) and
 the disks' UUIDs are in [`production.yml`](../production.yml), not in the Environment. The tunnel's Public Hostnames are in Cloudflare
 ([edge.md](edge.md#why-the-tunnel-is-a-release-stack)).
 
@@ -175,7 +175,7 @@ mode 0644, the rest 0600:
 | `home/home-keys.env` | `HOME_SECRET_KEY`, `HOME_DATA_KEY`, `HOME_SMTP_PASSWORD` (the Resend key), `HOME_BESZEL_PASSWORD`, `HOME_POWER_KEY`, `HOME_TMDB_READ_TOKEN` | `home-keys`, which writes each into its own file in the `home-keys` volume |
 | `home/home-server.env` | Home's settings and the owner's address; no secret, only the paths of the key files | `home-server` |
 | `ghcr.env` | GHCR login | `infra-apply`'s `docker login` |
-| `<stack>/.env` | image references, domains, the `ai`, `media` and `home-server` uids and gids (and the `media` gid home-server joins), the Ollama models and llama-server's model files, the ACME contact and the dashboard's login name only | Compose interpolation |
+| `<stack>/.env` | image references, domains, the `ai`, `media` and `home-server` uids and gids (and the `media` gid home-server joins), llama-server's model files, the ACME contact and the dashboard's login name only | Compose interpolation |
 | `release.env`, `manifest.sha256`, `<stack>/docker-compose.yml` | no secrets | `infra-apply` |
 
 See [architecture.md](architecture.md#env-files) for why the `.env` files carry no secrets.
@@ -211,7 +211,7 @@ anything changes ("…; the running release is untouched") unless all of this ho
    `/run/home-power` (its power requests), `/srv/media/movies` and `/srv/media/shows` (at
    `/data/media/films` and `/data/media/series`) and the two folders Beszel's agent sizes disks
    through, each in its own container at its fixed path, read-only except Garage's objects and
-   Home's four, `create_host_path: false`; a GPU reservation only for `ollama`, `llama`,
+   Home's four, `create_host_path: false`; a GPU reservation only for `llama`,
    `beszel-agent` and `home-server`, and only the whole NVIDIA GPU; no extra group but the `media`
    gid (`MEDIA_USER`) for `home-server`; only the stack's own env files, each read by
    its one container; in `ai`,

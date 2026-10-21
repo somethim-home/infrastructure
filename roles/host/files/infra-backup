@@ -51,8 +51,8 @@
 #
 # Every step runs even when an earlier one failed; the script exits 1 if any
 # did, which starts infra-backup-failed.service (an error line in the journal).
-# Never touches the ollama-models, llama-models and comfyui-data volumes
-# (models and the Stable Diffusion checkpoint download again), Jellyfin's cache
+# Never touches the llama-models and comfyui-data volumes (the models and the
+# Stable Diffusion checkpoint download again), Jellyfin's cache
 # and transcodes, or home-keys (Home's keys stay out of the backups; the release
 # writes them again from the GitHub secrets).
 # Restoring: RUNBOOK.md, "Restoring from the backup disk".

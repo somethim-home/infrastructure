@@ -121,19 +121,6 @@
       vars:
         deploy_key_file: "{{ playbook_dir }}/roles/common/files/deploy_key.pub"
 
-    - name: Require Ollama model names the pull and hypernova agree on
-      ansible.builtin.assert:
-        that:
-          - ollama_models is sequence and ollama_models is not string and ollama_models | length > 0
-          - ollama_models | select('match', '^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$') | list | length == ollama_models | length
-          - ollama_models | unique | length == ollama_models | length
-          - hypernova_ollama_model in ollama_models
-        fail_msg: >-
-          production.yml's ollama_models must be a non-empty list of distinct <model>:<tag> names (ollama-pull
-          removes any model the list does not name, so a bare name would be pulled as :latest and removed
-          again), and hypernova_ollama_model must be one of them.
-        quiet: true
-
     - name: Require Home's owner, Files pool, Status card and power key settings
       ansible.builtin.assert:
         that:
@@ -191,7 +178,7 @@
         that:
           - gpu_enabled | bool
         fail_msg: >-
-          production.yml sets gpu_enabled: false, but Ollama and llama-server (ai), Beszel's agent (media) and
+          production.yml sets gpu_enabled: false, but llama-server (ai), Beszel's agent (media) and
           home-server (home) reserve the NVIDIA GPU, so they could not start. Set gpu_enabled: true and provision
           (roles/gpu) before releasing.
         quiet: true

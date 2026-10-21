@@ -26,7 +26,6 @@ service_accounts:
 # immich-* belong to apps retired on 2026-10-20: no stack mounts them any more,
 # but they stay listed (and backed up) until the owner has audited their data.
 service_volumes:
-  - { name: ollama-models, account: ai }
   # Home's AI models (GGUF files for llama-server), downloaded by the owner.
   - { name: llama-models, account: ai }
   - { name: open-webui-data, account: ai }

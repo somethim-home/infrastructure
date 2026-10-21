@@ -414,7 +414,7 @@ infra-apply: compose model accepted: 1 service(s) in the database stack, ...
 infra-apply: compose model accepted: 1 service(s) in the portfolio stack, ...
 infra-apply: compose model accepted: 2 service(s) in the hypernova stack, ...
 infra-apply: compose model accepted: 1 service(s) in the tunnel stack, ...
-infra-apply: compose model accepted: 3 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, ...
+infra-apply: compose model accepted: 1 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, ...
 infra-apply: compose model accepted: 9 service(s) in the media stack, no privileged settings, no host port but beszel 100.x.y.z:8090, garage 100.x.y.z:3900, home 100.x.y.z:80, home-tls 100.x.y.z:443, sftpgo 100.x.y.z:8091 on the tailnet, ...
 infra-apply: compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, ...
 infra-apply: bundle accepted: 29 files, manifest checksums match
@@ -859,7 +859,7 @@ Snapshots from before 2026-10-20 also hold `immich.sql.gz`, Immich's own databas
 Kept: the last 14 nights, plus the first night of each of the last 8 weeks, so anything
 deleted within about two months is still in an older snapshot. Unchanged files are hard links
 between snapshots, so each night only costs what changed. The films' and series' videos and the
-AI models (Ollama's and Home's `llama-models`) are not backed up: the videos would not fit, the
+AI models (Home's `llama-models`) are not backed up: the videos would not fit, the
 models download again ([Home's AI models](#homes-ai-models)). Check last night's run with
 `ssh admin@infra-host journalctl -u infra-backup.service --since yesterday`; a failed one also
 logs "the nightly backup FAILED" at error priority, and its unfinished
@@ -995,8 +995,9 @@ in [docs/operations.md](docs/operations.md).
 
 ## 12. GPU, AI and media
 
-**Owner action.** Turns on what the rest of the hardware is for: Ollama on the RTX 2060 (for
-hypernova), llama-server for Home's AI on the same card, the status dashboard, Files (S3 storage
+**Owner action.** Turns on what the rest of the hardware is for: llama-server for Home's AI on
+the RTX 2060 (the only AI engine; Ollama was removed, [Removing Ollama's
+models](#removing-ollamas-models)), the status dashboard, Files (S3 storage
 on the 1 TB internal HDD) behind a links page, Home's film and series library, and a nightly
 backup to the 1 TB external USB HDD. None of it is public: it is reachable
 only over the tailnet, on the server's Tailscale address, and only by the Tailscale accounts the
@@ -1106,7 +1107,7 @@ ansible-playbook -u admin --ask-become-pass provision.yml
 
 The `gpu` role installs the driver and the NVIDIA Container Toolkit; `host` writes the
 Tailscale address into `/etc/infra/host.env`, turns on non-local binds, adds the second
-firewall hook, the `ai`, `llm` and `media` networks, the `ai` and `media` accounts (and puts
+firewall hook, the `home-llm` and `media` networks, the `ai` and `media` accounts (and puts
 `admin` in the `media` group) with their volumes, mounts the disks and installs the nightly
 backup. A first run ends the `gpu` part with "The NVIDIA driver was installed or updated since the last boot
 and is not loaded yet … Reboot when it suits you": the driver loads at the next boot. Reboot
@@ -1129,20 +1130,15 @@ cannot communicate with the driver, `sudo dmesg | grep -i nvidia` says why.
 Run `release` (Actions → Deploy). Besides the usual lines, expect the `ai` and `media` stacks
 accepted with their tailnet ports, bind mounts and GPU, "starting ai", "starting media", and
 "the tailnet-only ports home:80 home-tls:443 beszel:8090 garage:3900 sftpgo:8091 are bound to
-100.x.y.z alone". In the background, after the release, `ollama-pull` downloads
-`ollama_models` in order: `qwen3:4b` (2.6 GB, the model hypernova uses, first),
-`qwen2.5-coder:14b` (9 GB) and `qwen3:14b` (9.3 GB), about 21 GB on the SSD; roughly 30
-minutes at 100 Mbit/s.
+100.x.y.z alone".
 
 ```bash
-ssh admin@infra-host sudo docker logs -f ollama-pull      # "every model in ollama_models is present"
-ssh admin@infra-host sudo docker exec ollama nvidia-smi -L   # GPU 0: NVIDIA GeForce RTX 2060 (inside the container)
-ssh admin@infra-host sudo docker exec ollama ollama ps    # after a hypernova AI request: 100% GPU
+ssh admin@infra-host sudo docker exec llama nvidia-smi -L   # GPU 0: NVIDIA GeForce RTX 2060 (inside the container)
 ssh admin@infra-host sudo docker ps --format '{{.Names}} {{.Ports}}'   # ports only on 100.x.y.z
 ```
 
-hypernova's AI features use the same Ollama over the internal `llm` network from this release
-on. `llama` (llama-server, Home's AI) starts with no model loaded and answers `/health`; it
+hypernova's AI features are off (`AI_DISABLED=true`; its provider speaks Ollama's API, and
+Ollama was removed). `llama` (llama-server, Home's AI) starts with no model loaded and answers `/health`; it
 loads a model only when Home asks, from the files of [Home's AI models](#homes-ai-models):
 
 ```bash
@@ -1611,6 +1607,29 @@ replaces Open WebUI. Their volumes and the other folders under `/srv/media` (`au
 `podcasts`, `books`, `photos`) are kept, still created by provisioning and still backed up
 nightly (except caches), and nothing deletes them. What is kept, and what the owner may clean up (the four unused secrets, the old
 Tailscale grants), is in [docs/stacks.md](docs/stacks.md#retired-apps-2026-10-20).
+
+### Removing Ollama's models
+
+Ollama (and its one-shot `ollama-pull`) no longer run: llama-server is the only AI engine, and
+hypernova's AI features are off. A release removes the two containers from the `ai` stack by
+itself (`docker compose up --remove-orphans`), but provisioning neither creates nor deletes the
+old `ollama-models` volume (about 21 GB on the SSD, the models it pulled) or the `ai` and `llm`
+networks, and the nightly backup never copied the volume. **On a clean reinstall none of this
+exists; skip it.** On a server that still has them, once a release without Ollama is current:
+
+```bash
+ssh -t admin@infra-host
+sudo docker ps -a --filter name=ollama --format '{{.Names}} {{.Status}}'   # nothing; if a container is listed, release first
+sudo docker volume inspect ollama-models --format '{{.Mountpoint}}'          # exists?
+sudo du -sh "$(sudo docker volume inspect ollama-models --format '{{.Mountpoint}}')"  # what it frees
+sudo docker volume rm ollama-models                                          # refuses while a container uses it
+sudo docker network rm ai llm                                                # refuses while a container is attached
+sudo docker system df -v | grep -i ollama                                    # nothing left
+```
+
+The pulled `ollama/ollama` image goes with the next `docker-prune` run, or now with
+`sudo docker image rm ollama/ollama:0.40.4`. Nothing of Ollama is in the backups, so there is
+nothing to remove there.
 
 ## 13. Retire the home CI runners
 

@@ -22,7 +22,6 @@ Read by both `provision.yml` and `release.yml`. No secrets.
 | `reboot_time`, `backup_time` | `"04:00"`, `"02:30"` | UTC; unattended-upgrades reboot and the nightly backup |
 | `gpu_enabled`, `nvidia_driver_major` | `true`, `580` | The NVIDIA card and its driver branch; `false` skips the GPU |
 | `ai_uid`/`ai_gid`, `media_uid`/`media_gid`, `home_uid`/`home_gid` | `2001`, `2000`, `65532` | Service accounts the stacks run as (`home_uid` is fixed by Home's image) |
-| `ollama_models`, `hypernova_ollama_model` | `[qwen3:4b, …]`, `qwen3:4b` | Models pulled on every release |
 | `media_disk_uuid`, `backup_disk_uuid` | `"00000000-0000-4000-8000-000000000001"` | Filesystem UUIDs (`sudo blkid`) of the library and backup disks; empty means not mounted |
 | `quiet_hours_*`, `quiet_gpu_power_limit_w`, `quiet_cpu_max_percent` | `true`, `"23:00"`, `"08:00"`, `Europe/London`, `130`, `70` | Quiet hours ([host.md](host.md#quiet-hours)) |
 | `swap_size` | `2G` | Swap file size |

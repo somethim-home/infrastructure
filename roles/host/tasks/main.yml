@@ -124,17 +124,14 @@
   ansible.builtin.import_tasks: dns.yml
 
 # Moved here from roles/edge so they exist before any stack or the edge starts.
-# ai carries Ollama's model downloads; llm is internal (no route out) and joins
-# only Ollama and hypernova's provider; home-llm is internal too and joins only
-# llama-server and home-server; media carries the links page, the status
+# home-llm is internal (no route out) and joins only llama-server and
+# home-server; media carries the links page, the status
 # dashboard, S3, the file manager and Home, and their ports.
 - name: Create shared Docker networks
   ansible.builtin.shell: "docker network inspect {{ item.name }} >/dev/null 2>&1 || docker network create {{ '--internal ' if item.internal else '' }}{{ item.name }}"
   loop:
     - { name: edge, internal: false }
     - { name: data, internal: false }
-    - { name: ai, internal: false }
-    - { name: llm, internal: true }
     - { name: home-llm, internal: true }
     - { name: media, internal: false }
   loop_control:
@@ -155,15 +152,15 @@
   register: immich_network
   changed_when: "'removed' in immich_network.stdout"
 
-- name: Read whether llm and home-llm are internal
+- name: Read whether home-llm is internal
   ansible.builtin.command:
     argv: [docker, network, inspect, --format, "{{ '{{' }}.Internal{{ '}}' }}", "{{ item }}"]
-  loop: [llm, home-llm]
+  loop: [home-llm]
   register: internal_networks
   changed_when: false
   check_mode: false
 
-- name: Require llm and home-llm to have no route out
+- name: Require home-llm to have no route out
   ansible.builtin.assert:
     that:
       - item.stdout | trim == 'true'

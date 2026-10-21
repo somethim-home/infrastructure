@@ -82,7 +82,7 @@ never linked against.
 it again; the old `media/` and `apps/` go once a complete snapshot exists, the old `postgres/`
 and `immich/` dumps once 14 snapshots exist.
 
-Not copied: the AI models (`ollama-models` and Home's `llama-models`; they download again,
+Not copied: the AI models (Home's `llama-models`; they download again,
 [RUNBOOK.md](../RUNBOOK.md#homes-ai-models)), `home-keys` (Home's keys), the videos in `movies`
 and `shows` (they would not fit; their metadata is copied), and of the retired apps' kept data
 `comfyui-data`, `immich-ml-cache` and `jellyfin-cache` (downloads and caches).
