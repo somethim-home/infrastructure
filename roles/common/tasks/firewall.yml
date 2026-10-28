@@ -1,7 +1,7 @@
 ---
-# See docs/host.md — Firewall. Nothing is open but SSH on tailscale0: the
-# public reaches the sites through the Cloudflare Tunnel, which dials out. The
-# first run comes in over the LAN, so 22 stays open there until a run that
+# See docs/host.md — Firewall. Nothing is open but SSH on tailscale0 and, on
+# the hetzner host, 80 and 443 from Cloudflare's ranges alone. The first run
+# comes in over the LAN or the public address, so 22 stays open there until a run that
 # itself came in over the tailnet (its server address in 100.64.0.0/10 or
 # fd7a:115c:a1e0::/48, tasks/ssh-route.yml) deletes it, so no run can cut its
 # own session. The router forwards no port to this host.
@@ -16,6 +16,16 @@
 - name: Allow only this server's ports (SSH on the tailnet)
   ansible.builtin.command: "ufw allow {{ item }}"
   loop: "{{ ufw_allowed }}"
+  changed_when: false
+
+# Docker publishes Traefik's ports itself: IPv4 through its NAT rules, which
+# skip ufw (infra-firewall filters those in DOCKER-USER), and IPv6 through
+# docker-proxy on the host, which ufw does see. These rules admit Cloudflare
+# there. ponytail: a range Cloudflare drops keeps its rule until it is deleted
+# by hand (sudo ufw status numbered); re-fetching only adds.
+- name: Admit Cloudflare, and only Cloudflare, to the web ports (hetzner)
+  ansible.builtin.command: "ufw allow proto tcp from {{ item }} to any port 80,443"
+  loop: "{{ cloudflare_ips | default([]) if infra_host == 'hetzner' else [] }}"
   changed_when: false
 
 - name: Delete the rules of retired ports

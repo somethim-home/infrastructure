@@ -1,12 +1,25 @@
 ---
-# See docs/edge.md. The shared networks are created by roles/host. Traefik has
-# no certificates, no env file and no file provider: Cloudflare terminates TLS
-# and the tunnel (stack/tunnel, a release stack) is its only way in.
+# See docs/edge.md. The hetzner host only. The shared networks are created by
+# roles/host. The origin certificate and the client-certificate rule are in
+# dynamic/tls.yml, which every release writes (infra-apply); until the first
+# release Traefik serves its own certificate and asks for none.
 - name: Create the edge deploy directory
   ansible.builtin.file:
     path: "{{ edge_deploy_path }}"
     state: directory
     mode: "0755"
+
+- name: Create the directory the releases write Traefik's TLS settings into
+  ansible.builtin.file:
+    path: "{{ edge_deploy_path }}/dynamic"
+    state: directory
+    mode: "0700"
+
+- name: Name Cloudflare's ranges as the only forwarders Traefik trusts
+  ansible.builtin.copy:
+    dest: "{{ edge_deploy_path }}/.env"
+    content: "CLOUDFLARE_IPS={{ cloudflare_ips | join(',') }}\n"
+    mode: "0644"
 
 - name: Ship the Traefik compose file
   ansible.builtin.copy:
@@ -21,5 +34,5 @@
   register: edge_up
   changed_when: "'Started' in edge_up.stderr or 'Created' in edge_up.stderr or 'Recreated' in edge_up.stderr"
 
-- name: Verify Traefik publishes no port and can use the Docker API through its socket proxy
+- name: Verify Traefik publishes exactly 80 and 443 and can use the Docker API through its socket proxy
   ansible.builtin.import_tasks: verify.yml

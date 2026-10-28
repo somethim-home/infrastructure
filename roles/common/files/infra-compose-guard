@@ -5,8 +5,8 @@
         [--service-user=<uid>:<gid>] [--media-gid=<gid>] [<app image repository>...]
 
 <model.json> is `docker compose config --no-env-resolution --format json` for
-<stack_dir>/docker-compose.yml; <stack> is database, portfolio, hypernova,
-tunnel, ai, media or home; the repositories are the app images /etc/infra/host.env allows for
+<stack_dir>/docker-compose.yml; <stack> is database or portfolio (the hetzner
+host), ai, media or home (the home server); the repositories are the app images /etc/infra/host.env allows for
 that stack (none for the others, whose images must be digest-pinned).
 --tailscale-ip is the host's Tailscale IPv4 (TAILSCALE_IP in host.env): the
 only address a port may be published on, and only by the services TAILNET_PORTS
@@ -82,30 +82,13 @@ STACKS = {
         "env_files": ("postgres.env",),
         "labels": None,
     },
+    # Its media is in R2: no volume.
     "portfolio": {
         "networks": {"data", "edge"},
-        "volumes": {"portfolio-media": {"name": "portfolio-media", "external": False}},
+        "volumes": {},
         "containers": {"portfolio"},
         "env_files": ("portfolio.env",),
         "labels": HOST_LABELS,
-    },
-    "hypernova": {
-        "networks": {"data", "edge"},
-        "volumes": {"prizm-storage": {"name": "hypernova_prizm-storage", "external": False}},
-        "containers": {"prizm-provider", "prizm-web"},
-        "env_files": ("provider.env",),
-        "labels": HOST_LABELS,
-        # The web app does not need the database.
-        "container_networks": {"prizm-provider": {"data", "edge"}, "prizm-web": {"edge"}},
-    },
-    # The tunnel holds no data, is never routed (it is the way in) and is never
-    # auto-updated (its image is pinned); autoheal may restart it.
-    "tunnel": {
-        "networks": {"edge"},
-        "volumes": {},
-        "containers": {"cloudflared"},
-        "env_files": ("tunnel.env",),
-        "labels": AUTOHEAL_LABEL,
     },
     # llama-server, never published, routed or auto-updated (pinned image), never
     # on edge or data; it joins home-llm, its line to home-server, and nothing

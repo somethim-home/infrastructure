@@ -4,13 +4,24 @@
 # owner's real values. To run this repository on your own server, copy this
 # file over production.yml and edit it (docs/variables.md lists every value
 # that is specific to one setup, and where else such values live).
-# Facts about the one production host, a dedicated home server on the owner's
-# LAN, shared by provision.yml and release.yml. No secrets here: app secrets and
-# the Cloudflare Tunnel token live in the GitHub production Environment and
-# never reach provisioning.
+# Facts about the two production hosts, shared by provision.yml and
+# release.yml, which both take -e infra_host=home|hetzner (the inventory group
+# of the same name). home is the dedicated home server on the owner's LAN and
+# runs only Home and what Home needs (ai, media, home); hetzner is a small
+# Hetzner Cloud server (CAX, Arm64) that runs the public portfolio and its
+# PostgreSQL behind Traefik, which only Cloudflare reaches. No secrets here:
+# app secrets live in the GitHub production Environment and never reach
+# provisioning.
+infra_hosts:
+  home:
+    server_name: infra-host
+    stacks: [ai, media, home]
+  hetzner:
+    server_name: infra-hetzner
+    stacks: [database, portfolio]
 
 # Tailnet hostname of the server; provisioning names the node after it.
-server_name: infra-host
+server_name: "{{ infra_hosts[infra_host].server_name }}"
 tailscale_server_tag: "tag:infra-server"
 tailscale_ci_tag: "tag:infra-ci"
 
@@ -26,9 +37,9 @@ reboot_time: "04:00"
 # this branch (ubuntu-drivers --gpgpu, signed modules) and the NVIDIA Container
 # Toolkit, and roles/docker adds the nvidia runtime. Confirm the branch on the
 # host with `ubuntu-drivers list --gpgpu` (RUNBOOK.md, "GPU, AI and media").
-# false: provisioning skips the GPU (a host without the card), and a release
-# refuses, since llama-server reserves it.
-gpu_enabled: true
+# false (the hetzner host, which has no card): provisioning skips the GPU; a
+# home release refuses, since llama-server reserves it.
+gpu_enabled: "{{ infra_host == 'home' }}"
 nvidia_driver_major: 580
 
 # The ai stack (llama-server) runs as this account,
@@ -73,28 +84,55 @@ swap_size: 2G
 # ethtool; the firmware must keep it powered while off (RUNBOOK.md, "BIOS";
 # docs/host.md, "Wake-on-LAN"). ip -br link names it.
 lan_interface: enp8s0
-# Docker-published ports the LAN-facing interface may reach. None: the public
-# arrives only through the Cloudflare Tunnel, which dials out, so every new
-# inbound connection to a published port is dropped (roles/host).
-public_ports: []
+# Docker-published ports the public interface may reach (roles/host,
+# infra-firewall). home: none, every new inbound connection to a published port
+# is dropped. hetzner: Traefik's 80 and 443, and only from Cloudflare's
+# addresses (cloudflare_ips below).
+public_ports: "{{ [80, 443] if infra_host == 'hetzner' else [] }}"
+# Cloudflare's address ranges (https://www.cloudflare.com/ips-v4 and ips-v6).
+# Provisioning the hetzner host fetches the current lists and falls back to
+# these when the fetch fails (tasks/cloudflare-ips.yml); the host firewall,
+# ufw and Traefik's trusted forwarders take whichever it used. Re-pin them when
+# Cloudflare changes them (RUNBOOK.md, "Hetzner host").
+cloudflare_ips_pinned:
+  - 173.245.48.0/20
+  - 103.21.244.0/22
+  - 103.22.200.0/22
+  - 103.31.4.0/22
+  - 141.101.64.0/18
+  - 108.162.192.0/18
+  - 190.93.240.0/20
+  - 188.114.96.0/20
+  - 197.234.240.0/22
+  - 198.41.128.0/17
+  - 162.158.0.0/15
+  - 104.16.0.0/13
+  - 104.24.0.0/14
+  - 172.64.0.0/13
+  - 131.0.72.0/22
+  - 2400:cb00::/32
+  - 2606:4700::/32
+  - 2803:f800::/32
+  - 2405:b500::/32
+  - 2405:8100::/32
+  - 2a06:98c0::/29
+  - 2c0f:f248::/32
 
 apex_domain: example.com
 www_domain: www.example.com
-hypernova_domain: hypernova.example.com
-# The tailnet-only links page's https name, and under it one https name per
-# tailnet service (<label>.<home_domain>), all on one Let's Encrypt
-# certificate (home_domain and *.home_domain) that home-tls serves on the
-# Tailscale address. DNS: unproxied A records home and *.home to the server's
-# Tailscale address (RUNBOOK.md, "The links page"). The keys are fixed (the
-# stacks refer to them); the values are the names' first labels. acme_email
-# is the contact Let's Encrypt has for the certificate.
+# A second name Traefik also routes to the portfolio, for checking the hetzner
+# host through Cloudflare before the real names move to it (RUNBOOK.md,
+# "Hetzner host"). Empty: none.
+preview_domain: ""
+# Home's https name, the only one on the home server: one Let's Encrypt
+# certificate for it alone (no wildcard), which home-tls serves on the
+# Tailscale address. DNS: an unproxied A record to the server's Tailscale
+# address (RUNBOOK.md, "The links page"). The file manager, the status
+# dashboard and S3 have no https name: http://infra-host:<port> over the
+# tailnet. acme_email is the contact Let's Encrypt has for the certificate.
 home_domain: home.example.com
-home_hosts:
-  files: files            # SFTPGo, the file manager (and WebDAV at /dav)
-  status: status          # Beszel
-  s3: s3                  # Garage's S3 API (path-style, region garage)
 acme_email: owner@example.com
-# The owner's login on the Beszel status dashboard (https://status.<home_domain>);
+# The owner's login on the Beszel status dashboard (http://infra-host:8090);
 # its password is the BESZEL_PASSWORD secret.
 status_owner_email: owner@example.com
 
@@ -158,8 +196,6 @@ dns_over_tls_servers:
 
 portfolio_image_repo: ghcr.io/example/portfolio
 home_image_repo: ghcr.io/example/home-server
-hypernova_provider_image_repo: ghcr.io/example/hypernova-provider
-hypernova_web_image_repo: ghcr.io/example/hypernova-web
 
 
 # Tor Snowflake standalone proxy (roles/snowflake, docs/host.md "Snowflake"): relays

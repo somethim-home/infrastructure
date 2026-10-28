@@ -1,21 +1,26 @@
 # Runbook
 
-The owner's steps for the one production server: a dedicated PC at home, on the home LAN
-behind a consumer router, with a dynamic public IP. Nothing on it is reachable from the
-internet. The public reaches the sites only through a **Cloudflare Tunnel** that the server
-dials out to; SSH works only over **Tailscale**. [`README.md`](README.md) and
-[`docs/`](docs/README.md) explain how the pieces work; this file only says what to do, in
-order. Every step that needs your accounts or your hands is marked **Owner action**.
+The owner's steps for the two production hosts (plan 023, 2026-10-28):
 
-The server starts empty: there is no data to carry over. The first release creates the
-database and the app volumes empty, and the apps initialise them.
+- **home** (`infra-host`): a dedicated PC at home, on the home LAN behind a consumer router.
+  It runs only Home and what Home needs (`ai`, `media`, `home`), over the tailnet only; nothing
+  on it is reachable from the internet. Sections 1 to 14 are about it.
+- **hetzner** (`infra-hetzner`): a small Hetzner Cloud server (CAX, Arm64, Nuremberg) that runs
+  the public portfolio and its PostgreSQL behind Traefik, which only Cloudflare reaches. Its
+  setup and the move of the portfolio from the home server are
+  [section 15, Hetzner host](#15-hetzner-host).
+
+SSH to either works only over **Tailscale**. Every provisioning run and every release names its
+host: `ansible-playbook -e infra_host=home|hetzner …`, and the Deploy workflow's `host` input.
+[`README.md`](README.md) and [`docs/`](docs/README.md) explain how the pieces work; this file
+only says what to do, in order. Every step that needs your accounts or your hands is marked
+**Owner action**.
 
 The values below are the ones in [`production.yml`](production.yml) and
-[`roles/common/defaults/main.yml`](roles/common/defaults/main.yml): the tailnet name
-`infra-host`, the tags `tag:infra-server` and `tag:infra-ci`, the accounts `admin` and
-`deploy`, the domains `arbikullakshi.com`, `www.arbikullakshi.com` and
-`hypernova.arbikullakshi.com`. If you change one, change that file first (through `master`)
-and use your value throughout. `192.168.1.50` stands for the server's LAN address and `setup`
+[`roles/common/defaults/main.yml`](roles/common/defaults/main.yml): the tailnet names
+`infra-host` and `infra-hetzner`, the tags `tag:infra-server` and `tag:infra-ci`, the accounts
+`admin` and `deploy`, the domains `arbikullakshi.com` and `www.arbikullakshi.com`. If you
+change one, change that file first (through `master`) and use your value throughout. `192.168.1.50` stands for the server's LAN address and `setup`
 for the account the Ubuntu installer creates; use yours.
 
 | Section | Where you are |
@@ -25,13 +30,14 @@ for the account the Ubuntu installer creates; use yours.
 | [3. Install Ubuntu Server](#3-install-ubuntu-server) | at the server |
 | [4. Tailscale](#4-tailscale) | Tailscale admin console |
 | [5. First provision over the LAN](#5-first-provision-over-the-lan) | your laptop, on the home LAN |
-| [6. Cloudflare Tunnel](#6-cloudflare-tunnel) | Cloudflare (`cf` or the dashboard) |
+| [6. Cloudflare Tunnel (retired)](#6-cloudflare-tunnel-retired) | nothing to do |
 | [7. The production Environment](#7-the-production-environment) | GitHub (`gh`) |
 | [8. Second provision over the tailnet](#8-second-provision-over-the-tailnet) | your laptop |
 | [9. First release](#9-first-release) | GitHub Actions |
-| [10. DNS switch-over and decommissioning the old server](#10-dns-switch-over-and-decommissioning-the-old-server) | Cloudflare, then the Hetzner console |
+| [10. DNS switch-over (2026-10-15, done)](#10-dns-switch-over-2026-10-15-done) | nothing to do |
 | [11. Day-2 operations](#11-day-2-operations) | from then on |
 | [12. GPU, AI and media](#12-gpu-ai-and-media) | the server, Tailscale, GitHub, your devices |
+| [15. Hetzner host](#15-hetzner-host) | Hetzner console, Tailscale, Cloudflare, GitHub, your laptop |
 
 Restoring anything from the backup disk is in
 [Restoring from the backup disk](#restoring-from-the-backup-disk) (section 11).
@@ -209,12 +215,12 @@ own it.
    ```
 
 4. **Point the inventory at the LAN address** for this run only (the play needs exactly one
-   host in `[server]`, so an inline `-i '192.168.1.50,'` does not work):
+   host in `[home]`, so an inline `-i '192.168.1.50,'` does not work):
 
    ```bash
    cp inventory/hosts.example inventory/hosts
    sed -i 's/^infra-host ansible_host=.*/infra-host ansible_host=192.168.1.50/' inventory/hosts
-   ansible-playbook -u setup --ask-become-pass provision.yml
+   ansible-playbook -e infra_host=home -u setup --ask-become-pass provision.yml
    ```
 
    `BECOME password` is `setup`'s password. Enter the Tailscale auth key from section 4 at the
@@ -227,14 +233,13 @@ packages are upgraded and `unattended-upgrades` and `chrony` installed; ufw admi
 forced command and the release scripts; fail2ban, patching, NTP and the journald cap are
 set; the server joins the tailnet; Docker 29 comes from the pinned apt repository;
 `/etc/infra/host.env`, the `INFRA-PUBLIC` firewall chain (no public port), swap, the sleep
-masks, the `edge` and `data` networks and the empty `pgdata-v18` volume are in place;
-Traefik (no published port), Watchtower and autoheal start; last, password and
+masks and the `home-llm` and `media` networks are in place; Watchtower and autoheal start; last, password and
 keyboard-interactive login are turned off and root login stays off. The run ends with:
 
 ```
 setup stays until the first run as admin removes it.
 Set the admin sudo password: ssh -t setup@192.168.1.50 sudo passwd admin
-Then set ansible_host=infra-host in inventory/hosts and run: ansible-playbook -u admin --ask-become-pass provision.yml (RUNBOOK.md, "Second provision over the tailnet").
+Then set ansible_host=infra-host in inventory/hosts and run: ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml (RUNBOOK.md, "Second provision over the tailnet").
 This run did not reach infra-host over the tailnet, so ufw keeps 22/tcp open on the LAN. ...
 ```
 
@@ -257,58 +262,13 @@ This run did not reach infra-host over the tailnet, so ufw keeps 22/tcp open on 
    Keep `/tmp/kh` for section 7. A stop at "setup's authorized_keys … must hold only your own
    public keys" means a line there has options or is the CI key: fix the file and run again.
 
-## 6. Cloudflare Tunnel
+## 6. Cloudflare Tunnel (retired)
 
-**Owner action.** One remotely managed tunnel, named `infra-host`, carries all three
-hostnames to Traefik. "Remotely managed" means its routes (Public Hostnames) live in
-Cloudflare, and the server only needs the tunnel's token, which the release renders into
-`tunnel/tunnel.env` for the `cloudflared` container. The tunnel must route:
-
-| Public hostname | Service |
-| --- | --- |
-| `arbikullakshi.com` | `http://edge-traefik:80` |
-| `www.arbikullakshi.com` | `http://edge-traefik:80` |
-| `hypernova.arbikullakshi.com` | `http://edge-traefik:80` |
-
-and nothing else (no catch-all other than the default `http_status:404`). Leave every origin
-option at its default: Traefik routes by the original `Host` header, which cloudflared passes
-through. The DNS records come in section 10, not here: the hostnames still point at the old
-server until then.
-
-With `cf`:
-
-```bash
-# 1. Create the remotely managed tunnel and store its token in 1Password; the token is never printed
-#    (done 2026-10-15: tunnel "home-server", id 1dfdb06e-04a8-4a4b-942b-ede6c46015de)
-OUT=$(cf tunnels create --name home-server --config-source cloudflare 2>/dev/null)
-TUNNEL_ID=$(jq -r '.id' <<<"$OUT"); TUNNEL_TOKEN=$(jq -r '.token' <<<"$OUT"); unset OUT
-op item create --category password --vault "Home Server" --title "Cloudflare tunnel token (home-server)" \
-  "password=$TUNNEL_TOKEN" "tunnel id[text]=$TUNNEL_ID" >/dev/null; unset TUNNEL_TOKEN
-
-# 2. Set the tunnel's ingress
-cf tunnels config update "$TUNNEL_ID" --body '{"config":{"ingress":[
- {"hostname":"arbikullakshi.com","service":"http://edge-traefik:80"},
- {"hostname":"www.arbikullakshi.com","service":"http://edge-traefik:80"},
- {"hostname":"hypernova.arbikullakshi.com","service":"http://edge-traefik:80"},
- {"service":"http_status:404"}]}}' >/dev/null && echo ok
-
-# 3. "Always Use HTTPS" (already on for arbikullakshi.com; this only checks it)
-cf zones settings get always_use_https -z arbikullakshi.com | jq -r .value
-```
-
-Or in the dashboard: **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared**,
-name it `home-server`, then on the "Install and run a connector" page pick **Docker** and copy
-the token: the long string after `--token` in the command shown (it starts with `eyJ`). Do
-not run that command anywhere; the release runs cloudflared. Then **Next → Public
-Hostnames**: add the three rows of the table above (Subdomain empty / `www` / `hypernova`,
-domain `arbikullakshi.com`, Service type `HTTP`, URL `edge-traefik:80`). If the dashboard
-refuses a hostname because a DNS record with that name exists, do section 10's first step
-(delete the old records) at that point, at the cost of a slightly longer gap. Then **SSL/TLS
-→ Edge Certificates → Always Use HTTPS: On**.
-
-Keep the token for section 7 (the `CF_TUNNEL_TOKEN` secret). It is a credential: anyone with
-it can run a connector that serves your hostnames. If it leaks, rotate it
-([Rotating a secret](#rotating-a-secret)).
+The home server has no public site since plan 023: the portfolio moved to the hetzner host,
+which Cloudflare reaches directly ([section 15](#15-hetzner-host)), and hypernova was retired.
+The tunnel `home-server` that carried `arbikullakshi.com`, `www` and `hypernova` to the home
+server is deleted in section 15's clean-up, with its `CF_TUNNEL_TOKEN` secret. Nothing to do
+here on a new home server.
 
 ## 7. The production Environment
 
@@ -319,18 +279,16 @@ here. Every value must be free of `$`, `"`, `'`, `` ` ``, `\`, `#`, line breaks 
 or trailing spaces; the generated ones are.
 
 ```bash
-# Access: the CI deploy key, the host key from section 5, the Tailscale OAuth client from section 4
+# Access: the CI deploy key, the host keys from section 5 (and section 15's for infra-hetzner:
+# SSH_KNOWN_HOSTS holds one line per host), the Tailscale OAuth client from section 4
 gh secret set SSH_PRIVATE_KEY --env production < ~/.ssh/infra-deploy
 gh secret set SSH_KNOWN_HOSTS --env production < /tmp/kh && rm /tmp/kh
 gh variable set SERVER_SSH_HOST --env production --body infra-host
 gh variable set TS_OAUTH_CLIENT_ID --env production --body '<client id>'
 gh secret set TS_OAUTH_SECRET --env production                     # paste the OAuth client secret
 
-# The Cloudflare Tunnel token from section 6
-op item get "Cloudflare tunnel token (home-server)" --vault "Home Server" --fields label=password --reveal | gh secret set CF_TUNNEL_TOKEN --env production
-
 # GHCR: an account and a classic token with read:packages that can read
-# ghcr.io/somethim/portfolio, the ghcr.io/hypernova3643725 images and ghcr.io/somethim-home/home-server
+# ghcr.io/somethim/portfolio and ghcr.io/somethim-home/home-server
 gh variable set GHCR_USERNAME --env production --body '<github user>'
 # GitHub shows a token's value only once. If you don't have it saved, make a new one:
 # GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) →
@@ -338,32 +296,14 @@ gh variable set GHCR_USERNAME --env production --body '<github user>'
 # ("Home Server" vault, "GHCR read token (infra)"), then:
 op item get "GHCR read token (infra)" --vault "Home Server" --fields label=password --reveal | gh secret set GHCR_TOKEN --env production
 
-# Database: three different passwords, 48 hex characters each; nobody needs to know them
-for name in POSTGRES_SUPERUSER_PASSWORD PRIZM_DB_PASSWORD PORTFOLIO_DB_PASSWORD; do
-  gh secret set "$name" --env production --body "$(openssl rand -hex 24)"
-done
-
-# Apps: generated secrets
-gh secret set PORTFOLIO_TOTP_ENCRYPTION_KEY --env production --body "$(openssl rand -base64 32)"
-gh secret set HYPERNOVA_SESSION_SECRET --env production --body "$(openssl rand -hex 24)"
+# The portfolio's secrets (its database, R2, the origin certificate) are the hetzner host's:
+# section 15.
 # The status dashboard and S3 storage: run the block in section 12, "The status dashboard and
 # S3 secrets" (it keeps the values in 1Password: the dashboard password and the S3 key are yours to use)
 # HOME_TLS_CF_DNS_TOKEN: a Cloudflare API token, created as in "The links page" (section 12)
 # Home: its owner variable, two keys, the Resend key and the TMDB token, as in "Home" (section 12)
 # and docs/deploy-home.md; its power key (HOME_POWER_KEY, optional) is a copy of one provisioning
 # makes on the server, so it comes later, as in "Home's power control" (section 12)
-
-# Apps: the two operator passwords you will log in with; store each in your password manager first
-portfolio_admin="$(openssl rand -hex 16)"; echo "portfolio admin: $portfolio_admin"
-gh secret set PORTFOLIO_ADMIN_PASSWORD --env production --body "$portfolio_admin"
-hypernova_admin="$(openssl rand -hex 16)"; echo "hypernova admin: $hypernova_admin"
-gh secret set HYPERNOVA_ADMIN_PASSWORD --env production --body "$hypernova_admin"
-unset portfolio_admin hypernova_admin
-
-# Optional: outgoing mail and the Google Calendar integration
-gh secret set PORTFOLIO_RESEND_API_KEY --env production            # paste the Resend API key
-gh variable set PORTFOLIO_GOOGLE_CLIENT_ID --env production --body '<client id>.apps.googleusercontent.com'
-gh secret set PORTFOLIO_GOOGLE_CLIENT_SECRET --env production      # paste the client secret
 ```
 
 Leave the `SERVER_USER` variable unset (the workflow uses `deploy` and refuses `root` and
@@ -385,8 +325,8 @@ secrets" or "`<name>` holds a $, quote, …".
 provision runs exactly like this:
 
 ```bash
-cp inventory/hosts.example inventory/hosts      # [server] infra-host ansible_host=infra-host
-ansible-playbook -u admin --ask-become-pass provision.yml
+cp inventory/hosts.example inventory/hosts      # [home] infra-host ansible_host=infra-host
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml
 ```
 
 `BECOME password` is the admin password from section 5. Expect: "Close SSH on the LAN once
@@ -406,119 +346,43 @@ From now on the keyboard and monitor take the admin password if the tailnet is u
 ## 9. First release
 
 **Owner action.** GitHub → **Actions → Deploy → Run workflow**, "Use workflow from" `master`,
-action `release`, every other input at its default. Expect in the "Release on the server"
-step:
+host `home`, action `release`, every other input at its default. The `ai` and `media` stacks
+need the GPU, the status dashboard and S3 secrets and (for Garage's objects off the SSD) the
+disks; set them up first ([section 12](#12-gpu-ai-and-media)), since a release refuses without
+the first two. Expect in the "Release on the server" step:
 
 ```
-infra-apply: compose model accepted: 1 service(s) in the database stack, ...
-infra-apply: compose model accepted: 1 service(s) in the portfolio stack, ...
-infra-apply: compose model accepted: 2 service(s) in the hypernova stack, ...
-infra-apply: compose model accepted: 1 service(s) in the tunnel stack, ...
 infra-apply: compose model accepted: 1 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, ...
 infra-apply: compose model accepted: 9 service(s) in the media stack, no privileged settings, no host port but beszel 100.x.y.z:8090, garage 100.x.y.z:3900, home 100.x.y.z:80, home-tls 100.x.y.z:443, sftpgo 100.x.y.z:8091 on the tailnet, ...
 infra-apply: compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, ...
-infra-apply: bundle accepted: 29 files, manifest checksums match
+infra-apply: bundle accepted: 18 files, manifest checksums match
 infra-apply: Watchtower is stopped until the app stacks are up
 infra-apply: pulling images
-infra-apply: starting the database
-infra-apply: database roles, passwords and grants are in place
-infra-apply: starting portfolio
-infra-apply: starting hypernova
-infra-apply: starting tunnel
 infra-apply: starting ai
 infra-apply: starting media
 infra-apply: starting home
 infra-apply: Watchtower is running again
 infra-apply: every container is running and healthy, and has run for at least 30s without a restart
-infra-apply: Traefik routes arbikullakshi.com/api/health www.arbikullakshi.com/ hypernova.arbikullakshi.com/ hypernova.arbikullakshi.com/api/health to their apps
-infra-apply: the Cloudflare Tunnel is connected (cloudflared /ready answers 200)
 infra-apply: the tailnet-only ports home:80 home-tls:443 beszel:8090 garage:3900 sftpgo:8091 are bound to 100.x.y.z alone
-infra-apply: home-tls serves https with a trusted certificate on 100.x.y.z for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/
+infra-apply: home-tls serves https with a trusted certificate on 100.x.y.z for home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/
 infra-apply: beszel-pair garage-setup home-keys finished: the dashboard's agent is paired, S3 has its layout, the owner's key and the files bucket, Home has its key files
-infra-apply: Traefik, Watchtower, autoheal and Beszel's agent reach Docker through their socket proxies with no refused calls
+infra-apply: watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy beszel-agent: each client reaches Docker through its socket proxy with no refused calls
 infra-apply: RELEASE OK: <id> is current, following :latest, auto-updates on
 ```
 
-PostgreSQL initialises the empty `pgdata-v18` volume on this first start, and `provision.sql`
-creates the `prizm` and `portfolio` roles and databases; the apps create their schemas. The
-portfolio can take up to 180 s to report healthy. The `ai` and `media` stacks need the GPU,
-the status dashboard and S3 secrets and (for Garage's objects off the SSD) the disks; set them
-up first ([section 12](#12-gpu-ai-and-media)), since a release refuses without the first two. In the Cloudflare dashboard the tunnel now
-shows **Healthy** with connections.
+## 10. DNS switch-over (2026-10-15, done)
 
-The release ends by asking the public hostnames through Cloudflare from the server
-("Cloudflare serves …", just before `RELEASE OK`). If the DNS records still point at the old
-server, that check fails although the release is current and verified; section 10 fixes the
-records and ends with a second `release` whose public check proves the new path.
-
-## 10. DNS switch-over and decommissioning the old server
-
-**Owner action.** This is the only moment the sites change hands, and the only section that
-touches the old Hetzner server. Nothing is copied from it: the new server started empty.
-
-1. **Replace the old records with the tunnel's.** Delete the `A` and `AAAA` records of
-   `arbikullakshi.com`, `www.arbikullakshi.com` and `hypernova.arbikullakshi.com` (they point
-   at the Hetzner server), then create, for each of the three names, a proxied `CNAME` to
-   `<tunnel id>.cfargotunnel.com`:
-
-   ```bash
-   # (done 2026-10-15) 1. Delete the old records (ids from `cf dns records list -z $Z`)
-   Z=<zone id>    # cf zones list: the id of the apex domain's zone
-   cf dns records delete <record id> -z $Z --force
-
-   # 2. Route the three hostnames to the tunnel
-   for n in arbikullakshi.com www hypernova; do
-     cf dns records create -z $Z --body "{\"type\":\"CNAME\",\"name\":\"$n\",\"content\":\"$TUNNEL_ID.cfargotunnel.com\",\"proxied\":true}" >/dev/null && echo "ok $n"
-   done
-
-   # 3. Check: each name is a proxied CNAME to the tunnel, no A/AAAA left
-   cf dns records list -z $Z | jq -r '.[] | select(.type=="A" or .type=="AAAA" or .type=="CNAME") | "\(.type) \(.name) \(.content) proxied=\(.proxied)"'
-   ```
-
-   In the dashboard: **DNS → Records**, delete the three names' `A`/`AAAA` records; then in
-   **Zero Trust → Networks → Tunnels → home-server → Public Hostnames**, re-save each
-   hostname (adding a public hostname creates its proxied CNAME). Leave the zone's other
-   records (mail: `MX`, `TXT`, Resend's DKIM) alone.
-2. **Check from outside**, for example from a phone off Wi-Fi or the laptop (Cloudflare's
-   proxy answers at once; there is no TTL to wait out for proxied records):
-
-   ```bash
-   curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health            # 200
-   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://www.arbikullakshi.com/ # 301 https://arbikullakshi.com/
-   curl -sS -o /dev/null -w '%{http_code}\n' https://hypernova.arbikullakshi.com/api/health  # 200
-   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' http://arbikullakshi.com/      # 301 https://arbikullakshi.com/
-   ```
-
-   A `530` (error 1033) means the tunnel has no connector or no Public Hostname for that
-   name; a `502` that cloudflared cannot reach `edge-traefik:80`; a `404` that Traefik has no
-   router for that host.
-3. **Run `release` again** (Actions → Deploy, action `release`). Its public check now goes
-   through the tunnel and prints "Cloudflare serves https://arbikullakshi.com/api/health
-   https://www.arbikullakshi.com/ https://hypernova.arbikullakshi.com/ …" before `RELEASE OK`.
-4. **Set up the portfolio again**: sign in at `https://arbikullakshi.com/admin` with
-   `PORTFOLIO_ADMIN_PASSWORD`, enrol TOTP and passkeys afresh, and reconnect Google Calendar
-   if you use it. Sign in to hypernova with `HYPERNOVA_ADMIN_PASSWORD`.
-5. **Decommission the old server**, in the Hetzner Cloud console (<https://console.hetzner.cloud>),
-   only after step 3 is green. There is nothing to snapshot (no data moves):
-   - the project's **Servers** → the old server → **Delete** (this also deletes its primary
-     IPs unless they are protected; delete any that remain under **Primary IPs**);
-   - **Volumes**: delete any volume that was attached to it;
-   - **Firewalls**, **Floating IPs**, **Networks** and **Snapshots/Backups** that belonged to
-     it: delete them;
-   - then check the project's **Usage** shows nothing billable, and cancel the project if it is
-     empty.
-6. **Clean up the rest of the old setup**: in the Tailscale console, remove the old server's
-   node if it is still listed and revoke any unused auth key; in GitHub, delete any old
-   repository-level secrets (Settings → Secrets and variables → Actions) that the
-   `production` Environment now holds.
+On 2026-10-15 the public names moved from the first Hetzner server to the home server's
+Cloudflare Tunnel, and that server was deleted. Plan 023 moves the portfolio back to a new
+Hetzner server: [section 15](#15-hetzner-host) has that switch-over.
 
 ## 11. Day-2 operations
 
 ### Releases, status, rollback, resume
 
-All four are **Actions → Deploy → Run workflow** from `master`, with the `action` input. The
-`portfolio`, `hypernova_provider`, `hypernova_web`, `home` and `dry_run` inputs apply only to
-`rollback`; the workflow refuses them with any other action.
+All four are **Actions → Deploy → Run workflow** from `master`, with the `host` input
+(`hetzner`: the portfolio and its database; `home`: Home) and the `action` input. The `target`
+and `dry_run` inputs apply only to `rollback`; the workflow refuses them with any other action.
 
 **`release`** renders the bundle on the runner from `master` and the Environment, streams it to
 `deploy`, and brings every stack up on `:latest`. Run it when a secret, a stack file under
@@ -542,22 +406,22 @@ on` or `pinned (<keys>), auto-updates paused for them`. `image` is what each app
 runs now, `known` every version of that repository still on the host, and `recorded` the
 digest each container ran when that release was verified (`/opt/infra/releases/<id>/running-images.env`).
 
-**`rollback`** pins app images to digests. Per app, the input is:
+**`rollback`** pins the host's app image (the portfolio on hetzner, Home's `home-server` on
+home) to a digest. The `target` input is:
 
 | Input | Means |
 | --- | --- |
 | `previous` (default) | the first digest that differs from the running one: from the current release's `recorded` lines, then the previous release's, then the `known` images |
 | `current` | the digest running now (freezes it) |
-| `latest` | keep following `:latest` for this app |
+| `latest` | refused: that is `resume` |
 | a 40-character commit sha | portfolio only: its `:<sha>` tag, by digest |
 | `sha256:<64 hex>` | that digest, after checking GHCR has it |
 
-Run it with `dry_run: true` first: it prints the status and the resolved pins (`RELEASE_MODE=pinned`
-and one `PORTFOLIO_IMAGE=`, `PROVIDER_IMAGE=`, `WEB_IMAGE=`, `HOME_IMAGE=` line each) and stops.
-All four `latest` is refused (that is `resume`). A pinned image is `<repository>:latest@sha256:<digest>`,
-which Watchtower cannot move, so auto-updates stay paused for the pinned apps until `resume`.
-hypernova and Home only publish `:latest`, so their rollback needs a digest the host or a
-release has seen; if none is known, pass one explicitly.
+Run it with `dry_run: true` first: it prints the status and the resolved pin (`RELEASE_MODE=pinned`
+and one `PORTFOLIO_IMAGE=` or `HOME_IMAGE=` line) and stops. A pinned image is
+`<repository>:latest@sha256:<digest>`, which Watchtower cannot move, so auto-updates stay paused
+for it until `resume`. Home only publishes `:latest`, so its rollback needs a digest the host or
+a release has seen; if none is known, pass one explicitly.
 
 **`resume`** is a `release` again: every app back on `:latest`, auto-updates on. Run it once
 the fix is published.
@@ -567,35 +431,36 @@ the fix is published.
 - "…; the running release is untouched": refused before any change (a bad bundle or
   compose model, a refused GHCR login, a failed pull).
 - "FAILED: before the app stacks changed, …" then "release `<id>` is installed but not
-  current; … a rollback cannot fix this …": the database did not come up healthy or
-  `provision.sql` failed. The database runs the new definition, portfolio and hypernova the
-  previous one, and `current` still names the previous release. A `rollback` does not help
-  here: it only re-pins the app images and renders `stack/database`, `provision.sql` and the
-  secrets from `master` again. Revert the `stack/database` or secret change on `master` (or fix
+  current; … a rollback cannot fix this …" (hetzner): the database did not come up healthy
+  or `provision.sql` failed. The database runs the new definition, the portfolio the previous
+  one, and `current` still names the previous release. A `rollback` does not help here: it
+  only re-pins the app image and renders `stack/database`, `provision.sql`, `edge/tls.yml` and
+  the secrets from `master` again. Revert the `stack/database` or secret change on `master` (or fix
   the secret in the `production` Environment) and run `release`.
 - "release `<id>` is current but not verified; … (the last verified release was `<id>`:
-  `<summary>`)": an app stack or the tunnel did not start, or the release did not verify; the
-  new release is `current`, and `previous` still names the last verified one. Read the failure
-  line above it (which container was not healthy, which route answered what, whether
-  cloudflared reached Cloudflare). Run `rollback` only when an app image is the cause: it
-  changes nothing but the four app image references. A broken `stack/` file, env template or
-  secret (a revoked `CF_TUNNEL_TOKEN` among them) comes back with a rollback (it is rendered
+  `<summary>`)": a stack did not start, or the release did not verify; the new release is
+  `current`, and `previous` still names the last verified one. Read the failure line above it
+  (which container was not healthy, which check answered what). Run `rollback` only when the app
+  image is the cause: it changes nothing but the app image reference. A broken `stack/` file,
+  env template or secret (a wrong `CF_ORIGIN_CERT` among them) comes back with a rollback (it is rendered
   from `master` again), so fix that on `master` or in the Environment and run `release`. The
   release kept in `/opt/infra/releases/` cannot be re-applied.
 
 ### Rotating a secret
 
-Change it in the `production` Environment, then run `release`. That is the whole procedure for
-most values:
+Change it in the `production` Environment, then run `release` on the host that uses it
+(hetzner for `POSTGRES_*`, `PORTFOLIO_*`, `R2_*` and `CF_ORIGIN_*`; home for `HOME_*`,
+`BESZEL_*`, `GARAGE_*` and `FILES_PASSWORD`; both for `GHCR_TOKEN`). That is the whole
+procedure for most values:
 
 - **Database passwords**: `provision.sql` re-sets each role's password in the same release
   that renders the new DSN, so the two cannot drift. `POSTGRES_SUPERUSER_PASSWORD` is re-set
   the same way. Generate with `openssl rand -hex 24`.
-- **`CF_TUNNEL_TOKEN`**: in the dashboard, **Zero Trust → Networks → Tunnels → home-server →
-  Refresh token** (or delete the tunnel and repeat section 6 steps 1–2 under the same name, then section 10 step 2 for the new id), store the new token,
-  then run `release`: it recreates `cloudflared` with the new token, and the old token stops
-  working. The sites are unreachable from the token refresh until the release's tunnel check
-  passes, about a minute.
+- **`CF_ORIGIN_CERT` / `CF_ORIGIN_KEY`**: create a new Origin CA certificate (section 15,
+  step 5), set both secrets, run `release` on hetzner (Traefik reloads `tls.yml` without a
+  restart), then revoke the old certificate in Cloudflare.
+- **`R2_*` keys**: create the new API token, set the secrets, `release` on hetzner, then delete
+  the old token in Cloudflare.
 - **`PORTFOLIO_ADMIN_PASSWORD`** is used only when the portfolio's operator account does not
   exist yet; changing it does not change an existing account. Change that password in
   `/admin`, then store the same value here.
@@ -656,8 +521,8 @@ the render on the runner refuses one that does not, before the host is touched.
 ### Provisioning again
 
 ```bash
-ansible-playbook -u admin --ask-become-pass provision.yml                 # everything
-ansible-playbook -u admin --ask-become-pass provision.yml --tags edge     # one role
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml                 # everything
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags edge     # one role
 ```
 
 Run it when a role changes on `master`. It never touches the app stacks or their data.
@@ -677,7 +542,7 @@ boot; the run says so ("needs a reboot"). Then:
 
 ```bash
 ssh -t admin@infra-host sudo reboot
-ansible-playbook -u admin --ask-become-pass provision.yml --tags host   # verify: TLS on, the four servers, no LAN or tailnet resolver
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags host   # verify: TLS on, the four servers, no LAN or tailnet resolver
 ssh admin@infra-host resolvectl dnsovertls                              # Global: yes
 ssh admin@infra-host resolvectl dns                                     # Global: the four servers; enp8s0 and tailscale0: none
 ssh admin@infra-host resolvectl query www.gutenberg.org                 # an address, "Data was acquired via local or encrypted transport: yes"
@@ -753,23 +618,24 @@ that isolates clients), and that `ethtool` still says `Wake-on: g` after a boot 
 `--tags host` if not). A power cut resets nothing here: with **AC BACK → Always On** the server
 starts by itself when power returns.
 
-### The sites are down but the server is up
+### The site is down but the hetzner host is up
 
 ```bash
-ssh admin@infra-host sudo docker ps --format '{{.Names}} {{.Status}}'
-ssh admin@infra-host sudo docker logs --tail 50 cloudflared
+ssh admin@infra-hetzner sudo docker ps --format '{{.Names}} {{.Status}}'
+ssh admin@infra-hetzner sudo docker logs --tail 50 edge-traefik
+curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health
 ```
 
-`cloudflared` restarts on its own (`restart: always`, and autoheal when it reports
-unhealthy). Logs saying the token is invalid mean the tunnel was deleted or its token
-refreshed: store the current token as `CF_TUNNEL_TOKEN` and run `release`. A home internet
-outage takes the sites down until the line is back; cloudflared reconnects by itself, and a
-change of the home's public IP needs nothing at all.
+`521`/`522` from Cloudflare: it cannot reach the server (the Hetzner Cloud Firewall, the
+record's address, or Traefik is down). `525`: the TLS handshake failed (Authenticated Origin
+Pulls off for the zone, or `/opt/edge/dynamic/tls.yml` missing: run `release`). `526`: the
+origin's certificate is not the Origin CA one. Traefik and the portfolio restart on their own
+(`restart: always`, autoheal for the portfolio).
 
 ### The down page
 
-A Cloudflare Worker answers the public sites with a "server is down" page (503) while the
-server is off or the tunnel is not connected, and otherwise passes every request through
+A Cloudflare Worker answers the public site with a "server is down" page (503) while the
+hetzner host is off or Traefik does not answer, and otherwise passes every request through
 untouched ([docs/edge.md](docs/edge.md#the-down-page)). It is deployed **by hand, from your
 laptop**: nothing in CI or on the server touches it, and it holds no secret. **Owner action**,
 once, and again after any change in `cloudflare/down-page/`:
@@ -786,8 +652,8 @@ once, and again after any change in `cloudflare/down-page/`:
    npx wrangler@4.147.0 whoami        # the account that owns the zone
    ```
 
-3. **Deploy** (builds with `worker-build --release`, uploads, and attaches the three routes in
-   `wrangler.toml`):
+3. **Deploy** (builds with `worker-build --release`, uploads, and attaches the two routes in
+   `wrangler.toml`; a deploy also drops the retired `hypernova.arbikullakshi.com/*` route):
 
    ```bash
    npx wrangler@4.147.0 deploy
@@ -801,15 +667,14 @@ once, and again after any change in `cloudflare/down-page/`:
    ```bash
    curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health            # 200
    curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://www.arbikullakshi.com/ # 301 https://arbikullakshi.com/
-   curl -sS -o /dev/null -w '%{http_code}\n' https://hypernova.arbikullakshi.com/api/health  # 200
    ```
 
-   and, at a quiet moment, that the page appears while the tunnel is down and goes away after:
+   and, at a quiet moment, that the page appears while Traefik is down and goes away after:
 
    ```bash
-   ssh admin@infra-host sudo docker stop cloudflared
+   ssh admin@infra-hetzner sudo docker stop edge-traefik
    curl -s -o /dev/null -w '%{http_code} %header{retry-after}\n' https://arbikullakshi.com/   # 503 120
-   ssh admin@infra-host sudo docker start cloudflared
+   ssh admin@infra-hetzner sudo docker start edge-traefik
    ```
 
 **Free plan**: 100,000 requests a day for the whole account (Workers & Pages → Overview shows
@@ -821,14 +686,15 @@ it only to debug.
 
 ### Re-pinning third-party images
 
-Every non-app image (PostgreSQL, Traefik, cloudflared, the socket proxies, Watchtower,
-autoheal) is pinned `<image>:<tag>@sha256:<digest>`, one version per repository across
-`stack/` and `roles/*/files/`, and the bundle build refuses anything else. To move one (a
-Watchtower that the Engine calls "too old", a Traefik, cloudflared or PostgreSQL patch
-release), follow [docs/agents.md](docs/agents.md#re-pinning-third-party-images), then
-provision with that role's tag, or run `release` for `postgres` (a minor version only; a
-major is a dump and restore, [docs/database.md](docs/database.md#upgrades)) and `cloudflared`
-(`stack/tunnel`).
+Every non-app image (PostgreSQL, Traefik, the socket proxies, Watchtower, autoheal, and
+rclone in `roles/host/files/infra-pg-backup`) is pinned `<image>:<tag>@sha256:<digest>`, one
+version per repository across `stack/` and `roles/*/files/`, and the bundle build refuses
+anything else. The hetzner host is Arm64: pin the **multi-arch index** digest (`docker buildx
+imagetools inspect <image>:<tag>` must list `linux/arm64` and `linux/amd64`), never one
+platform's manifest. To move one (a Watchtower that the Engine calls "too old", a Traefik or
+PostgreSQL patch release), follow [docs/agents.md](docs/agents.md#re-pinning-third-party-images),
+then provision with that role's tag, or run `release` on hetzner for `postgres` (a minor
+version only; a major is a dump and restore, [docs/database.md](docs/database.md#upgrades)).
 
 ### Restoring from the backup disk
 
@@ -836,17 +702,18 @@ The external disk holds, under `/srv/backup/snapshots/` (root only), one folder 
 `<YYYY-MM-DD>/`, and `latest` pointing at the newest:
 
 ```
-snapshots/<date>/postgres.sql.gz       pg_dumpall of the shared PostgreSQL
-snapshots/<date>/volumes/<volume>/     the apps' volumes as plain trees: portfolio-media,
-                                       hypernova_prizm-storage, beszel-data, garage-meta, sftpgo-data, home-data,
+snapshots/<date>/postgres.sql.gz       pg_dumpall of the old shared PostgreSQL, only while it still runs
+                                       here (until section 15's clean-up)
+snapshots/<date>/volumes/<volume>/     the apps' volumes as plain trees: beszel-data, garage-meta, sftpgo-data,
+                                       home-data, and portfolio-media until section 15's clean-up deletes it,
                                        and the retired apps' kept volumes (jellyfin-config,
                                        audiobookshelf-config, audiobookshelf-metadata, kavita-config,
-                                       open-webui-data, immich-pgdata)
+                                       open-webui-data)
 snapshots/<date>/media/<name>/         s3 (Garage's objects, the Files bucket), home-files (Home Files'
                                        ciphertext), movies and shows (the films' and series'
                                        .nfo files, pictures and subtitle files only, never the
                                        videos), and the retired apps' kept folders audiobooks,
-                                       books, podcasts and photos
+                                       books and podcasts
 ```
 
 `home-data` holds all of Home's own state: `home.db` (accounts, sessions, factors), `media.db`
@@ -854,7 +721,8 @@ snapshots/<date>/media/<name>/         s3 (Garage's objects, the Files bucket), 
 shelves and places); its `media-cache` (pictures, trickplay, HLS) and Books' catalog covers are
 left out and come back by themselves.
 
-Snapshots from before 2026-10-20 also hold `immich.sql.gz`, Immich's own database dump.
+Snapshots from before 2026-10-28 also hold Immich's leftovers (`immich.sql.gz`, `media/photos`,
+`volumes/immich-pgdata`); they age out with those snapshots.
 
 Kept: the last 14 nights, plus the first night of each of the last 8 weeks, so anything
 deleted within about two months is still in an older snapshot. Unchanged files are hard links
@@ -865,7 +733,7 @@ models download again ([Home's AI models](#homes-ai-models)). Check last night's
 logs "the nightly backup FAILED" at error priority, and its unfinished
 `snapshots/.<date>.partial` stays until the next run.
 
-**A file from the retired apps' folders** (books, audiobooks, podcasts and photos are plain
+**A file from the retired apps' folders** (books, audiobooks and podcasts are plain
 files): find it in a snapshot and copy it out:
 
 ```bash
@@ -959,18 +827,10 @@ sudo rsync -a --numeric-ids /srv/backup/snapshots/<date>/media/movies/ /srv/medi
 sudo rsync -a --numeric-ids /srv/backup/snapshots/<date>/media/shows/ /srv/media/shows/
 ```
 
-**The database**, all roles and databases at once, into the running cluster (a dump of the
-whole cluster; restoring it over existing databases fails on objects that exist, so for one
-app drop its database first, or restore into a fresh `pgdata-v18` after a reinstall):
-
-```bash
-sudo docker stop portfolio prizm-provider prizm-web
-gzip -cd /srv/backup/snapshots/<date>/postgres.sql.gz | sudo docker exec -i postgresql psql -U postgres -d postgres
-sudo docker start portfolio prizm-provider prizm-web
-```
-
-Restore `portfolio-media` from the same snapshot as the dump: the portfolio's `media` table is
-a ledger of that volume ([docs/database.md](docs/database.md#backups)).
+**The database** is not on the home server any more: the portfolio's PostgreSQL is on the
+hetzner host, dumped to R2 every day; restoring it is in
+[section 15](#restoring-the-portfolio-database). A home snapshot's `postgres.sql.gz` is the
+retired shared database (the old portfolio and hypernova), which nothing restores.
 
 **Everything on the media disk**, after replacing the internal disk (format it as in
 [Disks](#disks), put the new UUID in `production.yml`, provision):
@@ -981,7 +841,7 @@ sudo rsync -a --numeric-ids /srv/backup/snapshots/latest/media/ /srv/media/   # 
 
 **A new server**: install and provision as in sections 3–9 with the same `production.yml`
 (the backup disk's UUID included), release once so every volume exists, then restore each
-app volume, Garage and the database as above, all from the same snapshot.
+app volume and Garage as above, all from the same snapshot.
 
 **Before snapshots** (backups written before this layout): the first snapshot run deletes the
 old `media/` mirror and `apps/` folder once a complete snapshot exists (it links to the old
@@ -1003,25 +863,21 @@ backup to the 1 TB external USB HDD. None of it is public: it is reachable
 only over the tailnet, on the server's Tailscale address, and only by the Tailscale accounts the
 policy names (you). Do the steps in this order; each one says how to check it.
 
-The media and AI apps that used to be here (Immich, the media engine, Audiobookshelf, Kavita,
-Open WebUI, SearXNG, ComfyUI) were retired on 2026-10-20; their data is kept and still backed
+The media and AI apps that used to be here (the media engine, Audiobookshelf, Kavita,
+Open WebUI, SearXNG, ComfyUI, and Immich) were retired on 2026-10-20; their data (not Immich's) is kept and still backed
 up. See [Retired apps](#retired-apps-2026-10-20).
 
-Every service has an https name under `home.arbikullakshi.com` with a real certificate, served by
-`home-tls` on the Tailscale address (443). Use these: browsers allow the clipboard and installing a
-site as an app only over https. The old `http://infra-host:<port>` addresses
-still work (apps set up with them keep running) and may be retired later.
+Home has the only https name, `home.arbikullakshi.com`, with a real certificate for that name
+alone (no wildcard), served by `home-tls` on the Tailscale address (443). The other services
+have no name since the `*.home` record was deleted (plan 023): they answer on the server's
+tailnet name and their own port, over plain http, which WireGuard encrypts.
 
-| Service | Address (on the tailnet) | Also, older | Container port |
-| --- | --- | --- | --- |
-| Home (the owner's app: sign-in, dashboard, Home Files) | `https://home.arbikullakshi.com/` | `http://infra-host/` sends the browser there | 8080 (`home-server`, no host port); 80 (`home`) |
-| Files (SFTPGo, the file manager) | `https://files.home.arbikullakshi.com` (web client at `/web/client`, WebDAV at `/dav`) | `http://infra-host:8091/web/client` | 8091, 8092 |
-| Beszel (server status) | `https://status.home.arbikullakshi.com` | `http://infra-host:8090` | 8090 |
-| Garage (S3 behind Files) | `https://s3.home.arbikullakshi.com` (path-style, region `garage`) | `http://infra-host:3900` | 3900 |
-
-The names come from one map, `home_hosts` in `production.yml` (key: the service; value: the first
-label); a release requires exactly `files`, `status` and `s3`. Changing a label there changes
-the route, the app's own public URL and the release check together.
+| Service | Address (on the tailnet) | Container port |
+| --- | --- | --- |
+| Home (the owner's app: sign-in, dashboard, Home Files) | `https://home.arbikullakshi.com/` (`http://infra-host/` links there) | 8080 (`home-server`, no host port); 80 (`home`) |
+| Files (SFTPGo, the file manager) | `http://infra-host:8091/web/client`; WebDAV at `https://home.arbikullakshi.com/dav` | 8091, 8092 (WebDAV, media network only) |
+| Beszel (server status) | `http://infra-host:8090` | 8090 |
+| Garage (S3 behind Files) | `http://infra-host:3900` (path-style, region `garage`) | 3900 |
 
 ### Disks
 
@@ -1056,15 +912,14 @@ Provisioning (below) mounts them by UUID at `/srv/media` and `/srv/backup`
 disk unplugged), creates Garage's `s3` folder (the `media` account's alone), keeps the retired
 apps' folders `shows`, `movies`, `audiobooks`, `podcasts` and `books` (owned by the `media`
 account, setgid, group-writable; `movies` and `shows` are Home's film and series library now,
-which home-server writes into as a member of the `media` group) and `photos` ([Retired
-apps](#retired-apps-2026-10-20)), creates Home's `home-files` (the `home-server` account's alone,
+which home-server writes into as a member of the `media` group), creates Home's `home-files` (the `home-server` account's alone,
 uid 65532), and
 keeps the backup disk root-only. While a configured disk is missing its mountpoint stays empty and unwritable, so
 nothing lands on the SSD in its place. Check after provisioning:
 
 ```bash
 ssh admin@infra-host findmnt /srv/media /srv/backup        # both, ext4, by UUID
-ssh admin@infra-host ls -l /srv/media                      # s3 and photos drwx------ media media, home-files drwx------ home-server home-server, the other five drwxrwsr-x, media media
+ssh admin@infra-host ls -l /srv/media                      # s3 drwx------ media media, home-files drwx------ home-server home-server, the other five drwxrwsr-x, media media
 ```
 
 ### Tailscale grants
@@ -1102,7 +957,7 @@ If it lists another `-server` branch instead, set `nvidia_driver_major` to it (t
 `master`). Then provision from the laptop:
 
 ```bash
-ansible-playbook -u admin --ask-become-pass provision.yml
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml
 ```
 
 The `gpu` role installs the driver and the NVIDIA Container Toolkit; `host` writes the
@@ -1115,7 +970,7 @@ and is not loaded yet … Reboot when it suits you": the driver loads at the nex
 
 ```bash
 ssh -t admin@infra-host sudo reboot
-ansible-playbook -u admin --ask-become-pass provision.yml --tags gpu,host
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags gpu,host
 ssh admin@infra-host nvidia-smi                        # the RTX 2060, 12288MiB, driver 580.x
 ssh admin@infra-host sudo docker info --format '{{json .Runtimes}}'    # includes "nvidia"
 ssh admin@infra-host systemctl list-timers infra-backup.timer           # next run tonight, 02:30 UTC
@@ -1137,8 +992,7 @@ ssh admin@infra-host sudo docker exec llama nvidia-smi -L   # GPU 0: NVIDIA GeFo
 ssh admin@infra-host sudo docker ps --format '{{.Names}} {{.Ports}}'   # ports only on 100.x.y.z
 ```
 
-hypernova's AI features are off (`AI_DISABLED=true`; its provider speaks Ollama's API, and
-Ollama was removed). `llama` (llama-server, Home's AI) starts with no model loaded and answers `/health`; it
+`llama` (llama-server, Home's AI) starts with no model loaded and answers `/health`; it
 loads a model only when Home asks, from the files of [Home's AI models](#homes-ai-models):
 
 ```bash
@@ -1220,10 +1074,10 @@ of the list, release, then `sudo rm` its file from the volume.
 After the release, from the laptop (on the tailnet):
 
 1. **Home**, `https://home.arbikullakshi.com/setup`: see [Home](#home) for the first setup.
-1. **Beszel**, `https://status.home.arbikullakshi.com`: nothing to set up. Sign in with `status_owner_email`
+1. **Beszel**, `http://infra-host:8090`: nothing to set up. Sign in with `status_owner_email`
    (`production.yml`) and `BESZEL_PASSWORD`; `infra-host` is already listed
    ([The status dashboard](#the-status-dashboard)).
-1. **Files**, `https://files.home.arbikullakshi.com/web/client`: nothing to set up. Sign in as
+1. **Files**, `http://infra-host:8091/web/client`: nothing to set up. Sign in as
    `owner` with `FILES_PASSWORD` ([Files](#files-s3-storage)).
 
 ### The links page
@@ -1231,27 +1085,24 @@ After the release, from the laptop (on the tailnet):
 The links page's two tiles at `https://home.arbikullakshi.com/` were replaced by Home (below).
 What is left of it, in the media stack, each on the Tailscale address only:
 
-- `home` (busybox `httpd`, the pages are in `stack/media/docker-compose.yml`) on port 80:
-  `http://infra-host/` sends the browser on to `https://home.arbikullakshi.com/` (with plain
-  links to Home, the file manager and Status for a browser that does not follow it), and
-  `/files.html` lists the other ways into the files bucket, also at
-  `https://home.arbikullakshi.com/files.html`.
+- `home` (busybox `httpd`, the page is in `stack/media/docker-compose.yml`) on port 80:
+  `http://infra-host/` sends the browser on to `https://home.arbikullakshi.com/`, with plain
+  links to Home, the file manager (`:8091`), Status (`:8090`) and S3 (`:3900`).
 - `home-tls` (Traefik, the edge image) on port 443, for `https://home.arbikullakshi.com/` (Home's
-  `home-server`; `/dav` and `/files.html` still go to SFTPGo and `home`) and every
-  `<label>.home.arbikullakshi.com`: it routes each name to its container over the media
-  network, with no read or write timeout, so big uploads and long streams pass. `home-tls` gets one
-  Let's Encrypt certificate for `home.arbikullakshi.com` and `*.home.arbikullakshi.com` by the
-  DNS-01 challenge through Cloudflare's API, so nothing on the internet has to reach the server,
-  and keeps it in the `home-tls-acme` volume (not backed up: a lost one is simply reissued).
+  `home-server`; `/dav` goes to SFTPGo's WebDAV) over the media network, with no read or write
+  timeout, so big uploads and long streams pass. It gets one Let's Encrypt certificate for
+  `home.arbikullakshi.com` alone by the DNS-01 challenge through Cloudflare's API, so nothing on
+  the internet has to reach the server, and keeps it in the `home-tls-acme` volume (not backed
+  up: a lost one is simply reissued).
 
-`home` and `*.home` are DNS-only records (grey cloud, not proxied) to the server's Tailscale
-address. Off the tailnet that address leads nowhere, so the records reveal nothing usable:
+`home` is a DNS-only record (grey cloud, not proxied) to the server's Tailscale address. Off the
+tailnet that address leads nowhere, so the record reveals nothing usable. There is no `*.home`
+record (deleted 2026-10-28):
 
 ```bash
 Z=<zone id>        # cf zones list: the id of the apex domain's zone
 TS_IP=<100.x.y.z>  # the server's Tailscale IPv4: ssh admin@infra-host tailscale ip -4
 cf dns records create -z $Z --body '{"type":"A","name":"home","content":"'"$TS_IP"'","proxied":false,"comment":"tailnet-only Home (home-tls)"}'
-cf dns records create -z $Z --body '{"type":"A","name":"*.home","content":"'"$TS_IP"'","proxied":false,"comment":"tailnet-only service names (home-tls)"}'
 ```
 
 **The certificate's token.** `home-tls` needs a Cloudflare API token that may read the zone and
@@ -1280,11 +1131,10 @@ op item create --category password --vault "Home Server" --title "Cloudflare DNS
 A tailnet whose policy predates the page needs `tcp:80` and `tcp:443` added to the admins' grant
 to `tag:infra-server` ([Tailscale grants](#tailscale-grants)); until then the page times out.
 Provisioning opens 443 in ufw and creates the `home-tls-acme` volume, so provision once before
-the release that brings `home-tls`. The release then asks every name over https on the
-Tailscale address and waits up to 5 minutes each for the certificate ("home-tls serves https
-with a trusted certificate on 100.x.y.z for home.arbikullakshi.com files.home… s3.home…"):
-`https://home.arbikullakshi.com/healthz` must answer 200 (home-server), a service 2xx, 3xx, 401 or 403 (a 404 means no route, 502 a
-container home-tls cannot reach). A refused token shows in
+the release that brings `home-tls`. The release then asks Home's name over https on the
+Tailscale address and waits up to 5 minutes for the certificate ("home-tls serves https with a
+trusted certificate on 100.x.y.z for home.arbikullakshi.com"): `https://home.arbikullakshi.com/healthz`
+must answer 200 (home-server; a 404 means no route, 502 a container home-tls cannot reach). A refused token shows in
 `ssh admin@infra-host sudo docker logs home-tls`.
 
 ### The status dashboard and S3 secrets
@@ -1317,7 +1167,7 @@ A release refuses to render without all seven. Then provision (it creates the `b
 
 ### The status dashboard
 
-Beszel at `https://status.home.arbikullakshi.com` (the all-systems overview,
+Beszel at `http://infra-host:8090` (the all-systems overview,
 infra-host and any other retained systems; click one for its page (remove the retired ci-runners row during section 13 cleanup)): CPU, memory, load, temperatures, the GPU
 (use, memory, power), the SSD, the media disk and the backup disk, and every container's CPU,
 memory and network, with history. Sign in with `status_owner_email` from `production.yml` and
@@ -1340,8 +1190,9 @@ in the dashboard; they live in `beszel-data`, which the nightly backup copies.
 
 ### Files (S3 storage)
 
-**The file manager.** `https://files.home.arbikullakshi.com/web/client` is SFTPGo's web
-client on the `files` bucket, made to work like Google Drive:
+**The file manager.** `http://infra-host:8091/web/client` is SFTPGo's web
+client on the `files` bucket. It stores only what you put there on purpose (no device backup or
+sync of any kind); its file list works like a desktop's:
 
 - **click** a row to select it (Ctrl/⌘-click adds to the selection); **double-click** opens it. On a
   phone, a **tap** opens it.
@@ -1360,11 +1211,10 @@ releases; signing out, or 12 hours without opening the page, ends it:
 op item get "infra production secrets" --vault "Home Server" --fields label=FILES_PASSWORD --reveal
 ```
 
-**As a drive (WebDAV).** `https://files.home.arbikullakshi.com/dav` (through `home-tls`, so with
-the real certificate; `https://home.arbikullakshi.com/dav` still works for older mounts), user
-`owner`, the same password. On the laptop: Nautilus, Other Locations,
-`davs://files.home.arbikullakshi.com/dav`, or `rclone config create homedav webdav
-url=https://files.home.arbikullakshi.com/dav vendor=other user=owner pass="$(rclone obscure "$(op item
+**As a drive (WebDAV).** `https://home.arbikullakshi.com/dav` (through `home-tls`, so with
+the real certificate), user `owner`, the same password. On the laptop: Nautilus, Other Locations,
+`davs://home.arbikullakshi.com/dav`, or `rclone config create homedav webdav
+url=https://home.arbikullakshi.com/dav vendor=other user=owner pass="$(rclone obscure "$(op item
 get 'infra production secrets' --vault "Home Server" --fields label=FILES_PASSWORD --reveal)")"`. On
 Android: a WebDAV-capable file manager (Material Files, Solid Explorer) with that address.
 
@@ -1378,25 +1228,24 @@ Drive-style file list on`; `files: WARNING … serving SFTPGo's own file list` m
 file-list page is not the one the Drive behaviour was written against (a re-pin skipped
 `ci/files-ui.sh`): everything still works, only clicks and previews are SFTPGo's own. `ssh admin@infra-host sudo docker logs sftpgo` shows sign-ins and transfers.
 
-**Straight to S3.** Garage at `https://s3.home.arbikullakshi.com` (or `http://infra-host:3900`): S3-compatible storage, region `garage`, path-style
+**Straight to S3.** Garage at `http://infra-host:3900`: S3-compatible storage, region `garage`, path-style
 addressing, bucket `files`, over the tailnet only (plain http; Tailscale encrypts the link).
 Objects are on the media disk (`/srv/media/s3`), the metadata on the SSD (`garage-meta`); the
 nightly backup stops Garage only while it copies `garage-meta` and `/srv/media/s3` into the same snapshot, so the two match, and starts it right after; a file deleted from the bucket stays in older snapshots for about two months.
-`https://home.arbikullakshi.com/files.html` (or `http://infra-host/files.html`) shows the same instructions.
 
 The key is the one in 1Password; with rclone on the laptop:
 
 ```bash
-rclone config create home s3 provider=Other endpoint=https://s3.home.arbikullakshi.com \
+rclone config create home s3 provider=Other endpoint=http://infra-host:3900 \
   region=garage force_path_style=true \
   access_key_id="$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_ACCESS_KEY_ID --reveal)" \
   secret_access_key="$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_SECRET_KEY --reveal)"
 rclone copy ~/Documents/report.pdf home:files/
 rclone ls home:files
-rclone mount home:files ~/S3 --vfs-cache-mode writes     # optional: as a folder
 ```
 
-Any S3 app works the same way (Cyberduck, S3 Files, FolderSync, …): S3-compatible, server
+Copy deliberately (`rclone copy`); nothing here is set up to sync or back up a device on its own,
+and none should be. Any S3 client works the same way (Cyberduck, S3 Files, …): S3-compatible, server
 `infra-host`, port 3900, no TLS, path-style. `garage-setup` assigns the node's layout once,
 imports your key (`garage-setup.env`) and gives it read, write and owner rights on `files` on
 every release; `ssh admin@infra-host sudo docker logs garage-setup` shows what it did. More
@@ -1458,7 +1307,7 @@ Home's own settings, in this order:
 4. **The GHCR token** must be able to read `ghcr.io/somethim-home/home-server` (a classic token
    with `read:packages` reads every package its account can; if `GHCR_USERNAME` is not a member
    of `somethim-home`, give it read access to the package).
-5. **Provision** (`ansible-playbook -u admin --ask-become-pass provision.yml`, or
+5. **Provision** (`ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml`, or
    `--tags common,host`): it adds `HOME_USER` and `HOME_IMAGE_REPO` to `/etc/infra/host.env`, creates the
    `home-server` account (uid 65532, the image's), the `home-data` and `home-keys` volumes,
    `/srv/media/home-files` (0700, 65532), the internal `home-llm` network and the `llama-models`
@@ -1490,7 +1339,7 @@ release.
 **Status card.** Off until a read-only Beszel user exists; creating it is a manual step in
 Beszel's own admin pages:
 
-1. `https://status.home.arbikullakshi.com/_/` (PocketBase's admin pages), sign in as its
+1. `http://infra-host:8090/_/` (PocketBase's admin pages), sign in as its
    superuser (on this hub, `status_owner_email` and `BESZEL_PASSWORD`; not checked against a
    running hub yet).
 2. Collections → `users` → New record: an email of your choosing (e.g. a `+home` alias of
@@ -1532,7 +1381,7 @@ it. **Owner action**, once:
    directory).
 
    ```bash
-   ansible-playbook -u admin --ask-become-pass provision.yml --tags common,host
+   ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags common,host
    ssh admin@infra-host systemctl is-active home-power.path      # active
    ssh admin@infra-host findmnt /run/home-power                   # tmpfs … mode=700,uid=65532,gid=65532
    ```
@@ -1587,31 +1436,40 @@ limit): `sudo systemctl reset-failed home-power.path && sudo systemctl start hom
 
 Install Tailscale on the device (App Store / Play Store) and sign in with the same account as
 the laptop, so it is one of `autogroup:admin`'s devices. Then open
-`https://home.arbikullakshi.com/` (Home) or the https names in the table above. In
-apps, use the https names as the server address:
+`https://home.arbikullakshi.com/` (Home) or the addresses in the table above:
 
-- Files in the browser (`https://files.home.arbikullakshi.com/web/client`), or WebDAV at
-  `https://files.home.arbikullakshi.com/dav`
-- S3 apps: server `s3.home.arbikullakshi.com`, port 443, TLS on, path-style, region `garage`
+- Files in the browser (`http://infra-host:8091/web/client`), or WebDAV at
+  `https://home.arbikullakshi.com/dav`
+- S3 apps: server `infra-host`, port 3900, TLS off, path-style, region `garage`
 
-The phone resolves these names through public DNS (the records point at the Tailscale address),
-so Tailscale's own DNS setting does not matter. A device that is not on the tailnet gets
-nothing, by design. Apps already set up with `http://infra-host:<port>` keep working; switch them
-when convenient.
+The phone resolves `home.arbikullakshi.com` through public DNS (the record points at the
+Tailscale address) and `infra-host` through Tailscale's MagicDNS. A device that is not on the
+tailnet gets nothing, by design.
 
 ### Retired apps (2026-10-20)
 
-Immich, the media engine, Audiobookshelf, Kavita, Open WebUI, SearXNG and ComfyUI no longer run;
+The media engine, Audiobookshelf, Kavita, Open WebUI, SearXNG and ComfyUI no longer run (Immich,
+the photo backup, too; since plan 023 nothing of it is provisioned or backed up, see below);
 the owner's own apps replace them: Home's Media now uses `shows` and `movies`, and Home's AI
 replaces Open WebUI. Their volumes and the other folders under `/srv/media` (`audiobooks`,
-`podcasts`, `books`, `photos`) are kept, still created by provisioning and still backed up
-nightly (except caches), and nothing deletes them. What is kept, and what the owner may clean up (the four unused secrets, the old
+`podcasts`, `books`) are kept, still created by provisioning and still backed up nightly (except
+caches), and nothing deletes them.
+
+**Immich's leftovers** (owner, 2026-10-28: no automatic photo or drive backup, only deliberate
+storage). Provisioning no longer creates `/srv/media/photos`, the `immich-*` volumes or the
+`immich` network, and the nightly backup no longer copies them; what is on the server stays until
+you delete it. Copy out anything you want to keep first (the old snapshots on the backup disk
+hold it for about two more months), then:
+
+```bash
+ssh -t admin@infra-host 'sudo rm -rf /srv/media/photos /srv/backup/immich; sudo docker volume rm immich-pgdata immich-ml-cache; sudo docker network rm immich'
+``` What is kept, and what the owner may clean up (the four unused secrets, the old
 Tailscale grants), is in [docs/stacks.md](docs/stacks.md#retired-apps-2026-10-20).
 
 ### Removing Ollama's models
 
-Ollama (and its one-shot `ollama-pull`) no longer run: llama-server is the only AI engine, and
-hypernova's AI features are off. A release removes the two containers from the `ai` stack by
+Ollama (and its one-shot `ollama-pull`) no longer run: llama-server is the only AI engine. A
+release removes the two containers from the `ai` stack by
 itself (`docker compose up --remove-orphans`), but provisioning neither creates nor deletes the
 old `ollama-models` volume (about 21 GB on the SSD, the models it pulled) or the `ai` and `llm`
 networks, and the nightly backup never copied the volume. **On a clean reinstall none of this
@@ -1654,7 +1512,7 @@ address; no port published.
 ```bash
 # from a clean worktree of this repository (here ~/.cache/infra-clean), at origin/master
 git fetch -q && cd ~/.cache/infra-clean && git checkout -q --detach origin/master
-ansible-playbook -u admin --ask-become-pass provision.yml --tags snowflake
+ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags snowflake
 ```
 
 The run ends with the proxy's NAT type (`restricted` is normal behind a home router;
@@ -1674,3 +1532,302 @@ while instead: `ssh -t admin@infra-host sudo docker stop snowflake-proxy` (it st
 next boot or provisioning run).
 
 **Re-pin**: docs/agents.md, "Re-pinning third-party images".
+
+## 15. Hetzner host
+
+The public portfolio and its PostgreSQL run on their own small server (plan 023), so the home
+server runs only Home. What runs there: `database` (the portfolio's PostgreSQL, dumped to R2
+every day), `portfolio` (its media in Cloudflare R2), the edge Traefik on 80 and 443, which only
+Cloudflare reaches, Watchtower and autoheal. No tunnel: Cloudflare proxies the names and connects
+to the server's public address, SSL/TLS **Full (strict)** with a Cloudflare Origin CA
+certificate and **Authenticated Origin Pulls** ([docs/edge.md](docs/edge.md)).
+
+| | |
+| --- | --- |
+| Server | Hetzner Cloud **CAX (Arm64)**, Nuremberg, **Ubuntu 26.04 LTS arm64** (`resolute`), 2 vCPU, 4 GB |
+| Public addresses | `138.199.170.38`, `2a01:4f8:c016:f67c::1` |
+| Tailnet name | `infra-hetzner` (`production.yml`, `infra_hosts.hetzner.server_name`), tag `tag:infra-server` |
+| Inventory | `[hetzner]` in `inventory/hosts`; every run `-e infra_host=hetzner` |
+| Deploy | Actions → Deploy, host `hetzner` |
+
+Every image it runs is pinned to a multi-arch index digest with `linux/arm64`, and Docker and
+Tailscale come from their apt repositories for `resolute`, which carry arm64. The portfolio's own
+image must be built for arm64 too (the portfolio repository).
+
+The move, in order. Nothing changes for visitors until step 10. Nothing is copied from the home
+server (owner, 2026-10-28: the old portfolio data is not worth keeping): the portfolio starts
+here with an empty database and empty R2 buckets.
+
+### 1. The server and its firewall
+
+**Owner action**, in the Hetzner Cloud console. The server exists (CAX, Nuremberg, Ubuntu 26.04
+arm64, your laptop's key for `root`). Create a **Firewall** and apply it to the server:
+
+| Direction | Protocol | Port | Source |
+| --- | --- | --- | --- |
+| Inbound | ICMP | | Any IPv4, any IPv6 |
+| Inbound | TCP | 80 | Cloudflare's ranges, below |
+| Inbound | TCP | 443 | Cloudflare's ranges, below |
+| Inbound | TCP | 22 | **your laptop's public address only, and only until step 4** |
+
+Nothing else inbound; outbound is open. Cloudflare's ranges (2026-10-28,
+<https://www.cloudflare.com/ips-v4>, <https://www.cloudflare.com/ips-v6>; `production.yml`
+`cloudflare_ips_pinned` holds the same list):
+
+```
+173.245.48.0/20  103.21.244.0/22  103.22.200.0/22  103.31.4.0/22   141.101.64.0/18
+108.162.192.0/18 190.93.240.0/20  188.114.96.0/20  197.234.240.0/22 198.41.128.0/17
+162.158.0.0/15   104.16.0.0/13    104.24.0.0/14    172.64.0.0/13   131.0.72.0/22
+2400:cb00::/32   2606:4700::/32   2803:f800::/32   2405:b500::/32  2405:8100::/32
+2a06:98c0::/29   2c0f:f248::/32
+```
+
+The host enforces the same itself (ufw and `infra-firewall`, from the ranges provisioning fetches),
+so the cloud firewall is a second lock, not the only one. When Cloudflare changes its ranges, a
+hetzner provisioning run says so: update this firewall and `cloudflare_ips_pinned` together.
+
+### 2. A Tailscale auth key
+
+**Owner action.** As in [section 4](#4-tailscale): a pre-approved, single-use auth key with the
+tag `tag:infra-server`. The grants that let your devices and `tag:infra-ci` reach
+`tag:infra-server` on 22 already cover the new node.
+
+### 3. First provision, over the public address
+
+**Owner action**, on your laptop. The Hetzner image has only `root`, and provisioning never logs
+in as root, so first make a bootstrap account the way the Ubuntu installer would (it is removed
+in step 4; root login is turned off by this run):
+
+```bash
+H=138.199.170.38
+ssh-keyscan -t ed25519 $H | ssh-keygen -lf -      # compare with the console's (Rescue → or the server's first boot log)
+ssh-keyscan -t ed25519 $H >> ~/.ssh/known_hosts
+ssh root@$H 'lsb_release -cs; uname -m'           # resolute, aarch64
+ssh -t root@$H 'adduser --gecos "" setup && usermod -aG sudo setup &&
+  install -d -m 0700 -o setup -g setup /home/setup/.ssh &&
+  install -m 0600 -o setup -g setup /root/.ssh/authorized_keys /home/setup/.ssh/authorized_keys'
+ssh setup@$H true                                 # no password prompt
+```
+
+`/root/.ssh/authorized_keys` must hold only your own plain key lines (the run checks `setup`'s
+copy). Then:
+
+```bash
+cp -n inventory/hosts.example inventory/hosts
+sed -i "s/^infra-hetzner ansible_host=.*/infra-hetzner ansible_host=$H/" inventory/hosts
+ansible-playbook -e infra_host=hetzner -u setup --ask-become-pass provision.yml
+```
+
+`BECOME password` is `setup`'s; enter the auth key from step 2 at `Tailscale auth key for
+infra-hetzner`. Expect, besides what section 5 lists for the home server: "Cloudflare's 22 address
+ranges, fetched from cloudflare.com", ufw rules admitting each range to 80 and 443, the `edge`
+and `data` networks and the empty `pgdata-v18` volume, `infra-pg-backup.timer` enabled, and
+Traefik up with 80 and 443 published. No GPU, quiet hours, Beszel or Snowflake here. Then:
+
+```bash
+ssh -t setup@$H sudo passwd admin                 # the admin sudo password: keep it in your password manager
+ssh-keyscan -t ed25519 infra-hetzner | ssh-keygen -lf -    # the same fingerprint as above
+ssh-keyscan -t ed25519 infra-hetzner > /tmp/kh-hetzner && cat /tmp/kh-hetzner >> ~/.ssh/known_hosts
+ssh admin@infra-hetzner true
+```
+
+### 4. Second provision, over the tailnet
+
+**Owner action.**
+
+```bash
+sed -i 's/^infra-hetzner ansible_host=.*/infra-hetzner ansible_host=infra-hetzner/' inventory/hosts
+ansible-playbook -e infra_host=hetzner -u admin --ask-become-pass provision.yml
+ssh admin@infra-hetzner sudo rm -f /root/.ssh/authorized_keys
+```
+
+It closes 22 in ufw and removes `setup`. Now **delete the TCP 22 rule from the Hetzner Cloud
+Firewall**, and check from the laptop:
+
+```bash
+nc -z -w 5 138.199.170.38 22                      # times out
+ssh admin@infra-hetzner sudo ufw status           # 22 on tailscale0; 80,443 from each Cloudflare range
+ssh admin@infra-hetzner sudo iptables -S INFRA-PUBLIC | head -3   # -s <Cloudflare range> ... --ctorigdstport 80 -j RETURN
+ssh admin@infra-hetzner sudo docker ps --format '{{.Names}} {{.Ports}}'   # only edge-traefik, on 80 and 443
+```
+
+### 5. Cloudflare: R2, the origin certificate, Authenticated Origin Pulls
+
+**Owner action**, in the Cloudflare dashboard of the account that holds `arbikullakshi.com`.
+None of this changes what visitors see: the names still point at the home server's tunnel.
+
+1. **R2 buckets.** The portfolio's two media buckets and the custom domain of the public one, as
+   the portfolio's plan 011 says (their names become `R2_PUBLIC_BUCKET` and `R2_PRIVATE_BUCKET`,
+   the public base URL, `https://media.arbikullakshi.com`, `MEDIA_PUBLIC_BASE`), and a third,
+   private bucket **`portfolio-backups`** with a lifecycle rule: **delete objects 30 days after
+   upload**.
+2. **Two R2 API tokens** (R2 → Manage API tokens → Create API token, *Object Read & Write*,
+   *Apply to specific buckets only*):
+   - **portfolio**: the two media buckets. Its Access Key ID and Secret Access Key become
+     `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`.
+   - **portfolio-backups**: that bucket alone. Its pair becomes `R2_BACKUP_ACCESS_KEY_ID` and
+     `R2_BACKUP_SECRET_ACCESS_KEY`. The portfolio's own key never reaches its backups.
+   The account ID (R2 overview) is `R2_ACCOUNT_ID`.
+3. **Origin certificate**: SSL/TLS → Origin Server → **Create Certificate**: let Cloudflare
+   generate the key, hostnames `arbikullakshi.com` and `*.arbikullakshi.com`, validity 15 years,
+   format PEM. Keep the certificate and the private key (shown once) in your password manager;
+   they become `CF_ORIGIN_CERT` and `CF_ORIGIN_KEY`.
+4. **Authenticated Origin Pulls**: SSL/TLS → Origin Server → **Authenticated Origin Pulls: On**
+   (zone-level). Cloudflare then presents its client certificate to every origin; the tunnel to
+   the home server is not affected.
+5. **SSL/TLS mode Full (strict)**: SSL/TLS → Overview. Never *Flexible*. **Always Use HTTPS**
+   stays on.
+6. **A preview name**: DNS → Records → proxied `A` `next` → `138.199.170.38` and proxied `AAAA`
+   `next` → `2a01:4f8:c016:f67c::1`.
+
+### 6. Secrets and variables
+
+**Owner action**, with `gh` in the checkout (the `production` Environment, as in
+[section 7](#7-the-production-environment)). The database passwords, `PORTFOLIO_*`, `GHCR_*`,
+`SSH_PRIVATE_KEY` and the Tailscale OAuth client are already set and stay as they are.
+
+```bash
+# The host key: SSH_KNOWN_HOSTS holds one line per host
+{ ssh-keyscan -t ed25519 infra-host; cat /tmp/kh-hetzner; } | gh secret set SSH_KNOWN_HOSTS --env production && rm /tmp/kh-hetzner
+gh variable set HETZNER_SSH_HOST --env production --body infra-hetzner
+
+# R2 (step 5); paste each value at the prompt
+for name in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BACKUP_ACCESS_KEY_ID R2_BACKUP_SECRET_ACCESS_KEY; do
+  gh secret set "$name" --env production
+done
+gh variable set R2_PUBLIC_BUCKET --env production --body '<public bucket>'
+gh variable set R2_PRIVATE_BUCKET --env production --body '<private bucket>'
+gh variable set MEDIA_PUBLIC_BASE --env production --body 'https://media.arbikullakshi.com'
+
+# The origin certificate and key (step 5), from the files you saved
+gh secret set CF_ORIGIN_CERT --env production < origin.pem
+gh secret set CF_ORIGIN_KEY --env production < origin.key && shred -u origin.key
+```
+
+Compare `ssh-keyscan -t ed25519 infra-host | ssh-keygen -lf -` with the home server's known
+fingerprint before trusting it again.
+
+### 7. First release
+
+**Owner action.** In `production.yml` on `master`, set `preview_domain: next.arbikullakshi.com`
+(Traefik then routes that name to the portfolio too). Then Actions → Deploy, host **`hetzner`**,
+action `release`. Expect:
+
+```
+infra-apply: compose model accepted: 1 service(s) in the database stack, ...
+infra-apply: compose model accepted: 1 service(s) in the portfolio stack, ...
+infra-apply: bundle accepted: 11 files, manifest checksums match
+infra-apply: pulling images
+infra-apply: starting the database
+infra-apply: database roles, passwords and grants are in place
+infra-apply: the origin certificate and the client-certificate rule are in place for Traefik
+infra-apply: starting portfolio
+infra-apply: every container is running and healthy, and has run for at least 30s without a restart
+infra-apply: Traefik redirects http to https and refuses https without Cloudflare's client certificate for arbikullakshi.com/api/health www.arbikullakshi.com/
+infra-apply: edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal: each client reaches Docker through its socket proxy with no refused calls
+infra-apply: Cloudflare serves https://arbikullakshi.com/api/health https://www.arbikullakshi.com/ http://arbikullakshi.com/api/health
+infra-apply: RELEASE OK: <id> is current, following :latest, auto-updates on
+```
+
+PostgreSQL initialises the empty `pgdata-v18`, `provision.sql` creates the `portfolio` role and
+database, and the portfolio seeds it on its first start (its operator account from
+`PORTFOLIO_ADMIN_PASSWORD`). Until step 10 the public check ("Cloudflare serves …") still reaches the home server;
+it passes, but proves nothing about this host yet. Then check the first dump runs:
+
+```bash
+ssh admin@infra-hetzner sudo systemctl start infra-pg-backup && ssh admin@infra-hetzner sudo journalctl -u infra-pg-backup -n 3 --no-pager
+# infra-pg-backup: portfolio database dumped to portfolio-backups/portfolio-<time>.dump
+```
+
+### 8. A fresh start
+
+Nothing to copy. Sign in at `https://next.arbikullakshi.com/admin` with
+`ADMIN_EMAIL` (`contact@arbikullakshi.com`) and `PORTFOLIO_ADMIN_PASSWORD`, and add the content
+there. Passkeys, TOTP and Google sign-in are bound to `arbikullakshi.com`: enrol them after
+step 10.
+
+### 9. Check on the preview name
+
+Open `https://next.arbikullakshi.com`:
+
+- the pages load, and pictures and videos come from `media.arbikullakshi.com`;
+- in the admin (password sign-in), upload a picture and see it published to R2 (it loads from
+  `media.arbikullakshi.com`).
+
+### 10. Switch the names
+
+**Owner action**, in Cloudflare → DNS → Records:
+
+1. Delete the `CNAME` records of `arbikullakshi.com` and `www` (they point at
+   `<tunnel id>.cfargotunnel.com`), and create for each name a proxied `A` → `138.199.170.38`
+   and a proxied `AAAA` → `2a01:4f8:c016:f67c::1`. Proxied records switch at once.
+2. Delete `hypernova.arbikullakshi.com` (hypernova is retired) and the two `next` records.
+3. Check from the laptop:
+
+   ```bash
+   curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health            # 200
+   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://www.arbikullakshi.com/ # 301 https://arbikullakshi.com/
+   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' http://arbikullakshi.com/      # 301 https://arbikullakshi.com/
+   curl -sS -o /dev/null -w '%{http_code}\n' --resolve arbikullakshi.com:443:138.199.170.38 -k https://arbikullakshi.com/   # 000: no client certificate, refused
+   ```
+
+4. Set `preview_domain: ""` in `production.yml` on `master`, and run Deploy, host `hetzner`,
+   action `release`: its public check now proves the path to this host.
+5. Sign in at `https://arbikullakshi.com/admin`, enrol TOTP and passkeys, and connect Google
+   Calendar if you use it.
+6. Redeploy the down-page Worker ([The down page](#the-down-page)): it drops the hypernova route.
+
+### 11. Clean up the home server
+
+**Owner action**, once the site has run from this host for a day.
+
+1. **Provision and release the home server** with this repository's version (the home server's
+   `/etc/infra/host.env` gains `INFRA_HOST=home` and its `infra-apply` learns the per-host layout;
+   a home release before this provision fails with "INFRA_HOST is neither home nor hetzner"):
+
+   ```bash
+   ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml
+   ```
+
+   then Actions → Deploy, host `home`, action `release`.
+2. **Remove the public stacks, the tunnel, the edge and their data** there (their release files
+   are no longer in a home bundle, so remove them directly; the old portfolio and hypernova data
+   is not kept):
+
+   ```bash
+   ssh admin@infra-host 'sudo docker rm -f portfolio prizm-provider prizm-web cloudflared edge-traefik edge-socket-proxy postgresql'
+   ssh admin@infra-host 'sudo docker volume rm pgdata-v18 portfolio-media hypernova_prizm-storage'
+   ssh admin@infra-host 'sudo docker network rm edge data edge-socket && sudo rm -rf /opt/edge'
+   ```
+
+   The nightly backup skips the database dump once `postgresql` is gone; the old snapshots on the
+   backup disk age out in about two months.
+3. **Delete the tunnel**: Cloudflare → Zero Trust → Networks → Tunnels → `home-server` → Delete.
+4. **Delete the secrets nothing reads any more** (hypernova is retired and no host runs a
+   tunnel):
+
+   ```bash
+   for name in CF_TUNNEL_TOKEN PRIZM_DB_PASSWORD HYPERNOVA_SESSION_SECRET HYPERNOVA_ADMIN_PASSWORD; do
+     gh secret delete "$name" --env production
+   done
+   ```
+
+### Restoring the portfolio database
+
+Dumps are in the private R2 bucket `portfolio-backups`, one a day for 30 days
+(`portfolio-<UTC time>.dump`, `pg_dump --format=custom`). On the hetzner host, with the backup
+key the release wrote (it may write to the bucket, so it may read it too):
+
+```bash
+ssh admin@infra-hetzner
+I=$(sed -n 's/^readonly rclone_image=//p' /usr/local/sbin/infra-pg-backup)
+E=/opt/infra/current/database/backup.env
+sudo docker run --rm --env-file $E $I lsf :s3:portfolio-backups | tail -3        # the newest dumps
+sudo docker stop portfolio
+sudo docker run --rm --env-file $E $I cat :s3:portfolio-backups/portfolio-<time>.dump |
+  sudo docker exec -i postgresql pg_restore --clean --if-exists --no-owner --role=portfolio -U postgres -d portfolio
+sudo docker start portfolio
+```
+
+The media are in R2 already; nothing on the server needs restoring. **A new hetzner server**: steps
+1 to 7, then the restore above.

@@ -22,8 +22,9 @@ try to read other people's data.
 - Anything in this repository that would let someone reach the server, its containers or its
   data other than the intended ways: the firewall and Tailscale-only SSH, the forced-command
   release path (`infra-deploy-gate`, `infra-apply`, `infra-compose-guard`), the bundle and its
-  checks, Home's power requests (`home-power`), the backup script, the edge and tunnel
-  configuration, and the down-page Worker.
+  checks, Home's power requests (`home-power`), the backup scripts, the hetzner host's
+  public edge (Traefik, the origin certificate and Authenticated Origin Pulls, the Cloudflare-only
+  firewall), and the down-page Worker.
 - A secret, credential or private value committed to this repository or its history.
 - The GitHub workflows (for example, anything that could expose the `production` Environment).
 

@@ -35,8 +35,8 @@ recreates the container. This is what makes the application repositories build-o
 to `:latest` is a deploy.
 
 - `WATCHTOWER_LABEL_ENABLE=true` — only containers labelled
-  `com.centurylinklabs.watchtower.enable=true` are considered: `portfolio`, `prizm-provider`,
-  `prizm-web` and `home-server`. `home-server` is the one exception to the rule below: it keeps
+  `com.centurylinklabs.watchtower.enable=true` are considered: `portfolio` (hetzner) and
+  `home-server` (home). `home-server` is the one exception to the rule below: it keeps
   its own SQLite database in `home-data` and migrates it at start, so a new image can change
   that schema unattended, and a rollback to an image older than the migration may not start;
   the nightly backup is the way back. PostgreSQL and Traefik carry no such label and are never touched. **Never
@@ -81,15 +81,12 @@ moves on — and Traefik does not read that status either. Without autoheal, a h
 stays in the routing table and keeps taking traffic that it will never answer.
 
 - Opt in with the label `autoheal=true` (`AUTOHEAL_CONTAINER_LABEL=autoheal`): `portfolio`
-  and `prizm-provider`.
+  on hetzner, and on home `home-server` and the hardened stacks' services.
 - Checks every 30 seconds (`AUTOHEAL_INTERVAL=30`).
 - `AUTOHEAL_START_PERIOD=300` — grace after autoheal itself starts, so a host that is still
   booting is not restarted into a loop.
 - **Never label a database.** Restarting a slow PostgreSQL under load is how a slow database
   becomes a broken one.
-
-`prizm-web` is deliberately not labelled: it defines no healthcheck, so there is nothing for
-autoheal to act on.
 
 ## Beszel's socket proxy
 
@@ -121,8 +118,9 @@ Containers are not pruned at all, so a deliberately stopped one survives. Run it
 
 ## Re-pinning third-party images
 
-Every image that is not an app image is pinned `<image>:<tag>@sha256:<digest>`: PostgreSQL
-(`stack/database/docker-compose.yml`), cloudflared (`stack/tunnel/docker-compose.yml`),
+Every image that is not an app image is pinned `<image>:<tag>@sha256:<digest>`, always the
+multi-arch index digest (the hetzner host is Arm64, the home server amd64): PostgreSQL
+(`stack/database/docker-compose.yml`), rclone (`roles/host/files/infra-pg-backup`),
 llama.cpp's server (`stack/ai/docker-compose.yml`; llama.cpp's tags are `server-cuda-b<build>`, and a re-pin checks the
 router-mode flags and preset keys in its release notes, [stacks.md](stacks.md#ai)), busybox,
 Traefik, Beszel (hub and the NVIDIA agent), curl, Garage and SFTPGo
@@ -149,7 +147,7 @@ To move one:
 2. Replace `<tag>@sha256:<digest>` in every file that runs that repository, and merge to
    `master`.
 3. Apply it: provision with that role's tag (`--tags edge`, `--tags watchtower` or
-   `--tags autoheal`; the socket proxy needs all three), or run `release` for PostgreSQL,
-   cloudflared and llama.cpp. A PostgreSQL pin may move only within the major
-   ([database.md](database.md#upgrades)). Pick a cloudflared release that has been out for a
-   couple of weeks; it is never auto-updated (`--no-autoupdate`, no Watchtower label).
+   `--tags autoheal`; the socket proxy needs all three), or run `release` for PostgreSQL
+   (hetzner) and llama.cpp (home); rclone moves with `--tags host` on hetzner. A PostgreSQL pin
+   may move only within the major ([database.md](database.md#upgrades)). Check that the new
+   digest lists `linux/arm64` and `linux/amd64` (`docker buildx imagetools inspect <image>:<tag>`).

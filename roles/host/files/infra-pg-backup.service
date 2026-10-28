@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily dump of the portfolio database to R2 (portfolio-backups)
+Documentation=file:///usr/local/sbin/infra-pg-backup
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/infra-pg-backup
+Nice=10
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+TimeoutStartSec=1h

@@ -1,14 +1,19 @@
 # infra
 
-Ansible playbooks, Docker Compose stacks and shell scripts that run one person's home server:
-a single Ubuntu PC on a home LAN that serves two public websites through a Cloudflare Tunnel
-and, over Tailscale only, the owner's own apps (Home with its files, films, books and AI chat,
-file storage, a status dashboard, local LLMs). Nothing on the box listens on the internet. This repository is the only thing that
-configures it.
+Ansible playbooks, Docker Compose stacks and shell scripts that run one person's two servers:
+
+- **home**, an Ubuntu PC on a home LAN that runs, over Tailscale only, the owner's own apps (Home
+  with its files, films, books and AI chat, file storage, a status dashboard, local LLMs) and
+  nothing else. Nothing on it listens on the internet.
+- **hetzner**, a small Hetzner Cloud server (CAX, Arm64) that runs the public portfolio and its
+  PostgreSQL behind Traefik, which only Cloudflare can reach (Full (strict) TLS with an Origin CA
+  certificate and Authenticated Origin Pulls). Its media is in Cloudflare R2.
+
+This repository is the only thing that configures either.
 
 It is published as a worked example, not as a product: the values are the owner's (see
-[What is specific to this setup](#what-is-specific-to-this-setup)), but the patterns (tunnel-only
-ingress, a forced-command deploy key, digest-pinned rollbacks, a compose guard, signed power
+[What is specific to this setup](#what-is-specific-to-this-setup)), but the patterns (a Cloudflare-only
+origin, a forced-command deploy key, digest-pinned rollbacks, a compose guard, signed power
 requests) are meant to be reusable.
 
 ## Architecture
@@ -18,47 +23,58 @@ flowchart LR
   subgraph internet[Internet]
     visitor([Visitor])
     cf[Cloudflare edge<br/>+ down-page Worker]
+    r2[(Cloudflare R2<br/>media, daily dumps)]
     gh[GitHub Actions<br/>Deploy workflow]
     ghcr[(GHCR images)]
-    apps[App repos:<br/>portfolio, hypernova, home]
+    apps[App repos:<br/>portfolio, home]
   end
   subgraph tailnet[Tailscale tailnet]
     owner([Owner's devices])
     laptop([Owner's laptop])
   end
-  subgraph host[Home server, no inbound port]
-    cfd[cloudflared] --> traefik[Traefik edge]
-    traefik --> portfolio[portfolio]
-    traefik --> hypernova[hypernova]
+  subgraph hetzner[hetzner host, only Cloudflare on 80/443]
+    traefik[Traefik edge<br/>Origin CA cert, client cert required] --> portfolio[portfolio]
     portfolio --> pg[(PostgreSQL)]
-    hypernova --> pg
-    hometls[home-tls<br/>Traefik + Let's Encrypt] --> home[Home: home-server<br/>web app, Files, Media, Books, AI]
-    home -- internal home-llm --> llama[ai: llama-server on the GPU]
-    home --> library[(films and series<br/>on the media disk)]
+    pgdump[daily pg_dump] --> pg
+    hwt[Watchtower]
+    hgate[deploy account<br/>forced command] --> happly[infra-apply]
+  end
+  subgraph home[Home server, no inbound port]
+    hometls[home-tls<br/>Traefik + Let's Encrypt] --> homeapp[Home: home-server<br/>web app, Files, Media, Books, AI]
+    homeapp -- internal home-llm --> llama[ai: llama-server on the GPU]
+    homeapp --> library[(films and series<br/>on the media disk)]
     hometls --> media[media: Beszel, Garage S3, SFTPGo]
     wt[Watchtower]
     gate[deploy account<br/>forced command] --> apply[infra-apply]
-    home -- signed request file --> power[home-power<br/>poweroff / reboot]
+    homeapp -- signed request file --> power[home-power<br/>poweroff / reboot]
     backup[nightly backup] --> usb[(USB backup disk)]
   end
   visitor --> cf
-  cf -- outbound tunnel --> cfd
+  cf -- HTTPS + client certificate --> traefik
+  visitor -- media --> r2
+  portfolio --> r2
+  pgdump --> r2
   owner -- HTTPS --> hometls
-  laptop -- ansible provision.yml over SSH --> host
+  laptop -- ansible provision.yml over SSH --> hetzner
+  laptop -- ansible provision.yml over SSH --> home
+  gh -- tailnet SSH, bundle on stdin --> hgate
   gh -- tailnet SSH, bundle on stdin --> gate
   apps -- CI builds :latest --> ghcr
   wt -- pulls new digests --> ghcr
+  hwt -- pulls new digests --> ghcr
 ```
 
-- **Public path.** A visitor reaches Cloudflare, which forwards over the tunnel that
-  `cloudflared` on the server dialled out. `cloudflared` is the only thing that can reach Traefik,
-  and Traefik routes by hostname to the portfolio or hypernova, which share one PostgreSQL.
-  When the server is off, a Cloudflare Worker answers with a "server is down" page.
-- **Tailnet path.** The owner's devices reach `home-tls` on the server's Tailscale address,
+- **Public path.** A visitor reaches Cloudflare, which connects to the hetzner host's Traefik
+  over TLS with its client certificate. The Hetzner Cloud Firewall, the host's own firewall and
+  Authenticated Origin Pulls let nothing else in. Traefik routes to the portfolio, whose media
+  is served from R2 at `media.arbikullakshi.com`. When the server is off, a Cloudflare Worker
+  answers with a "server is down" page.
+- **Tailnet path.** The owner's devices reach `home-tls` on the home server's Tailscale address,
   which terminates HTTPS with one Let's Encrypt certificate (DNS-01, so nothing on the internet
   has to reach the server) and routes to Home, the status dashboard, S3 and the file manager.
-- **Change path.** Provisioning runs from the owner's laptop. Releases run from GitHub Actions
-  through a forced-command SSH key. Routine image updates need neither: Watchtower pulls them.
+- **Change path.** Provisioning runs from the owner's laptop, one host per run
+  (`-e infra_host=home|hetzner`). Releases run from GitHub Actions through a forced-command SSH
+  key, one host per run. Routine image updates need neither: Watchtower pulls them.
 
 ## How the repositories fit together
 
@@ -67,37 +83,43 @@ flowchart LR
 | [somethim-home/home](https://github.com/somethim-home/home) | Home, the owner's family app in Rust: `home-server` (axum) and Slint apps for desktop, Android and the web | Its CI builds `ghcr.io/somethim-home/home-server`; this repository runs it as the `home` stack, follows `:latest` with Watchtower, and gives it a signed power-request channel to the host |
 | [somethim-home/home-crypto](https://github.com/somethim-home/home-crypto) | The end-to-end encryption format of Home Files, built on age and Ed25519 | Compiled into Home's server and apps; the server only stores ciphertext, which this repository backs up without the keys |
 | [somethim/latchkey](https://github.com/somethim/latchkey) ([crates.io](https://crates.io/crates/latchkey)) | Sans-I/O sign-in building blocks (passwords, TOTP, passkeys, sessions) | Home's sign-in is built on it; this repository only supplies Home's keys and mail credentials as secrets |
-| **infra** (this one) | The host, the stacks, the release path | The only thing that SSHes to the server |
+| **infra** (this one) | The hosts, the stacks, the release path | The only thing that SSHes to the servers |
 
-The portfolio and hypernova are the owner's other apps, built in their own repositories; this
-one only runs their images.
+The portfolio is the owner's other app, built in its own repository; this one only runs its
+image (built for arm64 and amd64) on the hetzner host.
 
 ## The parts
 
-- **Roles** (`roles/`, applied by `provision.yml`): `common` (packages, ufw, accounts, sshd,
-  fail2ban, unattended upgrades), `tailscale`, `docker` (pinned engine, daemon settings, weekly
-  prune), `gpu` (NVIDIA driver and Container Toolkit), `host` (disks, swap, service accounts,
-  Wake-on-LAN, the nightly backup, Home's power control), `quiet`, `edge` (Traefik and its socket
-  proxy), `watchtower`, `autoheal`, `beszel` (the status dashboard's socket proxy) and
-  `snowflake` (a Tor Snowflake proxy); `host` also points the host's DNS at Cloudflare and
-  Quad9 over TLS. See [docs/host.md](docs/host.md) and
+- **Roles** (`roles/`, applied by `provision.yml`): on both hosts `common` (packages, ufw,
+  accounts, sshd, fail2ban, unattended upgrades), `tailscale`, `docker` (pinned engine, daemon
+  settings, weekly prune), `host` (swap, the Docker firewall, host facts; on home also disks,
+  service accounts, Wake-on-LAN, encrypted DNS, the nightly backup and Home's power control; on
+  hetzner the database volume and its daily dump to R2), `watchtower` and `autoheal`; on home
+  only `gpu` (NVIDIA driver and Container Toolkit), `quiet`, `beszel` (the status dashboard's
+  socket proxy) and `snowflake` (a Tor Snowflake proxy); on hetzner only `edge` (Traefik on 80
+  and 443 and its socket proxy). See [docs/host.md](docs/host.md) and
   [docs/agents.md](docs/agents.md).
-- **Stacks** (`stack/`, started by a release in this order): `database` (the shared
-  PostgreSQL), `portfolio`, `hypernova`, `tunnel` (`cloudflared`), `ai` (llama-server), `media`
-  (`home-tls`, Beszel, Garage, SFTPGo) and `home`. See [docs/stacks.md](docs/stacks.md),
+- **Stacks** (`stack/`, started by a release in this order): on hetzner `database` (the
+  portfolio's PostgreSQL) and `portfolio`, plus `edge/tls.yml` (the origin certificate and the
+  client-certificate rule for Traefik); on home `ai` (llama-server), `media` (`home-tls`,
+  Beszel, Garage, SFTPGo) and `home`. See [docs/stacks.md](docs/stacks.md),
   [docs/database.md](docs/database.md) and [docs/edge.md](docs/edge.md).
-- **Release flow.** Actions → Deploy renders a bundle from the `production` Environment's
-  secrets on the runner, joins the tailnet as an ephemeral node, and streams the bundle to the
-  `deploy` account, whose key can only run `release` or `status`. On the host `infra-apply`
-  checks the bundle (`infra-compose-guard` refuses anything outside the hardening rules), starts
-  the stacks in order and marks the release verified only when every route, the tunnel and
-  every tailnet-only binding check out. A rollback pins app images to digests; `resume` follows
+- **Release flow.** Actions → Deploy renders one host's bundle from the `production`
+  Environment's secrets on the runner, joins the tailnet as an ephemeral node, and streams the
+  bundle to that host's `deploy` account, whose key can only run `release` or `status`. On the
+  host `infra-apply` checks the bundle (`infra-compose-guard` refuses anything outside the
+  hardening rules), starts the stacks in order and marks the release verified only when every
+  check of that host passes (hetzner: the https redirect, Traefik refusing a client without
+  Cloudflare's certificate, then the site through Cloudflare; home: every tailnet-only binding
+  and `home-tls`). A rollback pins app images to digests; `resume` follows
   `:latest` again. See [docs/deploying.md](docs/deploying.md) and
   [docs/architecture.md](docs/architecture.md).
-- **Backups.** Every night `infra-backup` writes a dated, hard-linked snapshot to an external
-  USB disk: a `pg_dumpall`, the app volumes, Garage's objects, Home Files' ciphertext and the
-  films' and series' metadata (never Home's keys, the videos or the AI models), keeping about
-  two months. See [docs/operations.md](docs/operations.md#backups).
+- **Backups.** On home, every night `infra-backup` writes a dated, hard-linked snapshot to an
+  external USB disk: the app volumes, Garage's objects, Home Files' ciphertext and the films' and
+  series' metadata (never Home's keys, the videos or the AI models), keeping about two months.
+  On hetzner, `infra-pg-backup` streams a daily `pg_dump` of the portfolio's database into the
+  private R2 bucket `portfolio-backups` (30 days). See [docs/operations.md](docs/operations.md#backups)
+  and [docs/database.md](docs/database.md#backups).
 - **Quiet hours.** The server stands where people sleep, so between two wall-clock times a
   timer lowers the GPU's power limit and the CPU's top frequency, and restores both after. See
   [docs/host.md](docs/host.md#quiet-hours).
@@ -107,8 +129,8 @@ one only runs their images.
   made on the host by provisioning, never by a release. Wake-on-LAN brings it back. See
   [docs/host.md](docs/host.md#power).
 - **The down-page Worker** (`cloudflare/down-page/`, Rust on workers-rs). It passes every request
-  to the origin untouched and only replaces Cloudflare's "tunnel error" with a 503 page of its
-  own. Deployed by hand with wrangler; it has no secrets. See
+  to the origin untouched and only replaces Cloudflare's "origin unreachable" errors with a 503
+  page of its own. Deployed by hand with wrangler; it has no secrets. See
   [docs/edge.md](docs/edge.md#the-down-page).
 - **Home** (`stack/home`): `home-server` behind `home-tls` on the tailnet only: the web app at
   `/app`, Files, Media (the film and series library on the media disk, NVENC on the GPU, TMDB),
@@ -124,7 +146,8 @@ server, the same way CI does ([`.github/workflows/checks.yml`](.github/workflows
 
 ```bash
 ansible-playbook --syntax-check -i localhost, release.yml
-ansible-playbook --syntax-check -i inventory/hosts.example provision.yml
+ansible-playbook --syntax-check -i inventory/hosts.example -e infra_host=hetzner provision.yml
+ansible-playbook --syntax-check -i inventory/hosts.example -e infra_host=home provision.yml
 bash ci/release-scripts.sh       # the host's release gate, apply script and bundle build, against fakes
 bash ci/rollback-scripts.sh      # digest resolution for rollbacks
 bash ci/backup-scripts.sh        # the nightly backup
@@ -136,26 +159,30 @@ python3 ci/check_access.py --self-test
 (cd cloudflare/down-page && cargo test)
 ```
 
-Against a real host, `ansible-playbook -u admin --ask-become-pass provision.yml --check --diff`
-shows what provisioning would change.
+Against a real host, `ansible-playbook -e infra_host=<home|hetzner> -u admin --ask-become-pass
+provision.yml --check --diff` shows what provisioning would change.
 
 **A deploy** has three independent paths:
 
-1. **Provision** (`provision.yml`, from the owner's laptop over the tailnet, as `admin` with a
-   sudo password) when a role changes. It holds no app secrets.
-2. **Release** (Actions → Deploy → `release`) when a secret, a stack file or `production.yml`
-   changes. `rollback` pins images to earlier digests, `resume` undoes that, `status` reports.
+1. **Provision** (`provision.yml -e infra_host=<host>`, from the owner's laptop over the
+   tailnet, as `admin` with a sudo password) when a role changes. It holds no app secrets.
+2. **Release** (Actions → Deploy, the host, `release`) when a secret, a stack file or
+   `production.yml` changes. `rollback` pins images to earlier digests, `resume` undoes that, `status` reports.
 3. **Watchtower** on the host for routine app updates: an app repository pushes `:latest`,
    Watchtower pulls it and recreates the container.
 
-[RUNBOOK.md](RUNBOOK.md) goes from BIOS settings to the first release, and covers recovery.
+[RUNBOOK.md](RUNBOOK.md) goes from BIOS settings to the first release, covers recovery, and in
+section 15 sets up the hetzner host and moves the portfolio there.
 [docs/deploy-home.md](docs/deploy-home.md) takes a blank machine (a clean-slate reinstall) to everything live, Home included.
 
 ## Security model, in short
 
-- **No inbound port on the internet.** Public traffic arrives through the tunnel the server
-  dials out; the firewall drops new inbound connections to any Docker-published port that does
-  not arrive on the Tailscale interface ([docs/architecture.md](docs/architecture.md#no-public-ports)).
+- **No inbound port on the internet but Cloudflare's.** The home server has none at all; the
+  hetzner host admits 80 and 443 from Cloudflare's ranges alone (the Hetzner Cloud Firewall, ufw
+  and the `DOCKER-USER` chain) and requires Cloudflare's client certificate on 443
+  ([docs/edge.md](docs/edge.md)). Elsewhere the firewall drops new inbound connections to any
+  Docker-published port that does not arrive on the Tailscale interface
+  ([docs/architecture.md](docs/architecture.md#no-public-ports)).
 - **SSH over Tailscale only**, keys only, no root login, host keys checked everywhere
   ([docs/host.md](docs/host.md#ssh-tailscale-only)).
 - **Three ways in, nothing else:** `admin` (the owner, sudo with a password), `deploy` (CI, a
@@ -164,7 +191,7 @@ shows what provisioning would change.
   power off or reboot.
 - **Secrets live only in the GitHub `production` Environment**, are rendered on the runner and
   land in root-owned env files read by one container each; provisioning holds none.
-- **The compose guard** refuses any stack that publishes an unexpected port, joins an
+- **The compose guard** refuses any release stack that publishes an unexpected port, joins an
   unexpected network, mounts an unexpected path, runs privileged or skips the hardening
   (read-only root, dropped capabilities, `no-new-privileges`, memory limits).
 - Home Files' data is end-to-end encrypted by the clients; the server and its backups only see
@@ -176,7 +203,7 @@ Reporting a problem: [SECURITY.md](SECURITY.md).
 ## What is specific to this setup
 
 **The owner's own values** (change them to reuse anything): the domains (`arbikullakshi.com`
-and its subdomains), the contact address, the GHCR image repositories, the host's tailnet name,
+and its subdomains), the contact address, the GHCR image repositories, the hosts' tailnet names,
 disk UUIDs, NIC name, GPU model and driver branch, time zone and quiet hours, the uids, and the
 deploy public key. They live in [`production.yml`](production.yml),
 [`roles/common/files/deploy_key.pub`](roles/common/files/deploy_key.pub), the gitignored
@@ -184,7 +211,8 @@ deploy public key. They live in [`production.yml`](production.yml),
 [docs/variables.md](docs/variables.md) lists every one with an example value, and
 [`production.example.yml`](production.example.yml) is a copy with example values.
 
-**Reusable as patterns:** the tunnel-only edge and its verification, the forced-command
+**Reusable as patterns:** the Cloudflare-only origin (Origin CA certificate, Authenticated Origin
+Pulls, firewall from Cloudflare's published ranges) and its verification, the forced-command
 release gate with a deterministic bundle, digest-pinned rollback and resume, the compose guard,
 the tailnet-only port binding checks, the nightly hard-link snapshots, quiet hours, the signed
 power-request file, the down-page Worker, and the CI harnesses that test all of it against
@@ -193,83 +221,91 @@ fakes.
 **Not in the repository:** secrets, `inventory/hosts`, and the owner's private planning and
 audit notes (some comments cite them as `plans/NNN`).
 
-## In detail: the single deployer
+## In detail: one deployer, two hosts
 
-The **one** repo that configures the server: a dedicated PC on the owner's home LAN, running
-Ubuntu Server 26.04 LTS, with no port open to the internet. The public reaches the sites only
-through a **Cloudflare Tunnel** the server dials out to; SSH works only over **Tailscale**. It
-provisions the host, runs the edge Traefik proxy and the autonomous agents, and releases every
-stack: the shared `database`, two applications, `portfolio` and `hypernova`, the `tunnel`, and
-for the owner alone, over the tailnet only, `ai` (llama-server on the GPU, the engine of Home's
-AI), `media`
-(the Beszel status dashboard, Garage S3 storage with the SFTPGo file manager on top, and
-`home-tls`, which serves each at its own https name under `home.arbikullakshi.com` on the
-tailnet) and `home` (Home, the owner's own app, at `https://home.arbikullakshi.com/`). It also
-mounts the media and backup disks and backs up every night.
+The **one** repo that configures both servers. Each provisioning run and each release names its
+host (`infra_host`: the inventory group, `production.yml`'s `infra_hosts`, the Deploy
+workflow's `host` input), and a release bundle holds only that host's stacks. There is no other
+orchestration: the two hosts share nothing at run time.
 
-The app repos (`hypernova`, `portfolio`, `home`) are **build-only** — their CI builds images and
-pushes them to GHCR. They never deploy. Watchtower on the server pulls a new `:latest` and
-recreates the container.
+- **home**: a dedicated PC on the owner's home LAN, running Ubuntu Server 26.04 LTS, with no port
+  open to the internet and only Home and what Home needs: `ai` (llama-server on the GPU, the
+  engine of Home's AI), `media` (the Beszel status dashboard, Garage S3 storage with the SFTPGo
+  file manager on top, and `home-tls`, which serves each at its own https name under
+  `home.arbikullakshi.com` on the tailnet) and `home` (Home, the owner's own app, at
+  `https://home.arbikullakshi.com/`). It also mounts the media and backup disks and backs up every
+  night.
+- **hetzner**: a Hetzner Cloud CAX server (Arm64, Nuremberg, Ubuntu 26.04 LTS arm64) running the
+  public portfolio (`portfolio`, its media in R2), its PostgreSQL (`database`, dumped to R2 daily)
+  and the edge Traefik, which publishes 80 and 443 to Cloudflare alone.
+
+SSH to either works only over **Tailscale**. The app repos (`portfolio`, `home`) are
+**build-only**: their CI builds images and pushes them to GHCR. They never deploy. Watchtower on
+each server pulls a new `:latest` and recreates the container.
 
 ```
-visitors ──HTTPS──▶ Cloudflare ◀══ tunnel (outbound) ══ cloudflared ─▶ Traefik :80 ─▶ portfolio · hypernova ─▶ PostgreSQL
-                                                        └──────────── home server, no open port ────────────┘
-hypernova ─┐  build :latest → GHCR ┐   Watchtower (on the server) sees the new
-portfolio ─┘  build :latest → GHCR ┘   digest → docker pull + recreate container
+visitors ──HTTPS──▶ Cloudflare ──HTTPS + client cert──▶ :443 Traefik ─▶ portfolio ─▶ PostgreSQL ──daily dump──▶ R2
+                        │                               └──── hetzner host: 80/443 from Cloudflare only ────┘
+                        └──── media.arbikullakshi.com ───────────────────────────────▶ R2 (the portfolio's media)
+
+owner's devices ──tailnet HTTPS──▶ home-tls ─▶ Home · status · S3 · files        (home server, no open port)
+
+portfolio ─┐  build :latest → GHCR ┐   Watchtower (on each server) sees the new
+home ──────┘  build :latest → GHCR ┘   digest → docker pull + recreate container
           ▲
-          │ provision.yml (owner's laptop)  ·  release bundle (Deploy workflow)
-        infra (this repo) — the only thing that SSHes to the box, over Tailscale only
+          │ provision.yml -e infra_host=… (owner's laptop)  ·  release bundle (Deploy workflow, host input)
+        infra (this repo) — the only thing that SSHes to the servers, over Tailscale only
 ```
 
 ## How it deploys
 
-- **Provisioning** — `provision.yml`, from the owner's laptop, as `admin` with a sudo
-  password, over the tailnet. Packages, firewall, accounts, sshd, Tailscale, Docker, the
-  NVIDIA driver and Container Toolkit, power settings, the edge proxy (no published port), Watchtower, autoheal and Beszel's socket proxy. No secrets. The very
-  first run bootstraps a fresh Ubuntu install over the LAN as the installer's account
-  ([RUNBOOK.md](RUNBOOK.md#5-first-provision-over-the-lan)).
+- **Provisioning**: `provision.yml -e infra_host=home|hetzner`, from the owner's laptop, as
+  `admin` with a sudo password, over the tailnet. Packages, firewall, accounts, sshd, Tailscale,
+  Docker, Watchtower and autoheal on both; the NVIDIA driver and Container Toolkit, power
+  settings and Beszel's socket proxy on home; the public Traefik on hetzner. No secrets. The very
+  first run of each bootstraps a fresh Ubuntu install, over the LAN (home,
+  [RUNBOOK.md](RUNBOOK.md#5-first-provision-over-the-lan)) or the public address (hetzner,
+  [RUNBOOK.md](RUNBOOK.md#15-hetzner-host)).
 
   ```bash
   cp inventory/hosts.example inventory/hosts
-  ansible-playbook -u admin --ask-become-pass provision.yml
+  ansible-playbook -e infra_host=hetzner -u admin --ask-become-pass provision.yml
   ```
 
-- **Releases** — GitHub → **Actions → "Deploy" → Run workflow** (`release`, `resume`,
-  `rollback`, `status`). The runner renders a bundle from the `production` Environment and
-  streams it to the `deploy` account, whose one key is forced to `release` or `status`. The
-  host checks the bundle, starts `database`, `portfolio`, `hypernova`, `tunnel`, `ai`,
-  `media` and `home` in that order, and marks the release verified only when everything is healthy, Traefik routes
-  every domain to its app, the tunnel is connected and each tailnet-only port is bound to the
-  Tailscale address alone. Run one when a secret (the Cloudflare Tunnel
-  token included) or a stack file changes — not for routine image updates.
-- **Watchtower** — on the host, with no login: follows `:latest` for the app containers.
+- **Releases**: GitHub → **Actions → "Deploy" → Run workflow** (host `hetzner` or `home`;
+  `release`, `resume`, `rollback`, `status`). The runner renders that host's bundle from the
+  `production` Environment and streams it to the host's `deploy` account, whose one key is forced
+  to `release` or `status`. The host checks the bundle, starts its stacks in order (hetzner:
+  `database`, then `portfolio`; home: `ai`, `media`, `home`), and marks the release verified only
+  when everything is healthy and that host's checks pass. Run one when a secret or a stack file
+  changes, not for routine image updates.
+- **Watchtower**: on each host, with no login: follows `:latest` for the app containers.
   A rollback pins digests, which pauses it for those apps until `resume`.
 
 Three access paths, and nothing else: `admin` (owner, sudo with a password), `deploy` (CI,
 forced to `release|status`), and Watchtower (no login, Docker through a socket proxy). Besides
-them, Home may ask the host for a poweroff or reboot with one signed file, nothing else
-([docs/host.md](docs/host.md#power-requests-from-home)).
-Inbound ports (other than SSH and the owner's tailnet-only ports, on the Tailscale address),
-password login and root login are off; host keys are checked everywhere.
+them, Home may ask the home server for a poweroff or reboot with one signed file, nothing else
+([docs/host.md](docs/host.md#power-requests-from-home)). Password login and root login are off
+and host keys are checked everywhere.
 
 ## Layout
 
 ```
-production.yml         facts about the host: tailnet name, Ubuntu release, Docker major, domains, image repos
-provision.yml          the host: owner's laptop, over the LAN once, then over Tailscale
-release.yml            renders the release bundle on the runner; build-bundle.sh packs it
+production.yml         facts about both hosts: infra_hosts (tailnet names, stacks), Ubuntu release, Docker major, domains, image repos, Cloudflare's ranges
+provision.yml          one host (-e infra_host=home|hetzner): owner's laptop, over the LAN or public address once, then over Tailscale
+release.yml            renders one host's release bundle on the runner; build-bundle.sh --host packs it
 build-bundle.sh        deterministic bundle + manifest; refuses unpinned third-party images
 release-images.sh      turns rollback targets into digest pins
 ansible.cfg            auto-loaded; points at inventory/hosts, checks host keys
-inventory/             hosts.example only — inventory/hosts is gitignored
+inventory/             hosts.example only ([home] and [hetzner]); inventory/hosts is gitignored
 roles/                 common · tailscale · docker · gpu · host · quiet · edge · watchtower · autoheal · beszel · snowflake
 roles/common/files/    infra-deploy-gate · infra-apply · infra-compose-guard (the host side of a release)
-stack/                 database · portfolio · hypernova · tunnel · ai · media · home (compose files and env templates)
-tasks/                 placeholder-guards · provision-checks · ssh-route
+stack/                 hetzner: database · portfolio · edge (tls.yml, the origin-pull CA); home: ai · media · home
+tasks/                 placeholder-guards · provision-checks · ssh-route · cloudflare-ips
 ci/                    the release path, verify tasks and access/template rules, tested against fakes
 .github/workflows/     deploy.yml, the Deploy workflow; checks.yml, the deploy lint
-RUNBOOK.md             BIOS to first release, DNS switch-over, releases, rollback, recovery, GPU, AI, media, disks, restore
-docs/deploy-home.md    the owner's clean-slate reinstall: a blank machine to everything live
+RUNBOOK.md             BIOS to first release, releases, rollback, recovery, GPU, AI, media, disks, restore, the hetzner host and the move
+docs/deploy-home.md    the owner's clean-slate reinstall of the home server: a blank machine to everything live
 docs/                  why any of it is the way it is
 cloudflare/down-page/  the "server is down" Worker (Rust, workers-rs), deployed by hand with wrangler
 production.example.yml production.yml with example values (read by nothing; for forks)
@@ -281,12 +317,12 @@ SECURITY.md            how to report a problem
 [RUNBOOK.md](RUNBOOK.md) says what to do, in order. The code says what happens.
 [`docs/`](docs/README.md) says why, and what breaks if you change it.
 
-- [architecture.md](docs/architecture.md) — the home server and the tunnel, access paths, stacks and their order, releases, env files, networks, public vs tailnet-only, no public ports
-- [deploy-home.md](docs/deploy-home.md) — **a clean-slate reinstall**: the OS, BIOS, provisioning, Tailscale, the secrets, the AI models, the release, Home's setup, the first-run checks, restoring old backups, the down page, rollback
+- [architecture.md](docs/architecture.md) — the two hosts, access paths, stacks and their order, releases, env files, networks, public vs tailnet-only, no public ports
+- [deploy-home.md](docs/deploy-home.md) — **a clean-slate reinstall of the home server**: the OS, BIOS, provisioning, Tailscale, the secrets, the AI models, the release, Home's setup, the first-run checks, restoring old backups, the down page, rollback
 - [deploying.md](docs/deploying.md) — the Deploy workflow, every secret and variable, what the host checks, provisioning tags, adding a project
-- [database.md](docs/database.md) — the shared PostgreSQL
+- [database.md](docs/database.md) — the portfolio's PostgreSQL on the hetzner host and its daily dump to R2
 - [stacks.md](docs/stacks.md) — what is peculiar about each application, the tailnet-only `ai`, `media` and `home` stacks, and the apps retired on 2026-10-20
-- [edge.md](docs/edge.md) — the Cloudflare Tunnel, Traefik, its socket proxy, client IPs, routing conventions, the "server is down" Worker
+- [edge.md](docs/edge.md) — Cloudflare in front of the hetzner host's Traefik: Full (strict), the Origin CA certificate, Authenticated Origin Pulls, the Cloudflare-only firewall, client IPs, routing, the "server is down" Worker
 - [host.md](docs/host.md) — Tailscale-only SSH, accounts and the LAN bootstrap, sshd, firewall, fail2ban, patching, power and Wake-on-LAN, quiet hours, encrypted DNS, Docker, the GPU, the disks
 - [agents.md](docs/agents.md) — Watchtower, autoheal, Beszel's socket proxy, the prune timer, re-pinning images
 - [operations.md](docs/operations.md) — short recipes outside the runbook, the nightly backup

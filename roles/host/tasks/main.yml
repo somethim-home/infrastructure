@@ -1,8 +1,9 @@
 ---
 # Host facts for the release script, the Docker firewall, swap, power (a home
-# server must never sleep, and wakes on a magic packet), the shared Docker networks and database volume
-# every stack uses as external, and the service accounts and volumes of the
-# hardened stacks.
+# server must never sleep, and wakes on a magic packet), the shared Docker
+# networks every stack uses as external, and per host: on home the service
+# accounts, volumes, disks, power requests and nightly backup of Home's
+# stacks; on hetzner the database volume and its daily dump to R2.
 - name: Create the host configuration directory
   ansible.builtin.file:
     path: /etc/infra
@@ -56,17 +57,20 @@
   ansible.builtin.copy:
     dest: /etc/infra/host.env
     content: |
+      INFRA_HOST={{ infra_host }}
       PUBLIC_INTERFACE={{ ansible_facts['default_ipv4']['interface'] }}
       PUBLIC_PORTS={{ public_ports | join(',') }}
+      PUBLIC_SOURCES={{ cloudflare_ips | default([]) | reject('search', ':') | join(',') if public_ports | length > 0 else '' }}
       TAILNET_INTERFACE={{ tailnet_interface }}
       TAILSCALE_IP={{ tailscale_ipv4 }}
+      {% if infra_host == 'home' %}
       AI_USER={{ ai_uid }}:{{ ai_gid }}
       MEDIA_USER={{ media_uid }}:{{ media_gid }}
       HOME_USER={{ home_uid }}:{{ home_gid }}
-      PORTFOLIO_IMAGE_REPO={{ portfolio_image_repo }}
-      HYPERNOVA_PROVIDER_IMAGE_REPO={{ hypernova_provider_image_repo }}
-      HYPERNOVA_WEB_IMAGE_REPO={{ hypernova_web_image_repo }}
       HOME_IMAGE_REPO={{ home_image_repo }}
+      {% else %}
+      PORTFOLIO_IMAGE_REPO={{ portfolio_image_repo }}
+      {% endif %}
     owner: root
     group: root
     mode: "0644"
@@ -102,10 +106,10 @@
   changed_when: false
   check_mode: false
 
-- name: Require the LAN-facing interface to reach only this host's public ports (none)
+- name: Require the public interface to reach only this host's public ports (none on home)
   ansible.builtin.assert:
     that:
-      - public_rules.stdout_lines | select('search', '-j RETURN$') | map('regex_replace', '^.*--ctorigdstport ([0-9]+) -j RETURN$', '\\1') | list == public_ports | map('string') | list
+      - public_rules.stdout_lines | select('search', '-j RETURN$') | map('regex_replace', '^.*--ctorigdstport ([0-9]+) -j RETURN$', '\\1') | unique | list == public_ports | map('string') | list
       - "'-A INFRA-PUBLIC -j DROP' in public_rules.stdout_lines"
     fail_msg: "INFRA-PUBLIC does not admit exactly {{ public_ports }}: {{ public_rules.stdout_lines }}"
     quiet: true
@@ -118,44 +122,30 @@
 
 - name: Let a magic packet on the LAN switch the server on
   ansible.builtin.import_tasks: wake.yml
+  when: infra_host == 'home'
 
 # After wake.yml, which finds netplan's definition of the LAN interface.
 - name: Resolve names over TLS, never through the ISP's resolver
   ansible.builtin.import_tasks: dns.yml
+  when: infra_host == 'home'
 
 # Moved here from roles/edge so they exist before any stack or the edge starts.
-# home-llm is internal (no route out) and joins only llama-server and
-# home-server; media carries the links page, the status
+# hetzner: edge (Traefik and the portfolio) and data (the portfolio and its
+# database). home: home-llm is internal (no route out) and joins only
+# llama-server and home-server; media carries the links page, the status
 # dashboard, S3, the file manager and Home, and their ports.
 - name: Create shared Docker networks
   ansible.builtin.shell: "docker network inspect {{ item.name }} >/dev/null 2>&1 || docker network create {{ '--internal ' if item.internal else '' }}{{ item.name }}"
-  loop:
-    - { name: edge, internal: false }
-    - { name: data, internal: false }
-    - { name: home-llm, internal: true }
-    - { name: media, internal: false }
+  loop: "{{ host_networks[infra_host] }}"
   loop_control:
     label: "{{ item.name }}"
   register: network_create
   changed_when: "network_create.stdout | length > 0"
 
-# The immich network belonged to the photo library retired on 2026-10-20.
-- name: Remove the retired immich network once nothing is attached to it
-  ansible.builtin.shell: |
-    set -eu
-    docker network inspect immich >/dev/null 2>&1 || exit 0
-    if [ -n "$(docker network inspect --format '{{ '{{' }}range .Containers{{ '}}' }}x{{ '{{' }}end{{ '}}' }}' immich)" ]; then
-      echo "immich still has containers attached; release first so they are removed"
-      exit 0
-    fi
-    docker network rm immich >/dev/null && echo removed
-  register: immich_network
-  changed_when: "'removed' in immich_network.stdout"
-
 - name: Read whether home-llm is internal
   ansible.builtin.command:
     argv: [docker, network, inspect, --format, "{{ '{{' }}.Internal{{ '}}' }}", "{{ item }}"]
-  loop: [home-llm]
+  loop: "{{ ['home-llm'] if infra_host == 'home' else [] }}"
   register: internal_networks
   changed_when: false
   check_mode: false
@@ -180,24 +170,37 @@
   failed_when: false
   changed_when: false
   check_mode: false
+  when: infra_host == 'hetzner'
 
 - name: Create the database volume
   ansible.builtin.command:
     argv: [docker, volume, create, pgdata-v18]
-  when: pgdata_volume.rc != 0
+  when: infra_host == 'hetzner' and pgdata_volume.rc != 0
   changed_when: true
+
+- name: Dump the portfolio database to R2 every day
+  ansible.builtin.import_tasks: pg_backup.yml
+  when: infra_host == 'hetzner'
 
 - name: Create the service accounts and their volumes
   ansible.builtin.import_tasks: accounts.yml
+  when: infra_host == 'home'
 
 - name: Mount the library and backup disks
   ansible.builtin.import_tasks: disks.yml
+  when: infra_host == 'home'
 
 - name: Let Home ask for a poweroff or reboot
   ansible.builtin.import_tasks: home_power.yml
+  when: infra_host == 'home'
 
 - name: Back up to the backup disk every night
   ansible.builtin.import_tasks: backup.yml
+  when: infra_host == 'home'
 
-- name: Verify the Docker firewall, swap, power, Wake-on-LAN, power request and encrypted DNS settings
+- name: Verify the Docker firewall, swap and power settings
   ansible.builtin.import_tasks: verify.yml
+
+- name: Verify Wake-on-LAN, the power request and encrypted DNS settings
+  ansible.builtin.import_tasks: verify_home.yml
+  when: infra_host == 'home'

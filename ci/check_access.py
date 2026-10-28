@@ -16,13 +16,15 @@ Rules (each problem is printed as a ::error:: line):
   4. 10-hardening.conf.j2 renders PasswordAuthentication no, KbdInteractiveAuthentication no,
      PermitRootLogin no and ExposeAuthInfo yes; ssh_permit_root_login defaults to "no";
      ssh_access.yml removes 50-cloud-init.conf and asserts the policy sshd -T reports.
-  5. ufw_allowed is exactly SSH and the tailnet-only ports on tailscale0 (no web port: the public
-     arrives through the Cloudflare Tunnel); the tailnet-only ports are the same in roles/host's
+  5. ufw_allowed is exactly SSH and the tailnet-only ports on tailscale0 (no web port; the hetzner
+     host's 80 and 443 are admitted only from Cloudflare's ranges, one rule per range, on hetzner alone);
+     the tailnet-only ports are the same in roles/host's
      tailnet_ports, the compose guard's TAILNET_PORTS, infra-apply's tailnet_ports and
      ci/check_templates.py's TAILNET_PORTS; firewall.yml opens LAN 22 only when ssh_outside_tailnet and deletes it only
      when not ssh_outside_tailnet; ufw_retired, whose rules firewall.yml deletes, holds only tailnet
      port rules that are not allowed (never SSH); ssh_outside_tailnet is set only by tasks/ssh-route.yml (tested in
-     ci/verify-tasks.sh), which provision-checks.yml imports; production.yml's public_ports is empty.
+     ci/verify-tasks.sh), which provision-checks.yml imports; production.yml's public_ports is empty on
+     home and only 80 and 443 on hetzner.
   6. provision.yml runs provision-checks as a pre_task and ssh_access as a post_task, and neither
      it nor anything it runs references a Deploy secret.
   7. deploy.yml refuses every ref but refs/heads/master, runs in the production Environment,
@@ -61,6 +63,9 @@ AUTHORIZED_KEY_PREFIX = f'restrict,command="{GATE}" '
 HARDENING_LINES = ("PasswordAuthentication no", "KbdInteractiveAuthentication no", "PermitRootLogin no", "ExposeAuthInfo yes")
 UFW_SSH = "in on tailscale0 proto tcp to any port 22"
 UFW_TAILNET = "in on tailscale0 proto tcp to any port {port}"
+UFW_CLOUDFLARE = "ufw allow proto tcp from {{ item }} to any port 80,443"
+CLOUDFLARE_LOOP = "{{ cloudflare_ips | default([]) if infra_host == 'hetzner' else [] }}"
+PUBLIC_PORTS = "{{ [80, 443] if infra_host == 'hetzner' else [] }}"
 DOCKER_PIN = "/etc/apt/preferences.d/docker"
 DOCKER_PINNED = {"docker-ce", "docker-ce-cli", "docker-ce-rootless-extras"}
 
@@ -257,7 +262,7 @@ def tailnet_port_lists(root: pathlib.Path) -> dict[str, list[tuple[str, int]]]:
         body = re.search(r"^TAILNET_PORTS = \{(.*?)^\}", text, re.M | re.S)
         return sorted((s, int(p)) for _, s, p in re.findall(r'\("(\w+)", "([\w-]+)"\): (\d+)', body.group(1) if body else ""))
 
-    apply_body = re.search(r"^readonly tailnet_ports=\((.*?)\)", apply, re.M | re.S)
+    apply_body = re.search(r"^\s*tailnet_ports=\((\".*?)\)", apply, re.M | re.S)
     return {
         "roles/host/defaults/main.yml tailnet_ports": sorted((str(e["container"]), int(e["port"])) for e in host.get("tailnet_ports") or []),
         "roles/common/files/infra-compose-guard TAILNET_PORTS": py_dict(guard),
@@ -287,6 +292,10 @@ def check_firewall(root: pathlib.Path) -> list[str]:
             problems.append(f"rule 5: {rel}: {command!r} must run exactly once, only when: {when}")
     for task in tasks:
         raw = str((module_args(task, "command") or {}).get("_raw", ""))
+        if raw.strip() == UFW_CLOUDFLARE:
+            if str(task.get("loop", "")).strip() != CLOUDFLARE_LOOP:
+                problems.append(f"rule 5: {rel}: {UFW_CLOUDFLARE!r} may loop only over {CLOUDFLARE_LOOP!r}")
+            continue
         if re.search(r"ufw (allow|delete allow)", raw) and raw.strip() not in ("ufw allow {{ item }}", "ufw allow 22/tcp", "ufw delete allow 22/tcp",
                                                                             "ufw delete allow {{ item }}"):
             problems.append(f"rule 5: {rel}: an extra ufw rule {raw.strip()!r}; list allowed ports in ufw_allowed")
@@ -303,8 +312,8 @@ def check_firewall(root: pathlib.Path) -> list[str]:
     imports = [module_args(t, "import_tasks") for t in tasks_in(root, "tasks/provision-checks.yml")]
     if setters != ["tasks/ssh-route.yml"] or not any(a and a.get("_raw") == "ssh-route.yml" for a in imports):
         problems.append(f"rule 5: ssh_outside_tailnet must be set only by tasks/ssh-route.yml, imported by tasks/provision-checks.yml (set by {setters})")
-    if (load_yaml(root / "production.yml") or {}).get("public_ports") != []:
-        problems.append("rule 5: production.yml: public_ports must be [] (the LAN-facing interface reaches no Docker-published port)")
+    if (load_yaml(root / "production.yml") or {}).get("public_ports") != PUBLIC_PORTS:
+        problems.append(f"rule 5: production.yml: public_ports must be {PUBLIC_PORTS!r} (no Docker-published port on home, Traefik's web ports on hetzner)")
     return problems
 
 
@@ -318,9 +327,9 @@ def extra_var_keys(workflow: dict) -> set[str]:
 # Rule 6
 def check_provision(root: pathlib.Path, workflow: dict) -> list[str]:
     problems = []
-    plays = load_yaml(root / "provision.yml") or []
+    plays = [p for p in load_yaml(root / "provision.yml") or [] if p.get("roles")]
     if len(plays) != 1:
-        return ["rule 6: provision.yml: expected exactly one play"]
+        return ["rule 6: provision.yml: expected exactly one play with roles"]
     play = plays[0]
     pre = [module_args(t, "import_tasks") for t in play.get("pre_tasks") or []]
     if not any(a and a.get("_raw") == "tasks/provision-checks.yml" for a in pre):
@@ -383,7 +392,7 @@ def provision_tasks(root: pathlib.Path) -> list[tuple[str, dict]]:
                 out.append((rel, task))
         return out
 
-    play = (load_yaml(root / "provision.yml") or [{}])[0]
+    play = next((p for p in load_yaml(root / "provision.yml") or [] if p.get("roles")), {})
     ordered: list[tuple[str, dict]] = []
     for task in play.get("pre_tasks") or []:
         inc = module_args(task, "import_tasks")
@@ -500,7 +509,9 @@ def self_test() -> None:
          "ufw_retired may hold only tailnet port rules that are not allowed"),
         ("5", "a live port deleted as a retired one", edit("roles/common/defaults/main.yml", "ufw_retired:\n", "ufw_retired:\n  - in on tailscale0 proto tcp to any port 8091\n"),
          "ufw_retired may hold only tailnet port rules that are not allowed"),
-        ("5", "a published port admitted on the LAN", edit("production.yml", "public_ports: []", "public_ports: [443]"), "public_ports must be []"),
+        ("5", "a published port admitted on the home server", edit("production.yml", "else [] }}\"\n# Cloudflare", "else [443] }}\"\n# Cloudflare"), "public_ports must be"),
+        ("5", "the web ports opened to everyone", edit("roles/common/tasks/firewall.yml", "  loop: \"{{ cloudflare_ips | default([]) if infra_host == 'hetzner' else [] }}\"", "  loop: [0.0.0.0/0]"),
+         "may loop only over"),
         ("5", "LAN 22 deleted on a run outside the tailnet", edit("roles/common/tasks/firewall.yml", "  when: not ssh_outside_tailnet\n", ""), "'ufw delete allow 22/tcp' must run exactly once"),
         ("5", "a second definition of the SSH route", append("roles/common/tasks/firewall.yml", "\n- name: Guess the route\n  ansible.builtin.set_fact:\n    ssh_outside_tailnet: false\n"),
          "ssh_outside_tailnet must be set only by tasks/ssh-route.yml"),

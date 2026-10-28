@@ -1,0 +1,35 @@
+#!/bin/bash
+# The hetzner host's daily database backup: a pg_dump of the portfolio
+# database (custom format, compressed), streamed into the private R2 bucket
+# portfolio-backups as portfolio-<UTC time>.dump. A lifecycle rule on the
+# bucket, set in Cloudflare, deletes dumps after 30 days. The R2 key comes from
+# the current release's database/backup.env (root-only), which only the
+# rclone container reads. Restore: RUNBOOK.md, "Hetzner host". Installed by
+# roles/host (pg_backup.yml), run by infra-pg-backup.timer. Never prints a
+# secret.
+set -euo pipefail
+
+readonly env_file="${INFRA_PG_BACKUP_ENV:-/opt/infra/current/database/backup.env}"
+# Multi-arch index (linux/amd64 and linux/arm64). Re-pin like the stacks' images
+# (RUNBOOK.md, "Re-pinning third-party images").
+readonly rclone_image=rclone/rclone:1.71.2@sha256:3103526c506266a9ecdf064efe99bf3677d92ef6407af124d8c56b4f49cbaa51
+readonly bucket=portfolio-backups
+
+fail() {
+  printf 'infra-pg-backup: FAILED: %s\n' "$*" >&2
+  exit 1
+}
+
+[ -r "$env_file" ] || fail "$env_file does not exist; release the hetzner host first"
+[ "$(docker container inspect --format '{{.State.Running}}' postgresql 2>/dev/null || true)" = true ] ||
+  fail "the postgresql container is not running"
+
+name="portfolio-$(date -u +%Y%m%dT%H%M%SZ).dump"
+# pipefail fails the run when pg_dump does; the partial object it leaves is
+# named like a good one, so the log says which run failed.
+docker exec postgresql pg_dump --format=custom --username=postgres --dbname=portfolio |
+  docker run --rm -i --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+    --memory 128m --env-file "$env_file" "$rclone_image" \
+    rcat --s3-no-check-bucket ":s3:$bucket/$name" ||
+  fail "dumping the portfolio database to R2 as $name failed; journalctl -u infra-pg-backup shows why"
+printf 'infra-pg-backup: portfolio database dumped to %s/%s\n' "$bucket" "$name"

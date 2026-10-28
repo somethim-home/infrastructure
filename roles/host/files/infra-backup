@@ -6,10 +6,6 @@
 # one dated snapshot:
 #
 #   snapshots/<date>/postgres.sql.gz   pg_dumpall of the shared PostgreSQL, 0600
-#   snapshots/<date>/immich.sql.gz     pg_dumpall of Immich's own PostgreSQL (immich-postgres),
-#                                      0600, only while it runs (Immich is retired since
-#                                      2026-10-20: its stopped data folder is copied instead,
-#                                      as the volume immich-pgdata)
 #   snapshots/<date>/volumes/<volume>/ the apps' own data volumes (below); Beszel, Garage,
 #                                      SFTPGo and Home are each stopped only while their own are copied
 #                                      (SQLite must not change mid-copy) and started right after.
@@ -26,8 +22,7 @@
 #   snapshots/<date>/media/{movies,shows}/  the film and series library's metadata only: the .nfo
 #                                      files, pictures and subtitle files Home and the owner keep next
 #                                      to the videos; never the videos themselves (they would not fit)
-#   snapshots/<date>/media/<name>/     /srv/media/{audiobooks,books,podcasts,photos}; photos
-#                                      without Immich's thumbs and encoded-video (it rebuilds them)
+#   snapshots/<date>/media/<name>/     /srv/media/{audiobooks,books,podcasts}
 #   snapshots/latest                   symlink to the newest complete snapshot
 #
 # Every tree is copied with rsync --link-dest against the previous complete
@@ -78,9 +73,7 @@ readonly app_volumes=(
   "audiobookshelf-metadata cache logs streams"
   "kavita-config cache temp logs"
   "open-webui-data cache"
-  "immich-pgdata"
   "portfolio-media"
-  "hypernova_prizm-storage"
 )
 # <container> <volume or media/<folder>>...: the container is stopped only while
 # these are copied. Garage's objects (media/s3) must match its metadata copy,
@@ -96,7 +89,7 @@ declare -rA volume_excludes=(
   [home-data]="media-cache books/catalog-covers books/.tmp"
 )
 # <folder> [<path inside it to leave out>...]
-readonly mirrored=(audiobooks books podcasts "photos thumbs encoded-video")
+readonly mirrored=(audiobooks books podcasts)
 # The film and series library: only what describes the videos (Home's .nfo
 # files, posters, fanart, stills, subtitle files), never the videos, and not
 # Home's uploads in progress (.home-uploads).
@@ -232,19 +225,14 @@ dump() {
   fi
 }
 
+# The portfolio's PostgreSQL moved to the hetzner host (its own daily dump to
+# R2); dumped here only while the old container still runs on this host.
 backup_postgres() {
-  dump postgresql postgres.sql.gz PostgreSQL
-}
-
-# Immich kept its own database (not the shared one). Dumped only while it runs;
-# since its retirement the stopped data folder is copied as the volume
-# immich-pgdata instead. A dump that fails while it runs fails the backup.
-backup_immich() {
-  if [ "$(docker container inspect --format '{{.State.Running}}' immich-postgres 2>/dev/null || true)" != true ]; then
-    log "immich-postgres is not running (Immich is retired); its data folder is copied as the volume immich-pgdata"
+  if [ "$(docker container inspect --format '{{.State.Running}}' postgresql 2>/dev/null || true)" != true ]; then
+    log "postgresql is not running here (the portfolio's database is on the hetzner host); no dump"
     return 0
   fi
-  dump immich-postgres immich.sql.gz "Immich's database" --clean --if-exists
+  dump postgresql postgres.sql.gz PostgreSQL
 }
 
 # copy_tree <source> <target> <link-dest or empty> [<path to leave out>...]
@@ -398,7 +386,6 @@ base="$(complete_snapshots | tail -n 1)"
 private_dir "$partial"
 
 backup_postgres
-backup_immich
 backup_apps
 mirror_media
 mirror_metadata

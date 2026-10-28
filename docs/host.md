@@ -1,12 +1,21 @@
 # The host
 
-A dedicated PC at the owner's home running Ubuntu Server (`ubuntu_release` in
-`production.yml`, 26.04 LTS `resolute`), wired to a consumer router on the home LAN, with a
-dynamic public IP that nothing depends on. Nothing on it is reachable from the internet: the
-public arrives through the Cloudflare Tunnel, which dials out ([edge.md](edge.md)), and SSH
-only over the tailnet. Everything below is provisioning: `roles/common`, `roles/tailscale`,
-`roles/docker`, `roles/gpu`, `roles/host` and `roles/quiet`, run from the owner's laptop with
-`provision.yml`.
+Two hosts, both on Ubuntu Server (`ubuntu_release` in `production.yml`, 26.04 LTS
+`resolute`), both provisioned from the owner's laptop with `provision.yml -e
+infra_host=home|hetzner`, SSH on both only over the tailnet:
+
+- **home**, a dedicated PC at the owner's home, wired to a consumer router on the home LAN, with
+  a dynamic public IP that nothing depends on. Nothing on it is reachable from the internet.
+  Most of this page (the GPU, quiet hours, power, Wake-on-LAN, encrypted DNS, the disks) is
+  about it.
+- **hetzner**, a Hetzner Cloud CAX server (Arm64, Nuremberg). It publishes 80 and 443 to
+  Cloudflare's ranges alone ([edge.md](edge.md)); `roles/gpu`, `roles/quiet`, `roles/beszel`,
+  `roles/snowflake` and the home-only parts of `roles/host` (accounts, disks, Wake-on-LAN,
+  encrypted DNS, power requests, the nightly backup) do not run there. Docker and Tailscale come
+  from their apt repositories, which carry arm64 for `resolute`.
+
+Everything below is provisioning: `roles/common`, `roles/tailscale`, `roles/docker`,
+`roles/gpu`, `roles/host` and `roles/quiet`.
 
 ## SSH: Tailscale only
 
@@ -92,8 +101,12 @@ through neither sshd nor the tailnet, and takes `admin`'s password.
 
 ufw denies inbound by default and allows only **22 and the tailnet-only ports (80, 443, 3900,
 8090, 8091) on `tailscale0`** (`ufw_allowed`). The rules for the ports of the apps retired on
-2026-10-20 (2283, 5000, 8080, 8096, 13378) are deleted on every run (`ufw_retired`). There is no public web port (80 and 443 are the tailnet-only redirect page and `home-tls`, which serves Home and every tailnet service's https name; Home itself publishes no port): the Cloudflare Tunnel is an outbound
-connection. Outbound is unrestricted (image pulls,
+2026-10-20 (2283, 5000, 8080, 8096, 13378) are deleted on every run (`ufw_retired`). The home server has
+no public web port (80 and 443 are the tailnet-only redirect page and `home-tls`, which serves
+Home and every tailnet service's https name; Home itself publishes no port). The hetzner host
+also admits 80 and 443 from each of Cloudflare's ranges (one ufw rule per range, for IPv6
+through `docker-proxy`), and `infra-firewall` admits them to Traefik in `DOCKER-USER` from the
+IPv4 ranges alone ([edge.md](edge.md#only-cloudflare-reaches-traefik)). Outbound is unrestricted (image pulls,
 Cloudflare, Resend, Tailscale, NTP, and for Home: TMDB's `api.themoviedb.org` and
 `image.tmdb.org`, Wikidata, and `www.gutenberg.org` for Books, all https on 443, from
 `home-server` on the `media` bridge; DNS-over-TLS on 853 from the host). The router forwards no port to the host, so even LAN 22
@@ -163,7 +176,7 @@ an empty volume the first time it is mounted.
 | Disk | Mounted at | `production.yml` | Holds |
 | --- | --- | --- | --- |
 | 225 GB SSD | `/` | — | Ubuntu, Docker's data root (images, every volume: PostgreSQL, app configs, Home's AI models), swap |
-| 1 TB internal HDD | `/srv/media` | `media_disk_uuid` | Garage's objects (`s3`), Home Files' ciphertext (`home-files`, at most `home_files_capacity` of it), Home's film and series library (`movies`, `shows`), and the retired apps' library folders, kept: `audiobooks`, `podcasts`, `books`, `photos` |
+| 1 TB internal HDD | `/srv/media` | `media_disk_uuid` | Garage's objects (`s3`), Home Files' ciphertext (`home-files`, at most `home_files_capacity` of it), Home's film and series library (`movies`, `shows`), and the retired apps' library folders, kept: `audiobooks`, `podcasts`, `books` |
 | 1 TB external USB HDD | `/srv/backup` | `backup_disk_uuid` | the nightly backup ([operations.md](operations.md#backups)) |
 
 `roles/host/tasks/disks.yml` mounts each HDD by its **filesystem UUID** (never `/dev/sdX`,
@@ -181,7 +194,7 @@ that bind-mount a folder there, which then does not exist, fail to start rather 
 the SSD, and the backup cannot fill the SSD. A drop-in orders Docker after
 `srv-media.mount` at boot. Provisioning reads back which filesystem is mounted where, and
 creates the library folders as `media:media`, mode `2775` (setgid, group-writable: what
-`admin` copies in stays in the `media` group), `s3` and `photos` as the media account's alone
+`admin` copies in stays in the `media` group), `s3` as the media account's alone
 (`0700`), `home-files` as the `home-server` account's alone (`0700`), and the backup folders as `root`, `0700`. It
 refuses to mount over a mountpoint that has files of its own (they would vanish under the
 disk) and names the fix. Formatting and finding the UUIDs is in
@@ -209,14 +222,13 @@ disk while the old kernel keeps running.
 `production.yml`), including when someone is logged in — an SSH session left open is
 otherwise enough to defer a kernel patch indefinitely. The clock is kept on UTC, the clock that
 time is read in (04:00 UTC is 05:00 or 06:00 in Central Europe). The reboot takes every site
-down for about a minute; the containers and the tunnel come back by themselves
+down for about a minute; the containers come back by themselves
 (`restart: always`).
 
 ## Time
 
 `chrony` keeps the clock in sync (Ubuntu's default time daemon since 25.10; installing it
-replaces `systemd-timesyncd`). TLS to Cloudflare, the tunnel's authentication and TOTP all
-need a correct clock.
+replaces `systemd-timesyncd`). TLS to Cloudflare and TOTP both need a correct clock.
 
 ## Power
 
@@ -231,8 +243,8 @@ A home server must stay on. `roles/host/tasks/power.yml`:
 
 Coming back after a power cut is a firmware setting ("Restore on AC power loss: Power On",
 on this Gigabyte board **AC BACK → Always On**), which provisioning cannot make
-([RUNBOOK.md](../RUNBOOK.md#2-bios)). After a reboot, Docker, the stacks, Tailscale and the
-tunnel all start by themselves.
+([RUNBOOK.md](../RUNBOOK.md#2-bios)). After a reboot, Docker, the stacks and Tailscale all
+start by themselves.
 
 ### Wake-on-LAN
 

@@ -3,35 +3,18 @@
 What is peculiar about each one. The mechanics they share are in
 [architecture.md](architecture.md).
 
-## hypernova
-
-One hostname serves both halves: the web app at `/` and the provider's API at `/api`,
-split by router priority with a `stripprefix` middleware. See [edge.md](edge.md#priorities).
-
-The provider connects to PostgreSQL with its own `prizm` role. The role name predates the
-stack name — `prizm-lodge` was the original project — which is why the container names
-(`prizm-provider`, `prizm-web`), the database, and the role all say `prizm` while the stack
-says `hypernova`. Its secrets are in `provider.env`; `prizm-web` has none, and starts only
-once the provider reports healthy.
-
-Its AI features (the chat assistant and intake extraction) are **off**: `provider.env` sets
-`AI_DISABLED=true` and no `OLLAMA_*`. The provider speaks Ollama's API, and Ollama is no longer
-on the server; llama-server, the only AI engine, is on `home-llm` for Home alone. With AI off the
-chat answers with a notice and intake skips extraction; nothing else changes. The provider joins
-`data` and `edge` only.
-
-Its only image tag is `:latest`, so a rollback names a digest (see
-[RUNBOOK.md](../RUNBOOK.md#releases-status-rollback-resume)).
-
 ## portfolio
 
-A Rust/Leptos server rather than a static site, so it carries state the other stacks do
-not.
+On the **hetzner host** (Arm64; the image is built for arm64 and amd64), with the `database`
+stack. A Rust/Leptos server rather than a static site.
 
-**The `portfolio-media` volume** holds uploads and the previews generated beside them. It
-is the only application state outside PostgreSQL, and the `media` table is a ledger of
-what is on it — the two must be backed up and restored together. See
-[operations.md](operations.md#backups).
+**Its media is in Cloudflare R2**, not on the server: `portfolio.env` carries the account
+(`R2_ACCOUNT_ID`), the portfolio's own key (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`), the two
+buckets (`R2_PUBLIC_BUCKET`, `R2_PRIVATE_BUCKET`) and the public base URL (`MEDIA_PUBLIC_BASE`,
+`https://media.arbikullakshi.com`, the public bucket's custom domain); how it uses them is the
+portfolio's plan 011. The stack has no volume. The database is the host's only state, dumped
+to R2 every day ([database.md](database.md#backups)). The old `portfolio-media` volume of the
+home server was not migrated: the portfolio started on the hetzner host empty (2026-10-28).
 
 **A 180-second healthcheck grace.** The image carries the same probe, but before the
 server starts, the entrypoint runs `/app/portfolio-seed migrate` (schema plus the
@@ -55,10 +38,10 @@ and every enrolled credential stops working — there is no migration path, only
 re-enrolment. It is also the base for links in outgoing mail.
 
 **`CLIENT_IP_SOURCE=Cloudflare`** reads Cloudflare's `CF-Connecting-IP` header instead of
-selecting an address from `X-Forwarded-For`. Every public request reaches Traefik through the
-Cloudflare Tunnel, where Cloudflare's edge sets that header to the visitor's address and
-overwrites any value a client sent; nothing else can reach Traefik, so the header cannot be
-forged ([edge.md](edge.md#client-addresses-and-forwarded-headers)). This keys the rate limiter
+selecting an address from `X-Forwarded-For`. Every public request reaches Traefik from
+Cloudflare, whose edge sets that header to the visitor's address and overwrites any value a
+client sent; nothing but Cloudflare can reach Traefik (its ranges only, and its client
+certificate), so the header cannot be forged ([edge.md](edge.md#client-addresses-and-forwarded-headers)). This keys the rate limiter
 by the actual visitor instead of the proxy.
 
 **Mail is optional.** Without `RESEND_API_KEY` the site still runs: contact messages and
@@ -89,8 +72,7 @@ image and the stack entry are all gone.
 
 llama.cpp's `llama-server`, the engine of Home's AI and the only AI engine on the server. Nothing
 in this stack is public or published: it is not on `edge`, has no Traefik label, publishes no
-port and is never behind the tunnel. (Ollama, which served hypernova's provider, was removed;
-hypernova's AI features are off, `AI_DISABLED=true`. A server that still has Ollama's old
+port and is never public. (Ollama was removed; a server that still has its old
 `ollama-models` volume: [RUNBOOK.md](../RUNBOOK.md#removing-ollamas-models).)
 
 - **`llama`** is llama.cpp's `llama-server` (the official CUDA image, `server-cuda-b11429`,
@@ -99,7 +81,7 @@ hypernova's AI features are off, `AI_DISABLED=true`. A server that still has Oll
   (`--models-max 1`), and unloads it after 5 idle minutes (`--sleep-idle-seconds 300`). Home's
   `home-server` is its only client, at `http://llama:8080` over **`home-llm`**, an internal
   network (no route out) whose only other member is `home-server`; `llama` joins nothing else,
-  so it can reach neither the internet nor hypernova or the database. Its models are the
+  so it can reach neither the internet nor any other container. Its models are the
   GGUF files `production.yml`'s `home_ai_models` names, in the `llama-models` volume (the `ai`
   account's, mounted read-only at `/models`), which the owner downloads once
   ([RUNBOOK.md](../RUNBOOK.md#homes-ai-models)); they are not backed up (they download again).
@@ -171,17 +153,18 @@ page cache, which the kernel reclaims). `docker stats` shows what each uses.
 ## media
 
 The Beszel status dashboard, Garage (S3 storage) with SFTPGo as its file manager, for the owner
-alone, and `home-tls` in front of them and of Home ([home](#home)), each at its own https name
-(`https://home.arbikullakshi.com/` for Home, `https://files.home.arbikullakshi.com`, …, from
-`home_hosts` in `production.yml`: `files`, `status` and `s3`). `home`, the old links page, is
-now only `http://infra-host/`, which sends the browser on to Home, and the page of other ways
-into the files bucket (`/files.html`). Like `ai`, nothing here is
-public: no `edge`, no label for the edge Traefik, never behind the tunnel. A laptop or phone on
+alone, and `home-tls` in front of Home ([home](#home)). Home has the only https name,
+`https://home.arbikullakshi.com/`; the others are reached over the tailnet at the server's name
+and their own port (`http://infra-host:8091/web/client`, `http://infra-host:8090`,
+`http://infra-host:3900`), since the `*.home` record was deleted (plan 023). `home`, the old
+links page, is now only `http://infra-host/`, which sends the browser on to Home and links the
+three ports. Like `ai`, nothing here is
+public: no `edge`, no label for an edge Traefik, nothing through Cloudflare. A laptop or phone on
 Tailscale talks to the server directly (or through a relay when it must), WireGuard-encrypted.
 
 | Container | Port, on the Tailscale address only | Bind mount | Its data (volume, SSD) |
 | --- | --- | --- | --- |
-| `home` | 80 | none | none (the redirect page and `/files.html` are `HOME_HTML` and `FILES_HTML` in the compose file, written to tmpfs and served by busybox `httpd`) |
+| `home` | 80 | none | none (the links page is `HOME_HTML` in the compose file, written to tmpfs and served by busybox `httpd`) |
 | `home-tls` | 443 | none | `home-tls-acme` (`/acme`: the Let's Encrypt account and certificate) |
 | `beszel` | 8090 | none | `beszel-data` (`/beszel_data`: the hub's database, history, alerts) |
 | `beszel-pair` | none (one-shot) | none | writes the hub's public key into `beszel-agent-data` |
@@ -224,9 +207,9 @@ the SSD (Garage recommends fast storage for it). Garage's own community web UI i
 release in a year, and it would need the full admin token); `sftpgo` is the interface.
 
 **`sftpgo`** (SFTPGo 2.7, the `-alpine` image) is the file manager on the `files` bucket: its
-web client (`https://files.home.arbikullakshi.com/web/client`, the Files tile) uploads by drag and drop, makes
+web client (`http://infra-host:8091/web/client`, the Files tile) uploads by drag and drop, makes
 folders, renames, moves, deletes, previews, downloads and makes share links, and its WebDAV
-server (8092, on the `media` network only) is published at `https://files.home.arbikullakshi.com/dav` (and, for older mounts, `https://home.arbikullakshi.com/dav`)
+server (8092, on the `media` network only) is published at `https://home.arbikullakshi.com/dav`
 by `home-tls`, with the real certificate, so a laptop or phone mounts the bucket as a drive. Its
 one user, `owner`, is code: at every start `OWNER_JSON_SH` (compose file) writes it to tmpfs and
 SFTPGo loads it with `LOADDATA_MODE=0` (added, or updated to match), with the password from
@@ -236,7 +219,8 @@ page until an admin exists, so the same file adds one with a fresh random passwo
 start; the admin web UI and the REST API are off, so nobody can use it. SFTP and FTP are off. It
 starts after `garage-setup` has created the bucket and imported the key.
 
-Its file list behaves like Google Drive: `FILES_UI_SH` (compose file) copies the image's templates
+Its file list behaves like a desktop file manager's (it stores only what is put there on purpose;
+no device sync or backup): `FILES_UI_SH` (compose file) copies the image's templates
 to `/tmp/templates` (SFTPGo serves them from there, `SFTPGO_HTTPD__TEMPLATES_PATH`) and inserts
 `DRIVE_JS` into `webclient/files.html` right after its `extra_js` block opens. The script adds
 click-to-select, double-click (tap on a phone) to open, a full-screen preview for PDF, images,
@@ -258,10 +242,8 @@ trusted. `SFTPGO_HTTPD__SIGNING_PASSPHRASE_FILE` is `web-signing.key` in `sftpgo
 by `OWNER_JSON_SH`, so a restart or release no longer signs everyone out.
 
 **`home-tls`** is a second Traefik (the edge image and digest) that terminates TLS for
-`home.arbikullakshi.com` and every `<label>.home.arbikullakshi.com` and routes each name to its
-container over `media`: the apex to `home-server:8080` (stack `home`; `/dav` to `sftpgo:8092`
-and `/files.html` to `home:80`), and `files.` (with `/dav`), `status.` and `s3.` to SFTPGo,
-Beszel and Garage. The entrypoint has no read or write timeout (idle
+`home.arbikullakshi.com` alone and routes it over `media` to `home-server:8080` (stack `home`;
+`/dav` to `sftpgo:8092`). The entrypoint has no read or write timeout (idle
 connections close after 10 minutes) and no buffering or compression, so multi-gigabyte uploads
 and websockets pass, and so do Home's two long-lived kinds of response: the live updates stream
 (`/api/events`, Server-Sent Events: one response that stays open, a heartbeat every 20 s) and an
@@ -271,11 +253,11 @@ Home's own headers reach the browser as Home sent them: the web app at `/app` ke
 `Cache-Control` (`no-cache` for `index.html`, a year and `immutable` for its content-hashed
 files) and its CSP. `ci/check_templates.py` (rule 10) fails the checks if a deadline, a
 middleware or another route for `/app` or `/api` on Home's name appears, and a release's verify
-asks for `/app/` through `home-tls`. Home is never behind the Cloudflare Tunnel (it is
-tailnet-only), so Cloudflare's 100-second idle limit does not apply to it. Beszel, which knows its own address, is told it: its `APP_URL` is the https
-name. It has no Docker socket: its
+asks for `/app/` through `home-tls`. Home is never behind Cloudflare (it is
+tailnet-only), so Cloudflare's 100-second idle limit does not apply to it. Beszel, which knows its own address, is told it: its `APP_URL` is
+`http://<server>:8090` (`SERVER_NAME` in `media/.env`). It has no Docker socket: its
 static and dynamic configuration are `HOME_TLS_STATIC` and `HOME_TLS_DYNAMIC` in the compose file,
-written to tmpfs at start. One certificate, for `home.` and `*.home.`, comes from Let's Encrypt by DNS-01 through
+written to tmpfs at start. One certificate, for `home.arbikullakshi.com` alone (no wildcard), comes from Let's Encrypt by DNS-01 through
 Cloudflare's API with `CF_DNS_API_TOKEN` from `home-tls.env` (the `HOME_TLS_CF_DNS_TOKEN`
 secret, Zone Read and DNS Edit on the zone only), which no other
 container reads; nothing on the internet has to reach the host. Port 443 needs no capability
@@ -458,11 +440,9 @@ password, factors and sessions so setup runs again ([RUNBOOK.md](../RUNBOOK.md#h
 
 ## Retired apps (2026-10-20)
 
-Immich (`immich-server`, `immich-machine-learning`, `immich-postgres`, `immich-valkey`,
-`immich-admin`), the media engine (the container `jellyfin`), Audiobookshelf, Kavita,
+Immich (the photo backup), the media engine (the container `jellyfin`), Audiobookshelf, Kavita,
 Open WebUI with `webui-presets`, SearXNG, and ComfyUI with `comfyui-fetch` were removed from the
-stacks on 2026-10-20. The owner's own apps will replace them. Their `home_hosts` names
-(`ai`, `photos`, `jellyfin`, `audiobooks`, `books`) and their secrets (`WEBUI_SECRET_KEY`,
+stacks on 2026-10-20. The owner's own apps will replace them. Their secrets (`WEBUI_SECRET_KEY`,
 `SEARXNG_SECRET`, `IMMICH_DB_PASSWORD`, `IMMICH_ADMIN_PASSWORD`) are no longer used; the owner
 may delete those secrets from the GitHub `production` environment and 1Password. Provisioning
 deletes their ufw rules (ports 2283, 5000, 8080, 8096 and 13378, `ufw_retired`); the Tailscale
@@ -472,13 +452,16 @@ Their data is kept until the owner has audited it:
 
 - **Volumes**, still created by provisioning: `open-webui-data`, `comfyui-data`,
   `jellyfin-config`, `jellyfin-cache`, `audiobookshelf-config`, `audiobookshelf-metadata`,
-  `kavita-config`, `immich-pgdata` and `immich-ml-cache`. The nightly backup still copies
-  `open-webui-data`, `jellyfin-config`, `audiobookshelf-config`, `audiobookshelf-metadata`,
-  `kavita-config` and `immich-pgdata` (now as a stopped data folder instead of a database
-  dump); `comfyui-data`, `jellyfin-cache` and `immich-ml-cache` hold downloads and caches and
-  were never copied.
-- **Library folders** under `/srv/media`: `audiobooks`, `podcasts`, `books` and `photos`, still
+  and `kavita-config`. The nightly backup still copies `open-webui-data`, `jellyfin-config`,
+  `audiobookshelf-config`, `audiobookshelf-metadata` and `kavita-config`; `comfyui-data` and
+  `jellyfin-cache` hold downloads and caches and were never copied.
+- **Library folders** under `/srv/media`: `audiobooks`, `podcasts` and `books`, still
   created by provisioning and mirrored by the backup. `shows` and `movies` are Home's film and
   series library now ([home](#home)); their videos are not backed up, their metadata is.
 
 Nothing deletes them: no stack mounts them any more, and removing them is a manual decision.
+
+Immich's own leftovers (`/srv/media/photos`, `immich-pgdata`, `immich-ml-cache`, the `immich`
+network) are no longer provisioned or backed up (owner, 2026-10-28: no automatic photo or drive
+backup, only deliberate storage); deleting them is in
+[RUNBOOK.md](../RUNBOOK.md#retired-apps-2026-10-20).

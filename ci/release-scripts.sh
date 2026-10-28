@@ -26,20 +26,27 @@ current_release() {
   readlink "$state/stack/current" | sed 's,^releases/,,'
 }
 
+# The bundle a fresh release of fake_host's kind installs: good.tgz (home) or
+# hgood.tgz (hetzner).
+base_bundle() {
+  if [ "${fake_host:-home}" = hetzner ]; then echo "$work/hgood.tgz"; else echo "$work/good.tgz"; fi
+}
+
 # A state with one verified release installed; refusals must leave it as it is.
-# The first call installs it; later calls copy that state.
-installed_template=""
+# The first call per host kind installs it; later calls copy that state.
+declare -A installed_template=() template_id=()
 installed_state() {
-  if [ -z "$installed_template" ]; then
+  local host="${fake_host:-home}"
+  if [ -z "${installed_template[$host]-}" ]; then
     new_state
-    run_apply "$work/good.tgz" release || { cat "$work/out"; echo "FAIL the base release did not install"; exit 1; }
-    installed_template="$state"
-    template_id="$(current_release)"
+    run_apply "$(base_bundle)" release || { cat "$work/out"; echo "FAIL the base release did not install"; exit 1; }
+    installed_template[$host]="$state"
+    template_id[$host]="$(current_release)"
   fi
   count=$((count + 1))
   state="$work/state$count"
-  cp -a "$installed_template" "$state"
-  base_id="$template_id"
+  cp -a "${installed_template[$host]}" "$state"
+  base_id="${template_id[$host]}"
   : >"$state/calls"
 }
 
@@ -89,7 +96,7 @@ pack() {
 # variant <name>: unpack the good bundle into $work/<name> for editing; then
 # repack <name> rewrites the manifest and packs it to $work/<name>.tgz.
 variant() {
-  unpack "$work/good.tgz" "$work/$1"
+  unpack "$(base_bundle)" "$work/$1"
 }
 repack() {
   manifest "$work/$1"
@@ -106,16 +113,22 @@ cat >"$work/vars.json" <<JSON
   "ghcr_username": "infra-bot",
   "ghcr_token": "ghp_HarnessToken0123456789",
   "postgres_superuser_password": "HarnessPgSuperuser0123456789abcdefA",
-  "prizm_db_password": "HarnessPrizmDb0123456789abcdefABCDEF",
   "portfolio_db_password": "HarnessPortfolioDb0123456789abcdefAB",
   "portfolio_totp_encryption_key": "SGFybmVzc1RvdHBLZXkwMTIzNDU2Nzg5YWJjZGVmQUI=",
   "portfolio_admin_password": "harness-portfolio-admin",
   "portfolio_resend_api_key": "re_HarnessResendKey",
   "portfolio_google_client_id": "harness.apps.googleusercontent.com",
   "portfolio_google_client_secret": "HarnessGoogleSecret",
-  "hypernova_session_secret": "HarnessHypernovaSession0123456789",
-  "hypernova_admin_password": "harness-hypernova-admin",
-  "cf_tunnel_token": "eyJHarnessTunnelToken0123456789abcdefABCDEFGHIJ",
+  "r2_account_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001",
+  "r2_access_key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0002",
+  "r2_secret_access_key": "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc0003",
+  "r2_public_bucket": "harness-public",
+  "r2_private_bucket": "harness-private",
+  "media_public_base": "https://media.example.com",
+  "r2_backup_access_key_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0004",
+  "r2_backup_secret_access_key": "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc0005",
+  "cf_origin_cert": "-----BEGIN CERTIFICATE-----\nSGFybmVzc09yaWdpbkNlcnRCb2R5MDEyMw==\n-----END CERTIFICATE-----",
+  "cf_origin_key": "-----BEGIN PRIVATE KEY-----\nSGFybmVzc09yaWdpbktleUJvZHkwMTIzNA==\n-----END PRIVATE KEY-----",
   "home_tls_cf_dns_token": "HarnessHomeTlsDnsToken0123456789abcdefABCDEF",
   "beszel_password": "HarnessBeszelPassword0123",
   "beszel_agent_token": "harness-beszel-agent-token-0123456789",
@@ -134,28 +147,39 @@ cat >"$work/vars.json" <<JSON
   "deploy_key_file": "$work/deploy_key.pub"
 }
 JSON
-secrets=(ghp_HarnessToken0123456789 HarnessPgSuperuser0123456789abcdefA HarnessPrizmDb0123456789abcdefABCDEF
+secrets=(ghp_HarnessToken0123456789 HarnessPgSuperuser0123456789abcdefA
   HarnessPortfolioDb0123456789abcdefAB SGFybmVzc1RvdHBLZXkwMTIzNDU2Nzg5YWJjZGVmQUI= harness-portfolio-admin
-  re_HarnessResendKey HarnessGoogleSecret HarnessHypernovaSession0123456789 harness-hypernova-admin
-  eyJHarnessTunnelToken0123456789abcdefABCDEFGHIJ HarnessHomeTlsDnsToken0123456789abcdefABCDEF
+  re_HarnessResendKey HarnessGoogleSecret aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001 aaaaaaaaaaaaaaaaaaaaaaaaaaaa0002
+  cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc0003 aaaaaaaaaaaaaaaaaaaaaaaaaaaa0004
+  cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc0005 SGFybmVzc09yaWdpbkNlcnRCb2R5MDEyMw==
+  SGFybmVzc09yaWdpbktleUJvZHkwMTIzNA== HarnessHomeTlsDnsToken0123456789abcdefABCDEF
   HarnessBeszelPassword0123 harness-beszel-agent-token-0123456789 aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111
   HarnessGarageAdmin0123456789abcdefAB GKcccc3333cccc3333cccc3333 bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222
   HarnessFilesPassword0123 SGFybmVzc0hvbWVTZWNyZXRLZXkwMTIzNDU2Nzg5YWI= SGFybmVzc0hvbWVEYXRhS2V5MDEyMzQ1Njc4OWFiY2Q=
   HarnessHomeResendKey0123 "$host_power_key" eyJIb21lVG1kYg.eyJIYXJuZXNzVG1kYiI6MX0.SGFybmVzc1RtZGJTaWduYXR1cmU)
 
+# build [build-bundle.sh arguments]: renders the bundle of fake_host's kind (default home).
 build() {
-  "$root/build-bundle.sh" "$@" >"$work/build.log" 2>&1
+  "$root/build-bundle.sh" --host "${fake_host:-home}" "$@" >"$work/build.log" 2>&1
 }
 
 build "$work/vars.json" "$work/good.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh"; exit 1; }
 no_secret_in "$work/build.log" "build-bundle.sh"
 build "$work/vars.json" "$work/good-again.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh (second build)"; exit 1; }
 cmp -s "$work/good.tgz" "$work/good-again.tgz" || { echo "FAIL build-bundle.sh is not deterministic"; exit 1; }
+fake_host=hetzner build "$work/vars.json" "$work/hgood.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh --host hetzner"; exit 1; }
+no_secret_in "$work/build.log" "build-bundle.sh --host hetzner"
 echo "ok   bundle: two builds from the same vars are byte-identical"
-if tar -tvzf "$work/good.tgz" | grep -qv '^-'; then tar -tvzf "$work/good.tgz"; echo "FAIL the bundle holds entries other than regular files"; exit 1; fi
-[ "$(tar -tzf "$work/good.tgz" | wc -l)" -eq 29 ] || { tar -tzf "$work/good.tgz"; echo "FAIL the bundle does not hold exactly 29 files"; exit 1; }
-echo "ok   bundle: 29 file entries, no directories"
+for bundle in good hgood; do
+  if tar -tvzf "$work/$bundle.tgz" | grep -qv '^-'; then tar -tvzf "$work/$bundle.tgz"; echo "FAIL the bundle holds entries other than regular files"; exit 1; fi
+done
+[ "$(tar -tzf "$work/good.tgz" | wc -l)" -eq 18 ] || { tar -tzf "$work/good.tgz"; echo "FAIL the home bundle does not hold exactly 18 files"; exit 1; }
+[ "$(tar -tzf "$work/hgood.tgz" | wc -l)" -eq 11 ] || { tar -tzf "$work/hgood.tgz"; echo "FAIL the hetzner bundle does not hold exactly 11 files"; exit 1; }
+tar -tzf "$work/good.tgz" | grep -qE '^(database|portfolio|edge)/' && { echo "FAIL the home bundle holds a hetzner stack"; exit 1; }
+tar -tzf "$work/hgood.tgz" | grep -qE '^(ai|media|home)/' && { echo "FAIL the hetzner bundle holds a home stack"; exit 1; }
+echo "ok   bundle: 18 file entries for home, 11 for hetzner, each only its own stacks, no directories"
 unpack "$work/good.tgz" "$work/good"
+unpack "$work/hgood.tgz" "$work/hgood"
 grep -qxF "RELEASE_COMMIT=$(git -C "$root" rev-parse HEAD)" "$work/good/release.env" || { echo "FAIL release.env does not name the checked-out commit"; exit 1; }
 grep -qx 'RELEASE_MODE=latest' "$work/good/release.env" || { echo "FAIL a plain build is not a latest release"; exit 1; }
 
@@ -164,9 +188,10 @@ owner_of() {
   case "$1" in
     ghp_*) echo ghcr.env ;;
     HarnessPgSuperuser*) echo "database/postgres.env database/provision.sql" ;;
-    HarnessPrizmDb* | HarnessPortfolioDb*) echo "database/provision.sql $([ "${1#HarnessPrizm}" != "$1" ] && echo hypernova/provider.env || echo portfolio/portfolio.env)" ;;
-    harness-hypernova-admin | HarnessHypernovaSession*) echo hypernova/provider.env ;;
-    eyJHarnessTunnelToken*) echo tunnel/tunnel.env ;;
+    HarnessPortfolioDb*) echo "database/provision.sql portfolio/portfolio.env" ;;
+    *0001) echo "database/backup.env portfolio/portfolio.env" ;;
+    *0004 | *0005) echo database/backup.env ;;
+    SGFybmVzc09yaWdpbk*) echo edge/tls.yml ;;
     HarnessHomeTlsDns*) echo media/home-tls.env ;;
     HarnessBeszelPassword*) echo "media/beszel.env media/beszel-pair.env" ;;
     harness-beszel-agent-token*) echo "media/beszel-pair.env media/beszel-agent.env" ;;
@@ -179,22 +204,25 @@ owner_of() {
   esac
 }
 for secret in "${secrets[@]}"; do
-  found="$(cd "$work/good" && grep -rlF -- "$secret" . | sed 's,^\./,,' | LC_ALL=C sort | tr '\n' ' ')"
+  found="$({ (cd "$work/good" && grep -rlF -- "$secret" .) || true; (cd "$work/hgood" && grep -rlF -- "$secret" .) || true; } | sed 's,^\./,,' | LC_ALL=C sort -u | tr '\n' ' ')"
   want="$(owner_of "$secret" | tr ' ' '\n' | LC_ALL=C sort | tr '\n' ' ')"
   [ "$found" = "$want" ] || { echo "FAIL a secret is in '$found', expected only '$want'"; exit 1; }
 done
-for file in portfolio/.env hypernova/.env ai/.env media/.env home/.env; do
-  if grep -vqE '^(PORTFOLIO_IMAGE|PROVIDER_IMAGE|WEB_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|WEB_DOMAIN|AI_UID|AI_GID|LLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|HOST_[A-Z0-9]+|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/good/$file"; then
-    cat "$work/good/$file"; echo "FAIL $file holds more than image references, domains, the service accounts, the models and the contact addresses"; exit 1
+for file in hgood/portfolio/.env good/ai/.env good/media/.env good/home/.env; do
+  if grep -vqE '^(PORTFOLIO_IMAGE|HOME_IMAGE|HOME_UID|HOME_GID|APEX_DOMAIN|WWW_DOMAIN|PREVIEW_DOMAIN|AI_UID|AI_GID|LLAMA_MODELS|MEDIA_UID|MEDIA_GID|HOME_DOMAIN|SERVER_NAME|ACME_EMAIL|STATUS_OWNER_EMAIL)=' "$work/$file"; then
+    cat "$work/$file"; echo "FAIL $file holds more than image references, domains, the service accounts, the models and the contact addresses"; exit 1
   fi
 done
+grep -qx 'PREVIEW_DOMAIN=arbikullakshi.com' "$work/hgood/portfolio/.env" || { cat "$work/hgood/portfolio/.env"; echo "FAIL an empty preview_domain does not fall back to the apex"; exit 1; }
+grep -qx 'RCLONE_S3_ENDPOINT=https://aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001.r2.cloudflarestorage.com' "$work/hgood/database/backup.env" || { echo "FAIL backup.env does not name the account's R2 endpoint"; exit 1; }
+if ! grep -q 'clientAuthType: RequireAndVerifyClientCert$' "$work/hgood/edge/tls.yml" || ! grep -q 'BEGIN CERTIFICATE' "$work/hgood/edge/tls.yml"; then
+  echo "FAIL edge/tls.yml does not require Cloudflare's client certificate"; exit 1
+fi
 grep -qx 'LLAMA_MODELS=qwen3-8b:Qwen3-8B-Q5_K_M.gguf gemma-3-12b:gemma-3-12b-it-q4_0.gguf qwen3-14b:Qwen3-14B-Q4_K_M.gguf' "$work/good/ai/.env" ||
   { cat "$work/good/ai/.env"; echo "FAIL ai/.env does not list production.yml's home_ai_models for llama-server"; exit 1; }
 grep -qx 'MEDIA_GID=2000' "$work/good/home/.env" || { cat "$work/good/home/.env"; echo "FAIL home/.env does not name the media group home-server joins"; exit 1; }
-grep -q '^HOST_' "$work/good/ai/.env" && { cat "$work/good/ai/.env"; echo "FAIL ai/.env names an https host, but nothing in the ai stack is served"; exit 1; }
-for want in HOST_FILES=files HOST_STATUS=status HOST_S3=s3; do
-  grep -qx "$want.home.arbikullakshi.com" "$work/good/media/.env" || { cat "$work/good/media/.env"; echo "FAIL media/.env lacks $want.home.arbikullakshi.com"; exit 1; }
-done
+grep -q '^HOST_' "$work/good/media/.env" && { cat "$work/good/media/.env"; echo "FAIL media/.env names an https name besides Home's"; exit 1; }
+grep -qx 'SERVER_NAME=infra-host' "$work/good/media/.env" || { cat "$work/good/media/.env"; echo "FAIL media/.env does not name the server for the tailnet addresses"; exit 1; }
 for want in HOME_OWNER_EMAIL=owner@example.com HOME_PUBLIC_ORIGIN=https://home.arbikullakshi.com HOME_SECRET_KEY_FILE=/run/keys/secret_key \
   HOME_DATA_KEY_FILE=/run/keys/data_key HOME_SMTP_PASSWORD_FILE=/run/keys/smtp_password HOME_FILES_ROOT=/files HOME_FILES_CAPACITY=600G HOME_BESZEL_URL= \
   HOME_POWER_DIR=/run/power HOME_POWER_KEY_FILE=/run/keys/power_key HOME_MEDIA_FILMS=/data/media/films HOME_MEDIA_SERIES=/data/media/series \
@@ -206,29 +234,25 @@ for want in HOME_OWNER_EMAIL=owner@example.com HOME_PUBLIC_ORIGIN=https://home.a
 done
 grep -qx 'HOME_BESZEL_PASSWORD=' "$work/good/home/home-keys.env" || { echo "FAIL home-keys.env holds a Beszel password while production.yml names no Beszel user"; exit 1; }
 grep -q 'HOME_WEB_APP_DIR' "$work/good/home/home-server.env" && { echo "FAIL home-server.env sets HOME_WEB_APP_DIR, which Home's image sets to its own /app"; exit 1; }
-grep -qx 'AI_DISABLED=true' "$work/good/hypernova/provider.env" || { echo "FAIL hypernova's provider does not have its AI off, with Ollama gone"; exit 1; }
-grep -q '^OLLAMA_' "$work/good/hypernova/provider.env" && { echo "FAIL hypernova's provider still names Ollama"; exit 1; }
 echo "ok   bundle: each secret is only in the env file of the container that reads it"
 
-jq '.portfolio_admin_password = "second-admin-password"' "$work/vars.json" >"$work/vars-second.json"
-secrets+=(second-admin-password)
+jq '.files_password = "HarnessFilesPasswordTwo0"' "$work/vars.json" >"$work/vars-second.json"
+secrets+=(HarnessFilesPasswordTwo0)
 build "$work/vars-second.json" "$work/second.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh (second release)"; exit 1; }
+jq '.portfolio_admin_password = "second-admin-password"' "$work/vars.json" >"$work/vars-hsecond.json"
+secrets+=(second-admin-password)
+fake_host=hetzner build "$work/vars-hsecond.json" "$work/hsecond.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh (second hetzner release)"; exit 1; }
 
-printf 'RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=%s:%s@%s\nPROVIDER_IMAGE=%s:latest\nWEB_IMAGE=%s:latest@%s\nHOME_IMAGE=%s:latest\n' \
-  "$portfolio_repo" "$(printf '1%.0s' $(seq 40))" "$(d 10)" "$provider_repo" "$web_repo" "$(d 30)" "$home_repo" >"$work/pins.env"
-build --pin "$work/pins.env" "$work/vars.json" "$work/pinned.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh --pin"; exit 1; }
+printf 'RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=%s:%s@%s\n' "$portfolio_repo" "$(printf '1%.0s' $(seq 40))" "$(d 10)" >"$work/pins.env"
+fake_host=hetzner build --pin "$work/pins.env" "$work/vars.json" "$work/pinned.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh --pin"; exit 1; }
 unpack "$work/pinned.tgz" "$work/pinned"
 grep -qx 'RELEASE_MODE=pinned' "$work/pinned/release.env" || { echo "FAIL a --pin build is not a pinned release"; exit 1; }
 grep -qxF "PORTFOLIO_IMAGE=$portfolio_repo:$(printf '1%.0s' $(seq 40))@$(d 10)" "$work/pinned/portfolio/.env" || { echo "FAIL the portfolio pin is not in portfolio/.env"; exit 1; }
-grep -qxF "PROVIDER_IMAGE=$provider_repo:latest" "$work/pinned/hypernova/.env" || { echo "FAIL the unpinned provider does not follow :latest"; exit 1; }
-grep -qxF "WEB_IMAGE=$web_repo:latest@$(d 30)" "$work/pinned/hypernova/.env" || { echo "FAIL the web pin is not in hypernova/.env"; exit 1; }
-grep -qxF "HOME_IMAGE=$home_repo:latest" "$work/pinned/home/.env" || { echo "FAIL the unpinned Home does not follow :latest"; exit 1; }
-printf 'RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=%s:latest\nPROVIDER_IMAGE=%s:latest\nWEB_IMAGE=%s:latest\nHOME_IMAGE=%s:latest@%s\n' \
-  "$portfolio_repo" "$provider_repo" "$web_repo" "$home_repo" "$(d 50)" >"$work/home-pins.env"
+printf 'RELEASE_MODE=pinned\nHOME_IMAGE=%s:latest@%s\n' "$home_repo" "$(d 50)" >"$work/home-pins.env"
 build --pin "$work/home-pins.env" "$work/vars.json" "$work/home-pinned.tgz" || { cat "$work/build.log"; echo "FAIL build-bundle.sh --pin of Home"; exit 1; }
 unpack "$work/home-pinned.tgz" "$work/home-pinned"
 grep -qxF "HOME_IMAGE=$home_repo:latest@$(d 50)" "$work/home-pinned/home/.env" || { echo "FAIL the Home pin is not in home/.env"; exit 1; }
-echo "ok   bundle: --pin writes the pins into portfolio/.env, hypernova/.env and home/.env"
+echo "ok   bundle: --pin writes the pin into portfolio/.env (hetzner) and home/.env (home)"
 
 pin_refused() {
   local name="$1" want="$2" body="$3"
@@ -239,11 +263,16 @@ pin_refused() {
   [ ! -e "$work/refused.tgz" ] || { echo "FAIL build-bundle.sh left a bundle behind: $name"; exit 1; }
   echo "ok   bundle refuses: $name"
 }
-pin_refused "a pins file without RELEASE_MODE" "must hold exactly" "PORTFOLIO_IMAGE=$portfolio_repo:latest\nPROVIDER_IMAGE=$provider_repo:latest\nWEB_IMAGE=$web_repo:latest\n"
-pin_refused "a pins file with an unpinned tag" "PORTFOLIO_IMAGE is neither" "RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=$portfolio_repo:v2\nPROVIDER_IMAGE=$provider_repo:latest\nWEB_IMAGE=$web_repo:latest\nHOME_IMAGE=$home_repo:latest\n"
-pin_refused "a pins file that pins nothing" "pins no image to a digest" "RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=$portfolio_repo:latest\nPROVIDER_IMAGE=$provider_repo:latest\nWEB_IMAGE=$web_repo:latest\nHOME_IMAGE=$home_repo:latest\n"
-pin_refused "a pins file naming another repository" "names ghcr.io/evil/portfolio" "RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=ghcr.io/evil/portfolio:latest@$(d 1)\nPROVIDER_IMAGE=$provider_repo:latest\nWEB_IMAGE=$web_repo:latest\nHOME_IMAGE=$home_repo:latest\n"
-pin_refused "a pins file that sets a key twice" "must hold exactly|exactly once" "RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=$portfolio_repo:latest@$(d 1)\nPORTFOLIO_IMAGE=$portfolio_repo:latest@$(d 1)\nWEB_IMAGE=$web_repo:latest\n"
+pin_refused "a pins file without RELEASE_MODE" "must hold exactly" "HOME_IMAGE=$home_repo:latest@$(d 1)\n"
+pin_refused "a pins file with an unpinned tag" "HOME_IMAGE is neither" "RELEASE_MODE=pinned\nHOME_IMAGE=$home_repo:v2\n"
+pin_refused "a pins file that pins nothing" "pins no image to a digest" "RELEASE_MODE=pinned\nHOME_IMAGE=$home_repo:latest\n"
+pin_refused "a pins file naming another repository" "names ghcr.io/evil/home-server" "RELEASE_MODE=pinned\nHOME_IMAGE=ghcr.io/evil/home-server:latest@$(d 1)\n"
+pin_refused "a pins file that sets a key twice" "must hold exactly|exactly once" "RELEASE_MODE=pinned\nHOME_IMAGE=$home_repo:latest@$(d 1)\nHOME_IMAGE=$home_repo:latest@$(d 1)\n"
+pin_refused "the other host's pins" "must set HOME_IMAGE exactly once" "RELEASE_MODE=pinned\nPORTFOLIO_IMAGE=$portfolio_repo:latest@$(d 1)\n"
+rm -f "$work/refused.tgz"
+if "$root/build-bundle.sh" --host crm "$work/vars.json" "$work/refused.tgz" >"$work/build.log" 2>&1; then echo "FAIL build-bundle.sh built for an unknown host"; exit 1; fi
+grep -q 'usage: build-bundle.sh --host <home|hetzner>' "$work/build.log" || { cat "$work/build.log"; echo "FAIL build-bundle.sh refused an unknown host for the wrong reason"; exit 1; }
+echo "ok   bundle refuses: an unknown host"
 
 render_refused() {
   local name="$1" filter="$2"
@@ -255,20 +284,27 @@ render_refused() {
   [ ! -e "$work/refused.tgz" ] || { echo "FAIL build-bundle.sh left a bundle behind: $name"; exit 1; }
   echo "ok   bundle refuses: $name"
 }
-render_refused "a short database password" '.prizm_db_password = "short"'
-render_refused "two equal database passwords" '.portfolio_db_password = .prizm_db_password'
+fake_host=hetzner
+render_refused "a short database password" '.portfolio_db_password = "short"'
+render_refused "two equal database passwords" '.portfolio_db_password = .postgres_superuser_password'
 # shellcheck disable=SC2016 # a jq filter; the $$ is literal
 render_refused "a value holding \$" '.portfolio_admin_password = "pa$$word"'
 render_refused "a TOTP key that is not base64 of 32 bytes" '.portfolio_totp_encryption_key = "short"'
-render_refused "no tunnel token" 'del(.cf_tunnel_token)'
-render_refused "a tunnel token that is not one Cloudflare issues" '.cf_tunnel_token = "not-a-tunnel-token"'
+render_refused "no origin certificate" 'del(.cf_origin_cert)'
+render_refused "an origin key that is not PEM" '.cf_origin_key = "not-a-key"'
+render_refused "no R2 secret" 'del(.r2_secret_access_key)'
+render_refused "one R2 key for the portfolio and its backups" '.r2_backup_access_key_id = .r2_access_key_id'
+render_refused "one bucket for public and private media" '.r2_private_bucket = .r2_public_bucket'
+render_refused "a media base that is not https" '.media_public_base = "http://media.example.com"'
+jq 'with_entries(select(.key | test("^(home_|beszel_|garage_|files_)") | not))' "$work/vars.json" >"$work/vars-hetzner-only.json"
+build "$work/vars-hetzner-only.json" "$work/hetzner-only.tgz" || { cat "$work/build.log"; echo "FAIL the hetzner bundle needs Home's secrets"; exit 1; }
+unset fake_host
+jq 'with_entries(select(.key | test("^(portfolio_|postgres_|r2_|media_public|cf_origin)") | not))' "$work/vars.json" >"$work/vars-home-only.json"
+build "$work/vars-home-only.json" "$work/home-only.tgz" || { cat "$work/build.log"; echo "FAIL the home bundle needs the portfolio's secrets"; exit 1; }
+echo "ok   bundle: each host needs only its own secrets"
 render_refused "no Cloudflare DNS token for home-tls" 'del(.home_tls_cf_dns_token)'
-render_refused "home_hosts without the S3 name" '.home_hosts = {"files": "files", "status": "status"}'
-grep -q "home_hosts must map exactly" "$work/build.log" || { cat "$work/build.log"; echo "FAIL home_hosts without s3 was refused for another reason"; exit 1; }
-render_refused "two services sharing one https name" '.home_hosts = {"files": "files", "status": "files", "s3": "s3"}'
-grep -q "home_hosts must map exactly" "$work/build.log" || { cat "$work/build.log"; echo "FAIL a shared https name was refused for another reason"; exit 1; }
-render_refused "an https name with a dot" '.home_hosts = {"files": "fi.les", "status": "status", "s3": "s3"}'
-grep -q "home_hosts must map exactly" "$work/build.log" || { cat "$work/build.log"; echo "FAIL a dotted label was refused for another reason"; exit 1; }
+render_refused "Home's name that is not a DNS name" '.home_domain = "home arbikullakshi"'
+grep -q "home_domain must be a DNS name" "$work/build.log" || { cat "$work/build.log"; echo "FAIL a bad home_domain was refused for another reason"; exit 1; }
 render_refused "a Cloudflare DNS token that is too short" '.home_tls_cf_dns_token = "short"'
 render_refused "no Beszel password" 'del(.beszel_password)'
 render_refused "a short Beszel password" '.beszel_password = "short"'
@@ -333,7 +369,7 @@ sed -i 's,image: traefik:v3[^[:space:]]*,image: traefik:v3,' "$scratch/roles/edg
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com
   git init -q . && git add -A && git commit -qm "test(release): unpinned image"
 )
-if "$scratch/build-bundle.sh" "$work/vars.json" "$work/refused.tgz" >"$work/build.log" 2>&1; then echo "FAIL build-bundle.sh accepted an unpinned third-party image"; exit 1; fi
+if "$scratch/build-bundle.sh" --host home "$work/vars.json" "$work/refused.tgz" >"$work/build.log" 2>&1; then echo "FAIL build-bundle.sh accepted an unpinned third-party image"; exit 1; fi
 grep -q 'roles/edge/files/docker-compose.yml runs traefik:v3, which is not pinned' "$work/build.log" || { cat "$work/build.log"; echo "FAIL wrong refusal for an unpinned image"; exit 1; }
 echo "ok   bundle refuses: an unpinned third-party image"
 
@@ -342,7 +378,7 @@ echo "ok   bundle refuses: an unpinned third-party image"
 new_state
 expect_ok "the bundle build-bundle.sh renders from the real templates" "RELEASE OK: [0-9]{8}T[0-9]{6}Z-[0-9a-f]{12} is current, following :latest, auto-updates on$" "$work/good.tgz" release
 first_id="$(current_release)"
-for stack in database portfolio hypernova tunnel ai media home; do
+for stack in ai media home; do
   grep -q "compose model accepted: .* in the $stack stack, no privileged settings" "$work/out" || { cat "$work/out"; echo "FAIL the checked-in $stack stack did not pass the compose guard"; exit 1; }
 done
 grep -qF "compose model accepted: 1 service(s) in the ai stack, no privileged settings, no host port but none on the tailnet, no bind mount but none, the GPU only for llama, no Docker socket" "$work/out" ||
@@ -351,44 +387,36 @@ grep -qF "compose model accepted: 9 service(s) in the media stack, no privileged
   { cat "$work/out"; echo "FAIL the media stack summary does not name its tailnet ports, its bind mounts and the GPU"; exit 1; }
 grep -qF "compose model accepted: 2 service(s) in the home stack, no privileged settings, no host port but none on the tailnet, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, no Docker socket, no extra group but home-server +media" "$work/out" ||
   { cat "$work/out"; echo "FAIL the home stack summary does not name its four bind mounts (Files, the power requests, the films and series), the GPU and the media group"; exit 1; }
-echo "ok   the seven checked-in stacks pass the compose guard"
+echo "ok   the three checked-in home stacks pass the compose guard"
 [ -f "$state/stack/releases/$first_id/.verified" ] || { echo "FAIL the release was not marked verified"; exit 1; }
-for file in ghcr.env database/postgres.env database/provision.sql portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env home/.env home/home-server.env home/home-keys.env manifest.sha256; do
+for file in ghcr.env ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env home/.env home/home-server.env home/home-keys.env manifest.sha256; do
   [ "$(stat -c %a "$state/stack/current/$file")" = 600 ] || { echo "FAIL $file is not 0600 in the release"; exit 1; }
 done
-[ "$(stat -c %a "$state/stack/current/portfolio/docker-compose.yml")" = 644 ] || { echo "FAIL docker-compose.yml is not 0644"; exit 1; }
+[ "$(stat -c %a "$state/stack/current/home/docker-compose.yml")" = 644 ] || { echo "FAIL docker-compose.yml is not 0644"; exit 1; }
 [ "$(cat "$state/login.stdin")" = ghp_HarnessToken0123456789 ] || { echo "FAIL docker login did not receive the token on stdin"; exit 1; }
 grep -q '^login ghcr.io --username infra-bot --password-stdin$' "$state/calls" || { echo "FAIL docker login did not use the GHCR username"; exit 1; }
-cmp -s "$state/psql.stdin" "$work/good/database/provision.sql" || { echo "FAIL provision.sql was not fed to psql"; exit 1; }
-order="$(grep -nE '^compose .*/(database|portfolio|hypernova|tunnel|ai|media|home) (pull --quiet|up -d.*)$|^exec -i postgresql psql -v ON_ERROR_STOP=1 -U postgres -d postgres$' "$state/calls" | sed -E 's,^[0-9]+:,,; s,^compose .*/(database|portfolio|hypernova|tunnel|ai|media|home) ,\1 ,; s,^exec .*,psql,')"
-want_order="$(printf '%s\n' 'database pull --quiet' 'portfolio pull --quiet' 'hypernova pull --quiet' 'tunnel pull --quiet' 'ai pull --quiet' 'media pull --quiet' 'home pull --quiet' 'database up -d --wait --remove-orphans' psql \
-  'portfolio up -d --remove-orphans' 'hypernova up -d --remove-orphans' 'tunnel up -d --remove-orphans' 'ai up -d --remove-orphans' 'media up -d --remove-orphans' 'home up -d --remove-orphans')"
-[ "$order" = "$want_order" ] || { printf '%s\n' "$order"; echo "FAIL the stacks did not start in the order database, provision.sql, portfolio, hypernova, tunnel, ai, media, home"; exit 1; }
-grep -qE '^compose --file [^ ]*/stack/current/portfolio/docker-compose.yml' "$state/calls" || { echo "FAIL portfolio did not start from the current link"; exit 1; }
-for want in "curl route arbikullakshi.com http://172.18.0.2:80/api/health" "curl route www.arbikullakshi.com http://172.18.0.2:80/" \
-  "curl route hypernova.arbikullakshi.com http://172.18.0.2:80/" "curl route hypernova.arbikullakshi.com http://172.18.0.2:80/api/health" \
-  "curl ready http://172.18.0.9:2000/ready"; do
-  grep -qxF "$want" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not check: $want"; exit 1; }
-done
-[ "$(grep -c '^curl \(route\|ready\) ' "$state/calls")" -eq 5 ] || { grep '^curl' "$state/calls"; echo "FAIL verify checked more than the four routes and the tunnel"; exit 1; }
-[ "$(grep -c '^curl public ' "$state/calls")" -eq 5 ] || { grep '^curl' "$state/calls"; echo "FAIL the public check asked other than the four routes and the http redirect"; exit 1; }
+grep -q '^exec ' "$state/calls" && { echo "FAIL the home server ran psql"; exit 1; }
+order="$(grep -nE '^compose .*/(ai|media|home) (pull --quiet|up -d.*)$' "$state/calls" | sed -E 's,^[0-9]+:,,; s,^compose .*/(ai|media|home) ,\1 ,')"
+want_order="$(printf '%s\n' 'ai pull --quiet' 'media pull --quiet' 'home pull --quiet' 'ai up -d --remove-orphans' 'media up -d --remove-orphans' 'home up -d --remove-orphans')"
+[ "$order" = "$want_order" ] || { printf '%s\n' "$order"; echo "FAIL the stacks did not start in the order ai, media, home"; exit 1; }
+grep -qE '^compose --file [^ ]*/stack/current/home/docker-compose.yml' "$state/calls" || { echo "FAIL home did not start from the current link"; exit 1; }
+grep -qE '^curl (route|mtls|public) ' "$state/calls" && { grep '^curl' "$state/calls"; echo "FAIL the home server checked a public route"; exit 1; }
+[ ! -e "$state/edge/dynamic/tls.yml" ] || { echo "FAIL the home server wrote Traefik's TLS settings"; exit 1; }
 grep -qF "infra-apply: the tailnet-only ports home:80 home-tls:443 beszel:8090 garage:3900 sftpgo:8091 are bound to $tailscale_ip alone" "$work/out" || { cat "$work/out"; echo "FAIL verify did not read back the tailnet-only port"; exit 1; }
 grep -qxF "curl tls home.arbikullakshi.com:443:$tailscale_ip https://home.arbikullakshi.com/healthz" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not ask home-tls for Home's /healthz on the tailnet address"; exit 1; }
-for name in files.home status.home s3.home; do
-  grep -qxF "curl tls $name.arbikullakshi.com:443:$tailscale_ip https://$name.arbikullakshi.com/" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not ask home-tls for $name.arbikullakshi.com on the tailnet address"; exit 1; }
-done
-grep -qF "infra-apply: home-tls serves https with a trusted certificate on $tailscale_ip for home.arbikullakshi.com files.home.arbikullakshi.com status.home.arbikullakshi.com s3.home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/" "$work/out" || { cat "$work/out"; echo "FAIL verify did not report home-tls's certificate for every name and Home's web app"; exit 1; }
+grep -q '^curl tls [a-z0-9]*\.home\.' "$state/calls" && { grep '^curl' "$state/calls"; echo "FAIL verify asked home-tls for a name under Home's"; exit 1; }
+grep -qF "infra-apply: home-tls serves https with a trusted certificate on $tailscale_ip for home.arbikullakshi.com, and Home's web app at https://home.arbikullakshi.com/app/" "$work/out" || { cat "$work/out"; echo "FAIL verify did not report home-tls's certificate for every name and Home's web app"; exit 1; }
 grep -qxF "curl tls home.arbikullakshi.com:443:$tailscale_ip https://home.arbikullakshi.com/app/" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not ask home-tls for Home's web app on the tailnet address"; exit 1; }
 [ ! -e "$state/stack/previous" ] || { echo "FAIL a first release has no previous release"; exit 1; }
-printf '%s\n' "portfolio=$portfolio_repo@$(d 11)" "prizm-provider=$provider_repo@$(d 21)" "prizm-web=$web_repo@$(d 31)" "home-server=$home_repo@$(d 51)" |
+printf '%s\n' "home-server=$home_repo@$(d 51)" |
   cmp -s - "$state/stack/current/running-images.env" || { cat "$state/stack/current/running-images.env"; echo "FAIL running-images.env does not record the running digests"; exit 1; }
-echo "ok   a first release pulls, starts database, provision.sql, portfolio, hypernova, tunnel in order, checks each route through Traefik and the tunnel's /ready, and records the running digests"
+echo "ok   a first home release pulls, starts ai, media, home in order, checks the tailnet ports and home-tls, and records the running digest"
 
 # watchtower_order <name> [steps]: Watchtower was stopped before the first pull,
 # started after the last app `up` and before verify read its logs, and runs again.
 watchtower_order() {
   local name="$1" want="${2:-stop pull up start logs}" got
-  got="$(grep -nE '^stop --time [0-9]+ watchtower$|^start watchtower$|^compose .* pull --quiet$|^compose .*/hypernova up |^logs --since .* watchtower$' "$state/calls" |
+  got="$(grep -nE '^stop --time [0-9]+ watchtower$|^start watchtower$|^compose .* pull --quiet$|^compose .*/(home|portfolio) up |^logs --since .* watchtower$' "$state/calls" |
     sed -E 's,^[0-9]+:,,; s,^stop .*,stop,; s,^start .*,start,; s,^compose .* pull .*,pull,; s,^compose .* up .*,up,; s,^logs .*,logs,' | uniq)"
   [ "$got" = "$(tr ' ' '\n' <<<"$want")" ] || { printf '%s\n' "$got"; echo "FAIL Watchtower was not stopped from the pull to the app up: $name"; exit 1; }
   [ "$(cat "$state/running/watchtower")" = "true false" ] || { echo "FAIL Watchtower does not run after: $name"; exit 1; }
@@ -396,86 +424,127 @@ watchtower_order() {
 watchtower_order "a first release"
 echo "ok   Watchtower is stopped from the first pull until the app stacks are up, then started before verify"
 
-running_image portfolio "$portfolio_repo:latest" 12
+running_image home-server "$home_repo:latest" 52
 sleep 1
 expect_ok "a second release keeps the first as the previous release" "following :latest, auto-updates on; $first_id is kept as the previous release" "$work/second.tgz" release
 second_id="$(current_release)"
 [ "$second_id" != "$first_id" ] || { echo "FAIL the second release reused the first id"; exit 1; }
 [ "$(readlink "$state/stack/previous")" = "releases/$first_id" ] || { echo "FAIL previous does not point at the first release"; exit 1; }
-grep -q '^ADMIN_PASSWORD=second-admin-password$' "$state/stack/current/portfolio/portfolio.env" || { echo "FAIL current is not the second release"; exit 1; }
+grep -q '^FILES_PASSWORD=HarnessFilesPasswordTwo0$' "$state/stack/current/media/sftpgo.env" || { echo "FAIL current is not the second release"; exit 1; }
 
-running_image portfolio "$portfolio_repo:$(printf '1%.0s' $(seq 40))@$(d 10)" 10
-running_image prizm-web "$web_repo:latest@$(d 30)" 30
+running_image home-server "$home_repo:latest@$(d 50)" 50
 sleep 1
-expect_ok "a pinned release" "RELEASE OK: .* is current, pinned \\(PORTFOLIO_IMAGE WEB_IMAGE\\), auto-updates paused for them; $second_id is kept as the previous release" "$work/pinned.tgz" release
+expect_ok "a pinned release" "RELEASE OK: .* is current, pinned \\(HOME_IMAGE\\), auto-updates paused for them; $second_id is kept as the previous release" "$work/home-pinned.tgz" release
 pinned_id="$(current_release)"
 [ "$(find "$state/stack/releases" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 ] || { echo "FAIL old releases were not pruned"; exit 1; }
 [ ! -e "$state/stack/releases/$first_id" ] || { echo "FAIL the oldest release was kept"; exit 1; }
 
-printf '%s\n' "$(d 30) 2026-10-12 10:00:00 +0000 UTC" "$(d 31) 2026-10-01 10:00:00 +0000 UTC" "<none> 2026-09-01 10:00:00 +0000 UTC" "$(d 31) 2026-10-01 10:00:00 +0000 UTC" >"$state/known/$(printf '%s' "$web_repo" | tr / _)"
-expect_ok "status after a pinned release" "current release: $pinned_id \\(verified\\), pinned \\(PORTFOLIO_IMAGE WEB_IMAGE\\), auto-updates paused for them" /dev/null status
+printf '%s\n' "$(d 50) 2026-10-12 10:00:00 +0000 UTC" "$(d 52) 2026-10-01 10:00:00 +0000 UTC" "<none> 2026-09-01 10:00:00 +0000 UTC" "$(d 52) 2026-10-01 10:00:00 +0000 UTC" >"$state/known/$(printf '%s' "$home_repo" | tr / _)"
+expect_ok "status after a pinned release" "current release: $pinned_id \\(verified\\), pinned \\(HOME_IMAGE\\), auto-updates paused for them" /dev/null status
 for want in \
   "infra-apply: previous release: $second_id (verified), following :latest, auto-updates on" \
-  "infra-apply: image portfolio ref=$portfolio_repo:$(printf '1%.0s' $(seq 40))@$(d 10) digest=$(d 10) created=2026-10-11T10:00:00Z" \
-  "infra-apply: image prizm-provider ref=$provider_repo:latest digest=$(d 21) created=2026-10-22T10:00:00Z" \
-  "infra-apply: image prizm-web ref=$web_repo:latest@$(d 30) digest=$(d 30) created=" \
-  "infra-apply: known $web_repo digest=$(d 30) created=2026-10-12 10:00:00 +0000 UTC" \
-  "infra-apply: known $web_repo digest=$(d 31) created=2026-10-01 10:00:00 +0000 UTC" \
-  "infra-apply: recorded $pinned_id portfolio=$portfolio_repo@$(d 10)" \
-  "infra-apply: recorded $second_id portfolio=$portfolio_repo@$(d 12)" \
-  "infra-apply: recorded $second_id prizm-web=$web_repo@$(d 31)" \
-  "NAME IMAGE STATUS (hypernova)"; do
+  "infra-apply: image home-server ref=$home_repo:latest@$(d 50) digest=$(d 50) created=" \
+  "infra-apply: known $home_repo digest=$(d 50) created=2026-10-12 10:00:00 +0000 UTC" \
+  "infra-apply: known $home_repo digest=$(d 52) created=2026-10-01 10:00:00 +0000 UTC" \
+  "infra-apply: recorded $pinned_id home-server=$home_repo@$(d 50)" \
+  "infra-apply: recorded $second_id home-server=$home_repo@$(d 52)" \
+  "NAME IMAGE STATUS (home)"; do
   grep -qF -- "$want" "$work/out" || { cat "$work/out"; echo "FAIL status does not print: $want"; exit 1; }
 done
-[ "$(grep -c "known $web_repo " "$work/out")" -eq 2 ] || { cat "$work/out"; echo "FAIL status lists a known digest twice or lists <none>"; exit 1; }
-[ "$(grep -n "known $web_repo digest=$(d 30)" "$work/out" | cut -d: -f1)" -lt "$(grep -n "known $web_repo digest=$(d 31)" "$work/out" | cut -d: -f1)" ] || { echo "FAIL known digests are not newest first"; exit 1; }
+[ "$(grep -c "known $home_repo " "$work/out")" -eq 2 ] || { cat "$work/out"; echo "FAIL status lists a known digest twice or lists <none>"; exit 1; }
+[ "$(grep -n "known $home_repo digest=$(d 50)" "$work/out" | cut -d: -f1)" -lt "$(grep -n "known $home_repo digest=$(d 52)" "$work/out" | cut -d: -f1)" ] || { echo "FAIL known digests are not newest first"; exit 1; }
 echo "ok   status prints both releases, image, known and recorded lines"
 
+### The hetzner host: database, provision.sql, portfolio, Traefik's TLS settings, the public routes
+
+fake_host=hetzner
 new_state
-expect_ok "status with no release installed" "no release is installed" /dev/null status
+expect_ok "the hetzner bundle build-bundle.sh renders from the real templates" "RELEASE OK: [0-9]{8}T[0-9]{6}Z-[0-9a-f]{12} is current, following :latest, auto-updates on$" "$work/hgood.tgz" release
+hfirst_id="$(current_release)"
+for stack in database portfolio; do
+  grep -q "compose model accepted: .* in the $stack stack, no privileged settings" "$work/out" || { cat "$work/out"; echo "FAIL the checked-in $stack stack did not pass the compose guard"; exit 1; }
+done
+for file in ghcr.env edge/tls.yml database/postgres.env database/provision.sql database/backup.env portfolio/.env portfolio/portfolio.env manifest.sha256; do
+  [ "$(stat -c %a "$state/stack/current/$file")" = 600 ] || { echo "FAIL $file is not 0600 in the release"; exit 1; }
+done
+cmp -s "$state/psql.stdin" "$work/hgood/database/provision.sql" || { echo "FAIL provision.sql was not fed to psql"; exit 1; }
+cmp -s "$state/edge/dynamic/tls.yml" "$work/hgood/edge/tls.yml" || { echo "FAIL edge/tls.yml was not installed for Traefik"; exit 1; }
+[ "$(stat -c %a "$state/edge/dynamic/tls.yml")" = 600 ] || { echo "FAIL Traefik's tls.yml is not 0600"; exit 1; }
+order="$(grep -nE '^compose .*/(database|portfolio) (pull --quiet|up -d.*)$|^exec -i postgresql psql -v ON_ERROR_STOP=1 -U postgres -d postgres$' "$state/calls" | sed -E 's,^[0-9]+:,,; s,^compose .*/(database|portfolio) ,\1 ,; s,^exec .*,psql,')"
+want_order="$(printf '%s\n' 'database pull --quiet' 'portfolio pull --quiet' 'database up -d --wait --remove-orphans' psql 'portfolio up -d --remove-orphans')"
+[ "$order" = "$want_order" ] || { printf '%s\n' "$order"; echo "FAIL the stacks did not start in the order database, provision.sql, portfolio"; exit 1; }
+for want in "curl route arbikullakshi.com http://172.18.0.2:80/api/health" "curl route www.arbikullakshi.com http://172.18.0.2:80/" \
+  "curl mtls arbikullakshi.com:443:172.18.0.2 https://arbikullakshi.com/api/health" "curl mtls www.arbikullakshi.com:443:172.18.0.2 https://www.arbikullakshi.com/"; do
+  grep -qxF "$want" "$state/calls" || { grep '^curl' "$state/calls"; echo "FAIL verify did not check: $want"; exit 1; }
+done
+[ "$(grep -c '^curl \(route\|mtls\) ' "$state/calls")" -eq 4 ] || { grep '^curl' "$state/calls"; echo "FAIL verify checked more than the two names"; exit 1; }
+[ "$(grep -c '^curl public ' "$state/calls")" -eq 3 ] || { grep '^curl' "$state/calls"; echo "FAIL the public check asked other than the two routes and the http redirect"; exit 1; }
+grep -qE '^curl tls ' "$state/calls" && { echo "FAIL the hetzner host asked for home-tls"; exit 1; }
+printf '%s\n' "portfolio=$portfolio_repo@$(d 11)" | cmp -s - "$state/stack/current/running-images.env" ||
+  { cat "$state/stack/current/running-images.env"; echo "FAIL running-images.env does not record the running digest"; exit 1; }
+watchtower_order "a first hetzner release"
+echo "ok   a first hetzner release starts database, provision.sql, portfolio in order, installs Traefik's TLS settings, checks the redirect and the refused handshake, and asks Cloudflare"
+
+running_image portfolio "$portfolio_repo:latest" 12
+sleep 1
+expect_ok "a second hetzner release" "$hfirst_id is kept as the previous release" "$work/hsecond.tgz" release
+grep -q '^ADMIN_PASSWORD=second-admin-password$' "$state/stack/current/portfolio/portfolio.env" || { echo "FAIL current is not the second release"; exit 1; }
+running_image portfolio "$portfolio_repo:$(printf '1%.0s' $(seq 40))@$(d 10)" 10
+sleep 1
+expect_ok "a pinned hetzner release" "RELEASE OK: .* is current, pinned \\(PORTFOLIO_IMAGE\\), auto-updates paused for them" "$work/pinned.tgz" release
 
 new_state
-printf '000' >"$state/curl.hypernova.arbikullakshi.com"
-echo 7 >"$state/curl.hypernova.arbikullakshi.com.rc"
-expect_refused "Traefik refuses the connection" "Traefik answered 000 for hypernova\\.arbikullakshi\\.com/, expected" "$work/good.tgz" release
+printf '000' >"$state/curl.arbikullakshi.com"
+echo 7 >"$state/curl.arbikullakshi.com.rc"
+expect_refused "Traefik refuses the connection" "Traefik answered 000 on http for arbikullakshi\\.com/api/health, expected a redirect to https" "$work/hgood.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release Traefik did not answer for was marked verified"; exit 1; }
 
 new_state
-printf '503' >"$state/curl.ready"
-expect_refused "a tunnel with no connection to Cloudflare" "cloudflared answered 503 on /ready: the tunnel holds no connection to Cloudflare" "$work/good.tgz" release
-[ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release whose tunnel is down was marked verified"; exit 1; }
+printf '200' >"$state/curl.www.arbikullakshi.com"
+expect_refused "plain http served instead of redirected" "Traefik answered 200 on http for www\\.arbikullakshi\\.com/, expected a redirect to https" "$work/hgood.tgz" release
 
 new_state
-printf '000' >"$state/curl.ready"
-echo 7 >"$state/curl.ready.rc"
-expect_refused "a cloudflared that does not answer on its metrics port" "cloudflared answered 000 on /ready" "$work/good.tgz" release
+printf '200' >"$state/curl.mtls.arbikullakshi.com"
+echo 0 >"$state/curl.mtls.arbikullakshi.com.rc"
+expect_refused "https served without Cloudflare's client certificate" "Traefik answered 200 \\(curl exit 0\\) on https for arbikullakshi\\.com/api/health without a client certificate; it must refuse the TLS handshake" "$work/hgood.tgz" release
+[ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release without Authenticated Origin Pulls was marked verified"; exit 1; }
 
 new_state
-: >"$state/ip/cloudflared"
-expect_refused "a cloudflared with no edge address" "cloudflared has no address on the edge network" "$work/good.tgz" release
+echo 7 >"$state/curl.mtls.www.arbikullakshi.com.rc"
+expect_refused "https not answering at all" "Traefik answered 000 \\(curl exit 7\\) on https for www\\.arbikullakshi\\.com/" "$work/hgood.tgz" release
+
+for rc in 35 55; do
+  new_state
+  echo "$rc" >"$state/curl.mtls.arbikullakshi.com.rc"
+  expect_ok "the handshake refused with curl exit $rc" "Traefik redirects http to https and refuses https without Cloudflare's client certificate" "$work/hgood.tgz" release
+done
 
 new_state
 rm "$state/ip/edge-traefik"
-expect_refused "a Traefik with no edge address" "edge-traefik has no address on the edge network" "$work/good.tgz" release
+expect_refused "a Traefik with no edge address" "edge-traefik has no address on the edge network" "$work/hgood.tgz" release
 
 new_state
-printf '200' >"$state/curl.www.arbikullakshi.com"
-expect_refused "www served instead of redirected to the apex" "Traefik answered 200 for www\\.arbikullakshi\\.com/, expected \\^30\\[18\\]\\$" "$work/good.tgz" release
-echo "ok   verify requires each route's own status through Traefik and a connected tunnel"
+rmdir "$state/edge/dynamic"
+expect_refused "a Traefik whose TLS settings directory was never provisioned" "edge/dynamic does not exist; run provisioning with --tags edge" "$work/hgood.tgz" release
+echo "ok   verify requires the redirect to https and the refused handshake from Traefik"
 
 new_state
-expect_ok "the public check asks every route by name through Cloudflare" "Cloudflare serves https://arbikullakshi\.com/api/health https://www\.arbikullakshi\.com/ https://hypernova\.arbikullakshi\.com/ https://hypernova\.arbikullakshi\.com/api/health http://arbikullakshi\.com/api/health$" "$work/good.tgz" release
+expect_ok "the public check asks every route by name through Cloudflare" "Cloudflare serves https://arbikullakshi\\.com/api/health https://www\\.arbikullakshi\\.com/ http://arbikullakshi\\.com/api/health$" "$work/hgood.tgz" release
 
 new_state
 printf '403' >"$state/curl.public.https.arbikullakshi.com"
-expect_refused "Cloudflare blocks a public route" "https://arbikullakshi\.com/api/health answered 403 through Cloudflare, expected .*the release itself is current and verified on the host" "$work/good.tgz" release
+expect_refused "Cloudflare blocks a public route" "https://arbikullakshi\.com/api/health answered 403 through Cloudflare, expected .*the release itself is current and verified on the host" "$work/hgood.tgz" release
 [ -e "$state/stack/current/.verified" ] || { echo "FAIL a release that passed on the host was not marked verified when only Cloudflare failed"; exit 1; }
 if grep -q "A rollback cannot fix\|Run the Deploy workflow with action rollback" "$work/out"; then cat "$work/out"; echo "FAIL a Cloudflare-side failure suggested a rollback"; exit 1; fi
 
 new_state
 printf '200' >"$state/curl.public.http.arbikullakshi.com"
-expect_refused "plain http served instead of redirected to https" "http://arbikullakshi\.com/api/health answered 200 through Cloudflare, expected \^30\[18\]\\\$; the release" "$work/good.tgz" release
+expect_refused "plain http served instead of redirected to https" "http://arbikullakshi\.com/api/health answered 200 through Cloudflare, expected \^30\[18\]\\\$; the release" "$work/hgood.tgz" release
 echo "ok   the public check requires each route's status through Cloudflare, after the host verified the release"
+unset fake_host
+
+new_state
+expect_ok "status with no release installed" "no release is installed" /dev/null status
 
 new_state
 printf '000' >"$state/curl.tls.home.arbikullakshi.com"
@@ -489,21 +558,8 @@ printf '502' >"$state/curl.tls.home.arbikullakshi.com"
 expect_refused "home-tls that cannot reach home-server" "https://home\\.arbikullakshi\\.com/healthz on $tailscale_ip answered 502" "$work/good.tgz" release
 
 new_state
-printf '502' >"$state/curl.tls.status.home.arbikullakshi.com"
-expect_refused "home-tls that cannot reach the status dashboard" "https://status\\.home\\.arbikullakshi\\.com/ on $tailscale_ip answered 502, expected 2xx, 3xx, 401 or 403 with a trusted certificate" "$work/good.tgz" release
-
-new_state
 printf '404' >"$state/curl.tls.home.arbikullakshi.com"
 expect_refused "Home's name answering 404" "https://home\\.arbikullakshi\\.com/healthz on $tailscale_ip answered 404" "$work/good.tgz" release
-
-new_state
-printf '404' >"$state/curl.tls.files.home.arbikullakshi.com"
-expect_refused "a service name home-tls has no route for" "https://files\\.home\\.arbikullakshi\\.com/ on $tailscale_ip answered 404, expected 2xx, 3xx, 401 or 403" "$work/good.tgz" release
-
-new_state
-printf '403' >"$state/curl.tls.s3.home.arbikullakshi.com"
-printf '302' >"$state/curl.tls.files.home.arbikullakshi.com"
-expect_ok "S3 refusing an unsigned request and the file manager redirecting to its login count as routed" "home-tls serves https with a trusted certificate" "$work/good.tgz" release
 
 new_state
 printf '404' >"$state/curl.tls-app.home.arbikullakshi.com"
@@ -536,9 +592,13 @@ printf 'not a tarball\n' >"$work/garbage"
 refused_bundle "a bundle that is not gzip" "not a gzip-compressed tar archive" "$work/garbage"
 
 variant extra
-printf 'set -eu\n' >"$work/extra/portfolio/extra.sh"
+printf 'set -eu\n' >"$work/extra/home/extra.sh"
 repack extra
-refused_bundle "an unexpected entry" "unexpected entry: portfolio/extra\\.sh" "$work/extra.tgz"
+refused_bundle "an unexpected entry" "unexpected entry: home/extra\\.sh" "$work/extra.tgz"
+fake_host=hetzner
+refused_bundle "a home bundle sent to the hetzner host" "unexpected entry: (ai|home|media)/" "$work/good.tgz"
+unset fake_host
+refused_bundle "a hetzner bundle sent to the home server" "unexpected entry: (database|edge|portfolio)/" "$work/hgood.tgz"
 
 variant traversal
 manifest "$work/traversal"
@@ -551,22 +611,22 @@ pack "$work/absolute" "$work/absolute.tgz" -P --transform 's,^ghcr.env$,/etc/cro
 refused_bundle "an absolute path entry" "unexpected entry: /etc/cron\\.d/ghcr" "$work/absolute.tgz"
 
 variant symlink
-rm "$work/symlink/portfolio/portfolio.env"
-ln -s /etc/passwd "$work/symlink/portfolio/portfolio.env"
+rm "$work/symlink/home/home-server.env"
+ln -s /etc/passwd "$work/symlink/home/home-server.env"
 manifest "$work/symlink" 2>/dev/null || true
 pack "$work/symlink" "$work/symlink.tgz"
-refused_bundle "a symlink entry" "portfolio/portfolio\\.env is not a regular file" "$work/symlink.tgz"
+refused_bundle "a symlink entry" "home/home-server\\.env is not a regular file" "$work/symlink.tgz"
 
 variant hardlink
-rm "$work/hardlink/hypernova/provider.env"
-ln "$work/hardlink/portfolio/portfolio.env" "$work/hardlink/hypernova/provider.env"
+rm "$work/hardlink/media/sftpgo.env"
+ln "$work/hardlink/home/home-server.env" "$work/hardlink/media/sftpgo.env"
 repack hardlink
 refused_bundle "a hard link entry" "is not a regular file" "$work/hardlink.tgz"
 
 variant withdir
 manifest "$work/withdir"
-(cd "$work/withdir" && tar --create --gzip --file "$work/withdir.tgz" --owner=0 --group=0 manifest.sha256 release.env ghcr.env database portfolio hypernova tunnel ai media home)
-refused_bundle "a directory entry" "unexpected entry: database/" "$work/withdir.tgz"
+(cd "$work/withdir" && tar --create --gzip --file "$work/withdir.tgz" --owner=0 --group=0 manifest.sha256 release.env ghcr.env ai media home)
+refused_bundle "a directory entry" "unexpected entry: ai/" "$work/withdir.tgz"
 
 variant duplicate
 manifest "$work/duplicate"
@@ -576,24 +636,24 @@ gzip -c "$work/duplicate.tar" >"$work/duplicate.tgz"
 refused_bundle "an entry named twice" "more than once" "$work/duplicate.tgz"
 
 variant missing
-rm "$work/missing/database/provision.sql"
+rm "$work/missing/home/home-keys.env"
 repack missing
-refused_bundle "a missing file" "missing database/provision\\.sql" "$work/missing.tgz"
+refused_bundle "a missing file" "missing home/home-keys\\.env" "$work/missing.tgz"
 
 variant large
-head -c 300000 /dev/zero | tr '\0' 'a' >"$work/large/hypernova/provider.env"
+head -c 300000 /dev/zero | tr '\0' 'a' >"$work/large/media/sftpgo.env"
 repack large
 refused_bundle "a file over 256 KiB" "did not extract cleanly|larger than 262144 bytes" "$work/large.tgz"
 
 variant tampered
 manifest "$work/tampered"
-printf 'EXTRA=1\n' >>"$work/tampered/portfolio/portfolio.env"
+printf 'EXTRA=1\n' >>"$work/tampered/home/home-server.env"
 pack "$work/tampered" "$work/tampered.tgz"
 refused_bundle "a checksum mismatch" "does not match its manifest\\.sha256 checksum" "$work/tampered.tgz"
 
 variant short
 manifest "$work/short"
-grep -v ' hypernova/provider.env$' "$work/short/manifest.sha256" >"$work/short/manifest.new"
+grep -v ' media/sftpgo.env$' "$work/short/manifest.sha256" >"$work/short/manifest.new"
 mv "$work/short/manifest.new" "$work/short/manifest.sha256"
 pack "$work/short" "$work/short.tgz"
 refused_bundle "a manifest that leaves a file out" "does not list exactly the files" "$work/short.tgz"
@@ -605,24 +665,38 @@ pack "$work/outside" "$work/outside.tgz"
 refused_bundle "a manifest that names an extra file" "names an unexpected file" "$work/outside.tgz"
 
 variant badenv
-printf 'export EVIL=1\n' >>"$work/badenv/hypernova/provider.env"
+printf 'export EVIL=1\n' >>"$work/badenv/media/sftpgo.env"
 repack badenv
-refused_bundle "an env line that is not KEY=value" "hypernova/provider\\.env line 12 is not KEY=value" "$work/badenv.tgz"
+refused_bundle "an env line that is not KEY=value" "media/sftpgo\\.env line $(wc -l <"$work/badenv/media/sftpgo.env") is not KEY=value" "$work/badenv.tgz"
 
 variant comment
-sed -i '1i # a comment' "$work/comment/portfolio/.env"
+sed -i '1i # a comment' "$work/comment/home/.env"
 repack comment
-refused_bundle "an env comment line" "portfolio/\\.env line 1 is not KEY=value" "$work/comment.tgz"
+refused_bundle "an env comment line" "home/\\.env line 1 is not KEY=value" "$work/comment.tgz"
 
 variant badghcr
 printf 'GHCR_USERNAME=infra-bot\nGHCR_TOKEN=x\nGHCR_EXTRA=1\n' >"$work/badghcr/ghcr.env"
 repack badghcr
 refused_bundle "ghcr.env with an extra key" "must set exactly GHCR_USERNAME and GHCR_TOKEN" "$work/badghcr.tgz"
 
-variant badtunnel
-printf 'TUNNEL_TOKEN=eyJx\nTUNNEL_ORIGIN_CERT=/etc/passwd\n' >"$work/badtunnel/tunnel/tunnel.env"
-repack badtunnel
-refused_bundle "tunnel.env with an extra key" "tunnel/tunnel\\.env must set exactly TUNNEL_TOKEN" "$work/badtunnel.tgz"
+fake_host=hetzner
+variant badbackup
+printf 'RCLONE_CONFIG=/etc/passwd\n' >>"$work/badbackup/database/backup.env"
+repack badbackup
+refused_bundle "backup.env with an extra key" "database/backup\\.env must set exactly RCLONE_S3_PROVIDER RCLONE_S3_ENDPOINT RCLONE_S3_ACCESS_KEY_ID RCLONE_S3_SECRET_ACCESS_KEY" "$work/badbackup.tgz"
+variant badendpoint
+sed -i 's,^RCLONE_S3_ENDPOINT=.*,RCLONE_S3_ENDPOINT=https://evil.example.com,' "$work/badendpoint/database/backup.env"
+repack badendpoint
+refused_bundle "backup.env pointing the dump elsewhere" "database/backup\\.env must set exactly" "$work/badendpoint.tgz"
+variant badtls
+sed -i '/clientAuthType/d' "$work/badtls/edge/tls.yml"
+repack badtls
+refused_bundle "tls.yml without the client-certificate rule" "edge/tls\\.yml does not hold the origin certificate and the client-certificate rule" "$work/badtls.tgz"
+variant notls
+rm "$work/notls/edge/tls.yml"
+repack notls
+refused_bundle "a hetzner bundle without tls.yml" "missing edge/tls\\.yml" "$work/notls.tgz"
+unset fake_host
 
 variant badhometls
 printf 'CF_DNS_API_TOKEN=HarnessHomeTlsDnsToken0123456789abcdefABCDEF\nCF_API_EMAIL=x\n' >"$work/badhometls/media/home-tls.env"
@@ -688,28 +762,30 @@ release_env_case "release.env naming a key twice" "must set exactly RELEASE_MODE
 release_env_case "a pinned release without a digest" "a pinned release must pin at least one image" "RELEASE_MODE=pinned\nRELEASE_COMMIT=$commit_one\n"
 
 variant latestdigest
-sed -i "s,^PORTFOLIO_IMAGE=.*,PORTFOLIO_IMAGE=$portfolio_repo:latest@$(d 1)," "$work/latestdigest/portfolio/.env"
+sed -i "s,^HOME_IMAGE=.*,HOME_IMAGE=$home_repo:latest@$(d 1)," "$work/latestdigest/home/.env"
 repack latestdigest
-refused_bundle "a latest release with a digest" "PORTFOLIO_IMAGE must be $portfolio_repo:latest in a latest release" "$work/latestdigest.tgz"
+refused_bundle "a latest release with a digest" "HOME_IMAGE must be $home_repo:latest in a latest release" "$work/latestdigest.tgz"
 
-unpack "$work/pinned.tgz" "$work/pinnedtag"
-sed -i "s,^PROVIDER_IMAGE=.*,PROVIDER_IMAGE=$provider_repo:v2," "$work/pinnedtag/hypernova/.env"
+unpack "$work/home-pinned.tgz" "$work/pinnedtag"
+sed -i "s,^HOME_IMAGE=.*,HOME_IMAGE=$home_repo:v2," "$work/pinnedtag/home/.env"
 repack pinnedtag
-refused_bundle "a pinned release with a moving tag" "PROVIDER_IMAGE must be $provider_repo:latest or" "$work/pinnedtag.tgz"
+refused_bundle "a pinned release with a moving tag" "HOME_IMAGE must be $home_repo:latest or" "$work/pinnedtag.tgz"
 
 variant otherrepo
-sed -i "s,^WEB_IMAGE=.*,WEB_IMAGE=ghcr.io/evil/hypernova-web:latest," "$work/otherrepo/hypernova/.env"
+sed -i "s,^HOME_IMAGE=.*,HOME_IMAGE=ghcr.io/evil/home-server:latest," "$work/otherrepo/home/.env"
 repack otherrepo
-refused_bundle "an app image from another repository" "WEB_IMAGE runs ghcr\\.io/evil/hypernova-web:latest, not an image of $web_repo" "$work/otherrepo.tgz"
+refused_bundle "an app image from another repository" "HOME_IMAGE runs ghcr\\.io/evil/home-server:latest, not an image of $home_repo" "$work/otherrepo.tgz"
 
+fake_host=hetzner
 variant twice
 printf 'PORTFOLIO_IMAGE=%s:latest\n' "$portfolio_repo" >>"$work/twice/portfolio/.env"
 repack twice
 refused_bundle "an image key set twice" "must set PORTFOLIO_IMAGE exactly once" "$work/twice.tgz"
+unset fake_host
 
 installed_state
 echo 1 >"$state/config.rc"
-expect_refused "a compose file docker compose rejects" "docker compose rejects database/docker-compose\\.yml" "$work/good.tgz" release
+expect_refused "a compose file docker compose rejects" "docker compose rejects ai/docker-compose\\.yml" "$work/good.tgz" release
 expect_untouched "a compose file docker compose rejects"
 
 installed_state
@@ -727,7 +803,7 @@ grep -qE '^compose .* (pull|up)( |$)' "$state/calls" && { echo "FAIL the stacks 
 
 installed_state
 echo 1 >"$state/pull.rc"
-expect_refused "an image pull that fails" "pulling the database images failed; the running release is untouched" "$work/good.tgz" release
+expect_refused "an image pull that fails" "pulling the ai images failed; the running release is untouched" "$work/good.tgz" release
 grep -qE '^compose .* up( |$)' "$state/calls" && { echo "FAIL a stack started after a failed pull"; exit 1; }
 [ "$(current_release)" = "$base_id" ] || { echo "FAIL a failed pull moved current"; exit 1; }
 [ "$(find "$state/stack/releases" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || { echo "FAIL a failed pull left its release on disk"; exit 1; }
@@ -750,12 +826,19 @@ expect_refused "a release on a host without Watchtower" "watchtower is not runni
 grep -qE '^(stop|start) ' "$state/calls" && { echo "FAIL infra-apply stopped or started a Watchtower that was not running"; exit 1; }
 echo "ok   a Watchtower that is not running is neither stopped nor started"
 
+fake_host=hetzner
 new_state
 rm "$state/edge/docker-compose.yml"
-expect_refused "a host whose edge was never provisioned" "edge/docker-compose\\.yml does not exist, so no Traefik routes the stacks" "$work/good.tgz" release
+expect_refused "a hetzner host whose edge was never provisioned" "edge/docker-compose\\.yml does not exist, so no Traefik routes the stacks" "$work/hgood.tgz" release
 new_state
 sed -i "s,^PORTFOLIO_IMAGE_REPO=.*,PORTFOLIO_IMAGE_REPO=not a repo," "$state/host.env"
-expect_refused "a host.env with a malformed repository" "PORTFOLIO_IMAGE_REPO is not an image repository" "$work/good.tgz" release
+expect_refused "a host.env with a malformed repository" "PORTFOLIO_IMAGE_REPO is not an image repository" "$work/hgood.tgz" release
+unset fake_host
+new_state
+expect_ok "a home server without the edge Traefik" "RELEASE OK" "$work/good.tgz" release
+new_state
+sed -i '/^INFRA_HOST=/d' "$state/host.env"
+expect_refused "a host.env without the host's kind" "INFRA_HOST is neither home nor hetzner; run provisioning" "$work/good.tgz" release
 new_state
 sed -i '/^TAILSCALE_IP=/d' "$state/host.env"
 expect_refused "a host.env without the Tailscale address" "TAILSCALE_IP is not this host's Tailscale IPv4" "$work/good.tgz" release
@@ -793,38 +876,37 @@ open(path, 'w').write(text)
   repack compose
   refused_bundle "the guard: $name" "$stack/docker-compose\\.yml: $want" "$work/compose.tgz"
 }
+fake_host=hetzner
 db_service='    restart: always\n'
 compose_case "privileged" database "service postgres sets privileged, which gives it root" "text = text.replace('$db_service', '$db_service    privileged: true\n')"
 compose_case "cap_add" database "service postgres sets cap_add, which adds kernel capabilities" "text = text.replace('$db_service', '$db_service    cap_add: [NET_ADMIN]\n')"
 compose_case "ports" portfolio "service portfolio sets ports, which publishes a host port" "text = text.replace('    restart: always\n', '    restart: always\n    ports: [\"3000:3000\"]\n')"
-compose_case "a bind mount" portfolio 'service portfolio has a "bind" mount of "/etc"' "text = text.replace('      - portfolio-media:/app/media\n', '      - portfolio-media:/app/media\n      - /etc:/host-etc:ro\n')"
-compose_case "the Docker socket" hypernova 'service provider mounts the Docker socket "/var/run/docker.sock"' "text = text.replace('      - prizm-storage:/app/storage\n', '      - prizm-storage:/app/storage\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n')"
-compose_case "network_mode host" hypernova "service web sets network_mode, which a release may not set" "text = text.replace('    networks:\n      - edge\n    labels:', '    network_mode: host\n    labels:')"
+compose_case "a bind mount" portfolio 'service portfolio has a "bind" mount of "/etc"' "text = text.replace('    env_file: portfolio.env\n', '    env_file: portfolio.env\n    volumes:\n      - /etc:/host-etc:ro\n')"
+compose_case "the Docker socket" portfolio 'service portfolio mounts the Docker socket "/var/run/docker.sock"' "text = text.replace('    env_file: portfolio.env\n', '    env_file: portfolio.env\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n')"
+compose_case "network_mode host" portfolio "service portfolio sets network_mode, which a release may not set" "text = text.replace('    networks:\n      - data\n      - edge\n    healthcheck:', '    network_mode: host\n    healthcheck:')"
 compose_case "pid host" database "service postgres sets pid, which a release may not set" "text = text.replace('$db_service', '$db_service    pid: host\n')"
 compose_case "a foreign env_file" portfolio 'service portfolio reads env_file "../ghcr.env"' "text = text.replace('    env_file: portfolio.env\n', '    env_file: [portfolio.env, ../ghcr.env]\n')"
-compose_case "another stack's env_file" hypernova 'service web reads env_file "../portfolio/portfolio.env"' "text = text.replace('    environment:\n      NODE_ENV', '    env_file: ../portfolio/portfolio.env\n    environment:\n      NODE_ENV')"
+compose_case "another stack's env_file" database 'service postgres reads env_file "../portfolio/portfolio.env"' "text = text.replace('    env_file: postgres.env\n', '    env_file: [postgres.env, ../portfolio/portfolio.env]\n')"
+compose_case "the backup key in postgres" database 'service postgres reads env_file "backup.env"' "text = text.replace('    env_file: postgres.env\n', '    env_file: [postgres.env, backup.env]\n')"
 compose_case "pgdata without external or name" database 'volume pgdata is "database_pgdata"; the database stack keeps its data in "pgdata-v18" \(external\)' "text = text.replace('    name: pgdata-v18\n    external: true\n', '')"
-compose_case "the media volume under the project prefix" portfolio 'volume portfolio-media is "portfolio_portfolio-media"' "text = text.replace('    name: portfolio-media\n', '    name: portfolio_portfolio-media\n')"
-compose_case "an extra volume" hypernova 'the volumes are \["extra", "prizm-storage"\]' "text = text.replace('      - prizm-storage:/app/storage\n', '      - prizm-storage:/app/storage\n      - extra:/extra\n').replace('volumes:\n  prizm-storage:\n', 'volumes:\n  prizm-storage:\n  extra:\n')"
+compose_case "the media volume back in the portfolio" portfolio 'the volumes are \["portfolio-media"\]; the portfolio stack uses exactly \[\]' "text = text.replace('    env_file: portfolio.env\n', '    env_file: portfolio.env\n    volumes:\n      - portfolio-media:/app/media\n') + 'volumes:\n  portfolio-media:\n    name: portfolio-media\n'"
+compose_case "an extra volume" database 'the volumes are \["extra", "pgdata"\]' "text = text.replace('      - pgdata:/var/lib/postgresql\n', '      - pgdata:/var/lib/postgresql\n      - extra:/extra\n').replace('\nvolumes:\n  pgdata:\n', '\nvolumes:\n  extra:\n  pgdata:\n')"
 compose_case "an external network other than edge and data" portfolio 'network edge is "bridge"; the portfolio stack may only join' "text = text.replace('    name: edge\n', '    name: bridge\n')"
 compose_case "edge on the database" database 'network data is "edge"; the database stack may only join the existing network\(s\) data' "text = text.replace('    name: data\n', '    name: edge\n')"
-compose_case "a wrong container_name" hypernova 'service web sets container_name "hypernova-web"' "text = text.replace('container_name: prizm-web', 'container_name: hypernova-web')"
+compose_case "a wrong container_name" portfolio 'service portfolio sets container_name "portfolio-web"' "text = text.replace('container_name: portfolio', 'container_name: portfolio-web')"
 compose_case "a Watchtower label on postgres" database "service postgres sets the label com.centurylinklabs.watchtower.enable" "text = text.replace('$db_service', '$db_service    labels: [com.centurylinklabs.watchtower.enable=true]\n')"
 compose_case "a traefik label on postgres" database "service postgres sets the label traefik.enable" "text = text.replace('$db_service', '$db_service    labels:\n      traefik.enable: \"true\"\n')"
 compose_case "extends" database "service postgres extends another service" "text = text.replace('  postgres:\n', '  base:\n    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873\n    container_name: postgresql-base\n    networks: [data]\n  postgres:\n    extends: base\n')"
-compose_case "include" hypernova "includes another compose file" "text = text.replace('name: hypernova\n', 'name: hypernova\ninclude:\n  - ../database/docker-compose.yml\n')"
+compose_case "include" portfolio "includes another compose file" "text = text.replace('name: portfolio\n', 'name: portfolio\ninclude:\n  - ../database/docker-compose.yml\n', 1)"
 compose_case "a YAML merge key" portfolio "uses a YAML merge key" "text = text.replace('name: portfolio\n', 'name: portfolio\nx-base: &base\n  restart: always\n', 1).replace('    restart: always\n    security_opt', '    <<: *base\n    security_opt')"
-compose_case "profiles" hypernova "service debug sets profiles" "text = text.replace('\nnetworks:\n  edge:', '\n  debug:\n    image: alpine:3.22@sha256:$(printf '0%.0s' $(seq 64))\n    container_name: prizm-web\n    profiles: [debug]\n\nnetworks:\n  edge:', 1)"
+compose_case "profiles" portfolio "service debug sets profiles" "text = text.replace('\nnetworks:\n  edge:', '\n  debug:\n    image: alpine:3.22@sha256:$(printf '0%.0s' $(seq 64))\n    container_name: portfolio\n    profiles: [debug]\n\nnetworks:\n  edge:', 1)"
 compose_case "an unpinned third-party image" database 'service postgres runs "postgres:18-alpine"' "import re; text = re.sub(r'image: postgres:\S+', 'image: postgres:18-alpine', text)"
 compose_case "a root user" portfolio 'service portfolio sets user "0:0"' "text = text.replace('    restart: always\n', '    restart: always\n    user: \"0:0\"\n')"
 compose_case "another security_opt" portfolio 'service portfolio sets security_opt "seccomp=unconfined"' "text = text.replace('      - no-new-privileges:true\n', '      - no-new-privileges:true\n      - seccomp=unconfined\n')"
 compose_case "a privileged flag hidden behind a default" database "service postgres sets privileged" "text = text.replace('$db_service', '$db_service    privileged: \${X_FLAG:-false}\n')"
 compose_case "a wrong project name" portfolio 'the project name is "other", not portfolio' "text = text.replace('name: portfolio\n', 'name: other\n', 1)"
-compose_case "a traefik label on cloudflared" tunnel "service cloudflared sets the label traefik.enable; the tunnel stack is never routed or auto-updated" "text = text.replace('      - autoheal=true\n', '      - autoheal=true\n      - traefik.enable=true\n')"
-compose_case "a published metrics port" tunnel "service cloudflared sets ports, which publishes a host port" "text = text.replace('    restart: always\n', '    restart: always\n    ports: [\"2000:2000\"]\n')"
-compose_case "cloudflared on the data network" tunnel 'network data is "data"; the tunnel stack may only join the existing network\(s\) edge' "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - data\n    labels:').replace('networks:\n  edge:\n    name: edge\n    external: true\n', 'networks:\n  edge:\n    name: edge\n    external: true\n  data:\n    name: data\n    external: true\n')"
-compose_case "a volume on the tunnel" tunnel 'the volumes are \["state"\]; the tunnel stack uses exactly \[\]' "text = text.replace('    labels:\n      - autoheal', '    volumes:\n      - state:/state\n    labels:\n      - autoheal') + 'volumes:\n  state:\n'"
-compose_case "an unpinned cloudflared" tunnel 'service cloudflared runs "cloudflare/cloudflared:latest"' "import re; text = re.sub(r'image: cloudflare/cloudflared:\S+', 'image: cloudflare/cloudflared:latest', text)"
+compose_case "the portfolio on llm" portfolio 'network llm is "llm"; the portfolio stack may only join the existing network\(s\) data and edge' "text = text.replace('      - edge\n    healthcheck:', '      - edge\n      - llm\n    healthcheck:', 1).replace('networks:\n  edge:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  edge:\n', 1)"
+unset fake_host
 # The ai stack: llama-server alone, hardened as the ai account, on home-llm alone, published nowhere.
 llama_networks='    networks:\n      - home-llm\n    healthcheck:'
 compose_case "Ollama back in the ai stack" ai 'service ollama sets container_name "ollama"; the ai stack names its containers llama' "text = text.replace('services:\n', 'services:\n  ollama:\n    image: ollama/ollama:0.40.4@sha256:926d40fd6eeeebd346b5c358a63de2a10ec995371cd93dd22f1843200694b1a6\n    container_name: ollama\n    user: \"\${AI_UID}:\${AI_GID}\"\n    mem_limit: 8g\n    read_only: true\n    cap_drop: [ALL]\n    security_opt:\n      - no-new-privileges:true\n    networks:\n      - home-llm\n\n', 1)"
@@ -843,8 +925,6 @@ compose_case "llama-server published on the tailnet" ai "service llama sets port
 compose_case "llama-server as root" ai 'service llama runs as "0:0"; it must run as 2001:2001' "text = text.replace('    container_name: llama\n    user: \"\${AI_UID}:\${AI_GID}\"\n', '    container_name: llama\n    user: \"0:0\"\n')"
 compose_case "llama-server unpinned" ai 'service llama runs "ghcr.io/ggml-org/llama.cpp:server-cuda"' "import re; text = re.sub(r'image: ghcr.io/ggml-org/llama.cpp:\S+', 'image: ghcr.io/ggml-org/llama.cpp:server-cuda', text)"
 compose_case "llama-server reading the film library" ai 'service llama has a "bind" mount of "/srv/media/movies"' "text = text.replace('      - type: volume\n        source: llama-models\n', '      - type: bind\n        source: /srv/media/movies\n        target: /films\n        bind:\n          create_host_path: false\n      - type: volume\n        source: llama-models\n', 1)"
-compose_case "hypernova's web app on the data network" hypernova "service web joins data; prizm-web may only join edge" "text = text.replace('    networks:\n      - edge\n    labels:', '    networks:\n      - edge\n      - data\n    labels:')"
-compose_case "hypernova's provider on llm, Ollama's old line" hypernova 'network llm is "llm"; the hypernova stack may only join the existing network\(s\) data and edge' "text = text.replace('      - edge\n    healthcheck:', '      - edge\n      - llm\n    healthcheck:', 1).replace('networks:\n  edge:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  edge:\n', 1)"
 
 # The media stack: tailnet-only, hardened, only Garage's objects and Beszel's two size folders bound.
 # shellcheck disable=SC2016 # the compose text, ${TAILSCALE_IP} literal
@@ -900,17 +980,18 @@ compose_case "the media group for the file manager" media "service sftpgo sets g
 compose_case "home-server on llm, Ollama's old line" home 'network llm is "llm"; the home stack may only join the existing network\(s\) home-llm and media' "text = text.replace('      - home-llm\n    healthcheck:', '      - home-llm\n      - llm\n    healthcheck:', 1).replace('networks:\n  media:\n', 'networks:\n  llm:\n    name: llm\n    external: true\n  media:\n')"
 compose_case "home-keys on home-llm" home "service home-keys joins home-llm; home-keys may only join media" "text = text.replace('    networks:\n      - media\n\n  home-server:', '    networks:\n      - media\n      - home-llm\n\n  home-server:')"
 # The guard on its own, against the resolved models of the checked-in stacks.
-for stack in database portfolio hypernova tunnel ai media home; do
+for stack in database portfolio ai media home; do
   repos=()
+  bundle=good
   case "$stack" in
-    portfolio) repos=("$portfolio_repo") ;;
-    hypernova) repos=("$provider_repo" "$web_repo") ;;
+    database) bundle=hgood ;;
+    portfolio) bundle=hgood repos=("$portfolio_repo") ;;
     ai) repos=(--service-user=2001:2001) ;;
     media) repos=(--service-user=2000:2000) ;;
     home) repos=(--service-user=65532:65532 --media-gid=2000 "$home_repo") ;;
   esac
-  TAILSCALE_IP="$tailscale_ip" "$REAL_DOCKER" compose --file "$work/good/$stack/docker-compose.yml" --project-directory "$work/good/$stack" config --no-env-resolution --format json >"$work/$stack.json"
-  python3 -I "$guard" "$work/$stack.json" "$work/good/$stack" "$stack" "--tailscale-ip=$tailscale_ip" "${repos[@]}" >"$work/guard.out" || { cat "$work/guard.out"; echo "FAIL the guard refuses the checked-in $stack stack"; exit 1; }
+  TAILSCALE_IP="$tailscale_ip" "$REAL_DOCKER" compose --file "$work/$bundle/$stack/docker-compose.yml" --project-directory "$work/$bundle/$stack" config --no-env-resolution --format json >"$work/$stack.json"
+  python3 -I "$guard" "$work/$stack.json" "$work/$bundle/$stack" "$stack" "--tailscale-ip=$tailscale_ip" "${repos[@]}" >"$work/guard.out" || { cat "$work/guard.out"; echo "FAIL the guard refuses the checked-in $stack stack"; exit 1; }
 done
 if python3 -I "$guard" "$work/ai.json" "$work/good/ai" ai "--tailscale-ip=$tailscale_ip" >"$work/guard.out"; then echo "FAIL the guard accepted the ai stack without its service account"; exit 1; fi
 if python3 -I "$guard" "$work/media.json" "$work/good/media" media --service-user=2000:2000 >"$work/guard.out"; then echo "FAIL the guard accepted a tailnet port without the Tailscale address"; exit 1; fi
@@ -924,22 +1005,25 @@ grep -qF "no media gid was given" "$work/guard.out" || { cat "$work/guard.out"; 
 if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 --media-gid=2001 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard let home-server join a group other than the media account's"; exit 1; fi
 if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=65532:65532 --media-gid=0 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard took root's group for the media group"; exit 1; fi
 if python3 -I "$guard" "$work/home.json" "$work/good/home" home "--tailscale-ip=$tailscale_ip" --service-user=2000:2000 "$home_repo" >"$work/guard.out"; then echo "FAIL the guard ran the home stack as the media account"; exit 1; fi
-if python3 -I "$guard" "$work/hypernova.json" "$work/good/hypernova" hypernova >"$work/guard.out"; then echo "FAIL the guard accepted app images no host.env names"; exit 1; fi
-if python3 -I "$guard" "$work/portfolio.json" "$work/good/portfolio" crm >"$work/guard.out"; then echo "FAIL the guard accepted an unknown stack"; exit 1; fi
+if python3 -I "$guard" "$work/portfolio.json" "$work/hgood/portfolio" portfolio >"$work/guard.out"; then echo "FAIL the guard accepted app images no host.env names"; exit 1; fi
+for gone in hypernova tunnel crm; do
+  if python3 -I "$guard" "$work/portfolio.json" "$work/hgood/portfolio" "$gone" >"$work/guard.out"; then echo "FAIL the guard accepted the stack $gone"; exit 1; fi
+done
 echo "ok   the guard alone passes the checked-in stacks and needs the host's app repositories"
 
 ### Failed after install: the previous verified release is named
 
+fake_host=hetzner
 installed_state
 sleep 1
 echo 3 >"$state/psql.rc"
-expect_refused "provision.sql fails" "FAILED: before the app stacks changed, provision\\.sql failed" "$work/second.tgz" release
+expect_refused "provision.sql fails" "FAILED: before the app stacks changed, provision\\.sql failed" "$work/hsecond.tgz" release
 grep -qF "the last verified release was $base_id" "$work/out" || { cat "$work/out"; echo "FAIL the provision failure does not name the last verified release"; exit 1; }
 grep -qF "password '***'" "$work/out" || { cat "$work/out"; echo "FAIL the psql error was not shown with its literal masked"; exit 1; }
-grep -qE '^compose .*/(portfolio|hypernova) up' "$state/calls" && { echo "FAIL an app stack started after provision.sql failed"; exit 1; }
+grep -qE '^compose .*/portfolio up' "$state/calls" && { echo "FAIL an app stack started after provision.sql failed"; exit 1; }
 [ "$(current_release)" = "$base_id" ] || { echo "FAIL a provision failure moved current"; exit 1; }
 grep -qF "rollback cannot fix this" "$work/out" || { cat "$work/out"; echo "FAIL the provision failure advertises a rollback"; exit 1; }
-grep -qF "revert the stack/database or secret change on master and run release" "$work/out" || { cat "$work/out"; echo "FAIL the provision failure does not name the revert recovery"; exit 1; }
+grep -qF "revert that change on master and run release" "$work/out" || { cat "$work/out"; echo "FAIL the provision failure does not name the revert recovery"; exit 1; }
 grep -q 'action rollback' "$work/out" && { cat "$work/out"; echo "FAIL the provision failure recommends a rollback"; exit 1; }
 grep -q '^start watchtower$' "$state/calls" || { echo "FAIL Watchtower was not started again after a provision failure"; exit 1; }
 [ "$(cat "$state/running/watchtower")" = "true false" ] || { echo "FAIL Watchtower does not run after a provision failure"; exit 1; }
@@ -949,24 +1033,36 @@ echo "ok   a provision.sql failure leaves the app stacks and current untouched a
 installed_state
 sleep 1
 echo 1 >"$state/up.database.rc"
-expect_refused "the database does not come up healthy" "FAILED: before the app stacks changed, the database did not come up healthy" "$work/second.tgz" release
-for want in "the last verified release was $base_id" "rollback cannot fix this" "revert the stack/database or secret change on master and run release" "current still names $base_id. A rollback cannot fix this"; do
+expect_refused "the database does not come up healthy" "FAILED: before the app stacks changed, the database did not come up healthy" "$work/hsecond.tgz" release
+for want in "the last verified release was $base_id" "rollback cannot fix this" "revert that change on master and run release" "current still names $base_id. A rollback cannot fix this"; do
   grep -qF -- "$want" "$work/out" || { cat "$work/out"; echo "FAIL the database failure does not print: $want"; exit 1; }
 done
 grep -q 'action rollback' "$work/out" && { cat "$work/out"; echo "FAIL the database failure recommends a rollback"; exit 1; }
-grep -qE '^compose .*/(portfolio|hypernova) up' "$state/calls" && { echo "FAIL an app stack started after the database failed"; exit 1; }
+grep -qE '^compose .*/portfolio up' "$state/calls" && { echo "FAIL an app stack started after the database failed"; exit 1; }
 [ "$(current_release)" = "$base_id" ] || { echo "FAIL a database failure moved current"; exit 1; }
 echo "ok   a database failure leaves current untouched and names a recovery that can fix it"
 
 new_state
 echo 1 >"$state/up.database.rc"
-expect_refused "the database of a first release does not come up healthy" "installed but not current; no release is current yet\\. A rollback cannot fix this" "$work/good.tgz" release
+expect_refused "the database of a first release does not come up healthy" "installed but not current; no release is current yet\\. A rollback cannot fix this" "$work/hgood.tgz" release
 grep -q 'the last verified release was' "$work/out" && { cat "$work/out"; echo "FAIL a first release names a last verified release"; exit 1; }
 
 installed_state
 sleep 1
-echo 1 >"$state/up.hypernova.rc"
-expect_refused "an app stack that does not start" "FAILED: hypernova did not start" "$work/second.tgz" release
+printf '404' >"$state/curl.www.arbikullakshi.com"
+expect_refused "Traefik answers 404 for a host" "Traefik answered 404 on http for www\\.arbikullakshi\\.com/, expected a redirect" "$work/hsecond.tgz" release
+grep -qF "the last verified release was $base_id" "$work/out" || { cat "$work/out"; echo "FAIL the 404 failure does not name the last verified release"; exit 1; }
+
+installed_state
+sleep 1
+echo "true true" >"$state/running/edge-socket-proxy"
+expect_refused "Traefik's socket proxy restart-looping" "edge-socket-proxy is not running" "$work/hsecond.tgz" release
+unset fake_host
+
+installed_state
+sleep 1
+echo 1 >"$state/up.home.rc"
+expect_refused "an app stack that does not start" "FAILED: home did not start" "$work/second.tgz" release
 for want in "the last verified release was $base_id" "rollback only if an app image causes" "revert that change on master and run release"; do
   grep -qF -- "$want" "$work/out" || { cat "$work/out"; echo "FAIL the app start failure does not print: $want"; exit 1; }
 done
@@ -977,58 +1073,58 @@ echo "ok   an app start failure says when a rollback helps and when to revert on
 
 installed_state
 sleep 1
-sed -i 's,^c3 /prizm-provider running always healthy hypernova$,c3 /prizm-provider running always starting hypernova,' "$state/containers"
-expect_refused "a container that never turns healthy" "not ready after 1s: prizm-provider:starting" "$work/second.tgz" release
+sed -i 's,^c26 /home-server running always healthy home$,c26 /home-server running always starting home,' "$state/containers"
+expect_refused "a container that never turns healthy" "not ready after 1s: home-server:starting" "$work/second.tgz" release
 grep -qF "the last verified release was $base_id" "$work/out" || { cat "$work/out"; echo "FAIL the failure does not name the last verified release"; exit 1; }
 grep -qF "rollback only if an app image causes" "$work/out" || { cat "$work/out"; echo "FAIL the verify failure does not qualify the rollback"; exit 1; }
 [ "$(readlink "$state/stack/previous")" = "releases/$base_id" ] || { echo "FAIL the verified release is not kept as previous"; exit 1; }
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL an unhealthy release was marked verified"; exit 1; }
 failed_id="$(current_release)"
-sed -i 's,starting hypernova$,healthy hypernova,' "$state/containers"
+sed -i 's,starting home$,healthy home,' "$state/containers"
 sleep 1
 expect_ok "a release after a failed one keeps the last verified release" "$base_id is kept as the previous release" "$work/good.tgz" release
 [ ! -e "$state/stack/releases/$failed_id" ] || { echo "FAIL the failed release was not pruned"; exit 1; }
 
 installed_state
 sleep 1
-touch "$state/crashloop/prizm-web"
-expect_refused "a prizm-web that crash-loops between polls" "not ready after 1s: prizm-web:running for [0-9]+s of 30s \\(restarted [0-9]+ times\\)" "$work/second.tgz" release
+touch "$state/crashloop/home-server"
+expect_refused "a home-server that crash-loops between polls" "not ready after 1s: home-server:running for [0-9]+s of 30s \\(restarted [0-9]+ times\\)" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a crash-looping release was marked verified"; exit 1; }
 [ "$(readlink "$state/stack/previous")" = "releases/$base_id" ] || { echo "FAIL the verified release is not kept as previous after a crash loop"; exit 1; }
 grep -q '^curl ' "$state/calls" && { echo "FAIL the routes were checked before the containers settled"; exit 1; }
 watchtower_order "a crash-looping release" "stop pull up start"
-rm "$state/crashloop/prizm-web"
+rm "$state/crashloop/home-server"
 echo "ok   a container that restarts between polls never counts as ready"
 
 installed_state
 sleep 1
-date -u -d '-5 seconds' +%Y-%m-%dT%H:%M:%S.%NZ >"$state/started/prizm-web"
-expect_refused "a prizm-web that started 5 s ago" "not ready after 1s: prizm-web:running for [0-9]+s of 30s \\(restarted 0 times\\)" "$work/second.tgz" release
+date -u -d '-5 seconds' +%Y-%m-%dT%H:%M:%S.%NZ >"$state/started/home-server"
+expect_refused "a home-server that started 5 s ago" "not ready after 1s: home-server:running for [0-9]+s of 30s \\(restarted 0 times\\)" "$work/second.tgz" release
 echo "ok   a container up for less than the settle window is not ready yet"
 
 installed_state
 sleep 1
-echo 'not-a-time' >"$state/started/prizm-web"
-expect_refused "a container with an unreadable StartedAt" "not ready after 1s: prizm-web:started at an unreadable time" "$work/second.tgz" release
+echo 'not-a-time' >"$state/started/home-server"
+expect_refused "a container with an unreadable StartedAt" "not ready after 1s: home-server:started at an unreadable time" "$work/second.tgz" release
 
 # F-008: a container that compose ps lists but docker inspect no longer finds
 # (Watchtower recreated it in between) is pending, never silently skipped.
 installed_state
 sleep 1
-touch "$state/vanished/c4"
-expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 17 listed containers could not be inspected" "$work/second.tgz" release
+touch "$state/vanished/c26"
+expect_refused "a listed container is gone before the inspect" "not ready after 1s: 1 of 12 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with an uninspected container was marked verified"; exit 1; }
 grep -q '^curl ' "$state/calls" && { echo "FAIL the routes were checked before every container was inspected"; exit 1; }
 
 installed_state
 sleep 1
 for c in c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14 c15 c16 c17 c18 c19 c20 c21 c22 c23 c24 c25 c26 c27 c28 c29; do touch "$state/vanished/$c"; done
-expect_refused "every listed container is gone before the inspect" "not ready after 1s: 17 of 17 listed containers could not be inspected" "$work/second.tgz" release
+expect_refused "every listed container is gone before the inspect" "not ready after 1s: 12 of 12 listed containers could not be inspected" "$work/second.tgz" release
 [ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release with no inspected container was marked verified"; exit 1; }
 
 installed_state
 sleep 1
-touch "$state/vanished-once/c3"
+touch "$state/vanished-once/c26"
 # Room for a second poll of every listed container on a slow runner.
 apply_wait_seconds=15
 expect_ok "a container gone for one poll is checked on the next" "every container is running and healthy" "$work/second.tgz" release
@@ -1037,16 +1133,10 @@ unset apply_wait_seconds
 
 installed_state
 sleep 1
-echo 1 >"$state/ps.database.rc"
-expect_refused "docker compose ps fails for one stack" "not ready after 1s: docker compose ps failed for database" "$work/second.tgz" release
-[ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release whose database containers were not listed was marked verified"; exit 1; }
+echo 1 >"$state/ps.ai.rc"
+expect_refused "docker compose ps fails for one stack" "not ready after 1s: docker compose ps failed for ai" "$work/second.tgz" release
+[ ! -e "$state/stack/current/.verified" ] || { echo "FAIL a release whose ai containers were not listed was marked verified"; exit 1; }
 echo "ok   a container that compose ps lists but verify cannot inspect is never taken as ready"
-
-installed_state
-sleep 1
-printf '404' >"$state/curl.www.arbikullakshi.com"
-expect_refused "Traefik answers 404 for a host" "Traefik answered 404 for www\\.arbikullakshi\\.com/, expected .*404: no router serves" "$work/second.tgz" release
-grep -qF "the last verified release was $base_id" "$work/out" || { cat "$work/out"; echo "FAIL the 404 failure does not name the last verified release"; exit 1; }
 
 installed_state
 sleep 1
@@ -1083,11 +1173,6 @@ installed_state
 sleep 1
 touch "$state/oneshot-missing/garage-setup"
 expect_refused "garage-setup was never created" "garage-setup was never created" "$work/second.tgz" release
-
-installed_state
-sleep 1
-echo "true true" >"$state/running/edge-socket-proxy"
-expect_refused "Traefik's socket proxy restart-looping" "edge-socket-proxy is not running" "$work/second.tgz" release
 
 ### Verbs, root and overrides
 

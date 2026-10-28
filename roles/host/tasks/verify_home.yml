@@ -1,0 +1,136 @@
+---
+- name: Read the LAN interface's Wake-on-LAN state
+  ansible.builtin.command:
+    argv: [ethtool, "{{ lan_interface }}"]
+  register: lan_ethtool
+  changed_when: false
+  check_mode: false
+
+# ethtool prints "Supports Wake-on: pumbg" (what the NIC can do) and
+# "Wake-on: g" (what is on); g is the magic packet.
+- name: Require the LAN interface to wake on a magic packet
+  vars:
+    supports: "{{ lan_ethtool.stdout | regex_findall('(?m)^\\s*Supports Wake-on:\\s*(\\S+)') | first | default('') }}"
+    wake_on: "{{ lan_ethtool.stdout | regex_findall('(?m)^\\s*Wake-on:\\s*(\\S+)') | first | default('') }}"
+  ansible.builtin.assert:
+    that:
+      - "'g' in supports"
+      - "'g' in wake_on"
+    fail_msg: >-
+      ethtool {{ lan_interface }} says Supports Wake-on: {{ supports or '(nothing)' }}, Wake-on: {{ wake_on or '(nothing)' }};
+      magic-packet wake needs g in both. {{ 'The NIC or its driver cannot wake the host at all.' if 'g' not in supports
+      else 'Provision with --tags host, which turns it on.' }} (docs/host.md, "Wake-on-LAN")
+    quiet: true
+
+- name: Read whether the power request watch is on
+  ansible.builtin.command:
+    argv: [systemctl, "{{ item }}", home-power.path]
+  loop: [is-enabled, is-active]
+  register: home_power_path_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require the power request watch enabled and running
+  ansible.builtin.assert:
+    that:
+      - home_power_path_state.results | map(attribute='stdout') | map('trim') | list == ['enabled', 'active']
+    fail_msg: >-
+      home-power.path is {{ home_power_path_state.results | map(attribute='stdout') | map('trim') | join(' and ') }},
+      not enabled and active, so Home's power requests are never read; provision with --tags host
+      (journalctl -u home-power.path says why it stopped; a burst of requests trips its trigger limit:
+      sudo systemctl reset-failed home-power.path && sudo systemctl start home-power.path).
+    quiet: true
+
+- name: Read the request directory's mount
+  ansible.builtin.command:
+    argv: [findmnt, -n, -o, "FSTYPE,OPTIONS", --mountpoint, "{{ home_power_dir }}"]
+  register: home_power_mount_now
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Require the request directory on its own small tmpfs, the home-server account's alone
+  vars:
+    found: "{{ (home_power_mount_now.stdout | trim).split(' ', 1) }}"
+    options: "{{ (found[1] if found | length > 1 else '').split(',') }}"
+  ansible.builtin.assert:
+    that:
+      - found[0] == 'tmpfs'
+      - "['nosuid', 'nodev', 'noexec', 'mode=700', 'uid=' ~ home_uid, 'gid=' ~ home_gid] | difference(options) | length == 0"
+    fail_msg: >-
+      {{ home_power_dir }} is {{ home_power_mount_now.stdout | trim or 'not a mountpoint' }}; it must be a tmpfs with
+      nosuid, nodev, noexec, mode=700, uid={{ home_uid }} and gid={{ home_gid }} (provision with --tags host).
+    quiet: true
+
+# Encrypted DNS (tasks/dns.yml, docs/host.md "Encrypted DNS").
+- name: Read whether systemd-resolved runs
+  ansible.builtin.command:
+    argv: [systemctl, is-active, systemd-resolved]
+  register: resolved_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Read resolved's DNS-over-TLS mode and its servers
+  ansible.builtin.command:
+    argv: [resolvectl, "{{ item }}"]
+  loop: [dnsovertls, dns]
+  register: resolved_settings
+  changed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Read whether the LAN interface's DNS setting still waits for a reboot
+  ansible.builtin.stat:
+    path: "{{ dns_reboot_flag }}"
+  register: dns_reboot_pending
+  when: dns_over_tls_enabled | bool
+
+# resolvectl dnsovertls prints "Global: yes" first; resolvectl dns one line per
+# scope, "Global: <server>…" then "Link <n> (<interface>): <server>…".
+- name: Require every lookup to go to the encrypted resolvers over TLS, and none to the LAN's or Tailscale's
+  vars:
+    tls_lines: "{{ resolved_settings.results[0].stdout_lines }}"
+    dns_lines: "{{ resolved_settings.results[1].stdout_lines }}"
+    global_servers: "{{ (dns_lines | select('match', '^Global:') | first | default('Global:'))[7:] | trim }}"
+    lan_servers: "{{ ((dns_lines | select('match', '^Link [0-9]+ ' ~ ('(' ~ lan_interface ~ '):') | regex_escape) | first | default('x: ')).split(':', 1)[1]) | trim }}"
+    tailnet_servers: "{{ ((dns_lines | select('match', '^Link [0-9]+ ' ~ ('(' ~ tailnet_interface ~ '):') | regex_escape) | first | default('x: ')).split(':', 1)[1]) | trim }}"
+  ansible.builtin.assert:
+    that:
+      - resolved_state.stdout | trim == 'active'
+      - "tls_lines | select('match', '^Global: yes$') | list | length == 1"
+      - global_servers.split() == dns_over_tls_servers
+      - lan_servers == '' or dns_reboot_pending.stat.exists
+      - tailnet_servers == ''
+    fail_msg: >-
+      {{ 'systemd-resolved is ' ~ (resolved_state.stdout | trim) ~ ', not active. ' if resolved_state.stdout | trim != 'active' else '' -}}
+      {{ 'DNS-over-TLS is not on for every lookup (resolvectl dnsovertls: ' ~ (tls_lines | join('; ')) ~ '). ' if tls_lines | select('match', '^Global: yes$') | list | length != 1 else '' -}}
+      {{ 'The global resolvers are "' ~ global_servers ~ '", not ' ~ (dns_over_tls_servers | join(' ')) ~ '. ' if global_servers.split() != dns_over_tls_servers else '' -}}
+      {{ lan_interface ~ ' still has the LAN-announced resolver ' ~ lan_servers ~ ', which lookups may reach unencrypted; reboot (the setting applies at boot). ' if lan_servers != '' and not dns_reboot_pending.stat.exists else '' -}}
+      {{ tailnet_interface ~ ' has the resolver ' ~ tailnet_servers ~ ' (Tailscale DNS was accepted), which DNS-over-TLS would break; tailscale set --accept-dns=false, or provision. ' if tailnet_servers != '' else '' -}}
+      Provision with --tags host (docs/host.md, "Encrypted DNS").
+    quiet: true
+  when: dns_over_tls_enabled | bool
+
+- name: Look a name up through the encrypted resolvers
+  ansible.builtin.command:
+    argv: [resolvectl, query, --cache=no, --legend=no, "{{ dns_check_name }}"]
+  register: dns_verify_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: dns_over_tls_enabled | bool
+
+- name: Require the lookup to answer
+  ansible.builtin.assert:
+    that:
+      - dns_verify_lookup.rc == 0
+    fail_msg: >-
+      {{ dns_check_name }} does not resolve through {{ dns_over_tls_servers | join(', ') }} over TLS
+      ({{ dns_verify_lookup.stderr | trim }}). Is outbound tcp 853 open (nc -vz 1.1.1.1 853)? To go back to the
+      LAN's resolver: dns_over_tls_enabled: false and provision with --tags host, or by hand as docs/host.md
+      ("Encrypted DNS", Rollback) says.
+    quiet: true
+  when: dns_over_tls_enabled | bool

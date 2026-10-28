@@ -1,0 +1,26 @@
+{# Rendered by release.yml into the hetzner bundle as edge/tls.yml (0600);
+   infra-apply installs it as /opt/edge/dynamic/tls.yml, which the edge Traefik
+   watches. The default certificate is the Cloudflare Origin CA certificate for
+   the zone (CF_ORIGIN_CERT, CF_ORIGIN_KEY), which Cloudflare trusts in SSL/TLS
+   Full (strict). Every TLS connection must present Cloudflare's client
+   certificate (Authenticated Origin Pulls), signed by origin-pull-ca.pem
+   beside this file: Cloudflare's public origin-pull CA
+   (https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem,
+   valid until 2029-11-01). See docs/edge.md. #}
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: |
+          {{ cf_origin_cert | trim | indent(10) }}
+        keyFile: |
+          {{ cf_origin_key | trim | indent(10) }}
+  options:
+    default:
+      minVersion: VersionTLS12
+      sniStrict: false
+      clientAuth:
+        clientAuthType: RequireAndVerifyClientCert
+        caFiles:
+          - |
+            {{ lookup('ansible.builtin.file', playbook_dir ~ '/stack/edge/origin-pull-ca.pem') | trim | indent(12) }}

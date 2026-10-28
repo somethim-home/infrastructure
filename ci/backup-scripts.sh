@@ -28,10 +28,6 @@ case "$1" in
         [ ! -f "$state/pg.rc" ] || { echo "pg_dumpall: error: connection to server failed" >&2; exit "$(cat "$state/pg.rc")"; }
         printf -- '--\n-- PostgreSQL database cluster dump\n--\nCREATE ROLE portfolio;\n'
         ;;
-      "exec immich-postgres pg_dumpall --clean --if-exists -U postgres")
-        [ ! -f "$state/immich-pg.rc" ] || { echo "pg_dumpall: error: connection to server failed" >&2; exit "$(cat "$state/immich-pg.rc")"; }
-        printf -- '--\n-- PostgreSQL database cluster dump\n--\nCREATE TABLE public.asset ();\n'
-        ;;
       *) echo "fake docker: unsupported exec: $*" >&2; exit 2 ;;
     esac
     ;;
@@ -98,7 +94,7 @@ new_state() {
   state="$work/state$count"
   mkdir -p "$state/backup" "$state/running" "$state/stopped" "$state/volumes"
   touch "$state/mounted" "$state/calls"
-  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data immich-pgdata portfolio-media hypernova_prizm-storage llama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
+  for volume in jellyfin-config audiobookshelf-config audiobookshelf-metadata kavita-config open-webui-data portfolio-media llama-models beszel-data garage-meta sftpgo-data home-data home-keys; do
     mkdir -p "$state/volumes/$volume"
     echo "$volume data" >"$state/volumes/$volume/data.db"
   done
@@ -138,13 +134,7 @@ new_state() {
   echo object >"$state/media/s3/ab/cd/abcdef"
   mkdir -p "$state/media/home-files/spaces/1/objects/ab"
   echo ciphertext >"$state/media/home-files/spaces/1/objects/ab/1.e1.age"
-  mkdir -p "$state/media/photos/library/admin/2024/2024-05-01" "$state/media/photos/thumbs/u1" "$state/media/photos/encoded-video/u1" \
-    "$state/media/photos/backups"
-  echo photo >"$state/media/photos/library/admin/2024/2024-05-01/IMG_0001.jpg"
-  echo thumb >"$state/media/photos/thumbs/u1/a_thumbnail.webp"
-  echo video >"$state/media/photos/encoded-video/u1/a.mp4"
-  echo dump >"$state/media/photos/backups/immich-db-backup.sql.gz"
-  touch "$state/running/beszel" "$state/running/garage" "$state/running/sftpgo" "$state/running/home-server" "$state/running/immich-postgres"
+  touch "$state/running/beszel" "$state/running/garage" "$state/running/sftpgo" "$state/running/home-server" "$state/running/postgresql"
 }
 
 run_backup() {
@@ -212,7 +202,7 @@ for dir in "$state/backup" "$state/backup/snapshots" "$s1" "$s1/volumes" "$s1/me
   [ "$(stat -c %a "$dir")" = 700 ] || { echo "FAIL $dir is not 0700"; exit 1; }
 done
 echo "ok   a run writes snapshots/<date> with .complete, latest points at it, dumps 0600 in 0700 directories"
-want_volumes="$(printf '%s\n' audiobookshelf-config audiobookshelf-metadata hypernova_prizm-storage jellyfin-config kavita-config open-webui-data immich-pgdata portfolio-media beszel-data garage-meta sftpgo-data home-data | LC_ALL=C sort)"
+want_volumes="$(printf '%s\n' audiobookshelf-config audiobookshelf-metadata jellyfin-config kavita-config open-webui-data portfolio-media beszel-data garage-meta sftpgo-data home-data | LC_ALL=C sort)"
 [ "$(find "$s1/volumes" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)" = "$want_volumes" ] || { ls "$s1/volumes"; echo "FAIL the snapshot does not hold exactly the app volumes"; exit 1; }
 grep -q 'llama-models' "$state/calls" && { echo "FAIL Home's AI models were looked at"; exit 1; }
 grep -q 'home-keys' "$state/calls" && { echo "FAIL Home's keys were looked at"; exit 1; }
@@ -242,7 +232,7 @@ bracket home-server "$state/volumes/home-data" "$state/media/home-files"
 for name in beszel garage sftpgo home-server; do
   [ -f "$state/running/$name" ] || { echo "FAIL $name does not run after the backup"; exit 1; }
 done
-[ "$(grep -c '^rsync ' "$state/calls")" -eq 20 ] || { cat "$state/calls"; echo "FAIL not 20 copies (12 volumes, 6 media folders, the metadata of 2 libraries)"; exit 1; }
+[ "$(grep -c '^rsync ' "$state/calls")" -eq 17 ] || { cat "$state/calls"; echo "FAIL not 17 copies (10 volumes, 5 media folders, the metadata of 2 libraries)"; exit 1; }
 diff -r "$state/media/s3" "$s1/media/s3" >/dev/null || { echo "FAIL Garage's objects are not in the snapshot"; exit 1; }
 diff -r "$state/media/home-files" "$s1/media/home-files" >/dev/null || { echo "FAIL Home's Files are not in the snapshot"; exit 1; }
 for kept in books/books.db books/files/abc.epub ai.db media.db; do
@@ -260,13 +250,8 @@ done
   { find "$s1/media/movies" "$s1/media/shows"; echo "FAIL the films' and series' metadata is not in the snapshot"; exit 1; }
 [ -z "$(find "$s1/media/movies" "$s1/media/shows" -name '*.mkv' -print -quit)" ] && [ ! -e "$s1/media/movies/.home-uploads" ] ||
   { find "$s1/media/movies" "$s1/media/shows"; echo "FAIL a video or an upload in progress was copied"; exit 1; }
-gzip -cd "$s1/immich.sql.gz" | grep -q "CREATE TABLE public.asset" && [ "$(stat -c %a "$s1/immich.sql.gz")" = 600 ] || { echo "FAIL no 0600 Immich dump in the snapshot"; exit 1; }
-[ -f "$s1/media/photos/library/admin/2024/2024-05-01/IMG_0001.jpg" ] && [ -f "$s1/media/photos/backups/immich-db-backup.sql.gz" ] &&
-  [ ! -e "$s1/media/photos/thumbs" ] && [ ! -e "$s1/media/photos/encoded-video" ] || { find "$s1/media/photos"; echo "FAIL Immich's photos copied wrong"; exit 1; }
-dump_line="$(grep -n '^exec immich-postgres' "$state/calls" | head -n 1 | cut -d: -f1)"
-photos_line="$(grep -n "^rsync $state/media/photos/$" "$state/calls" | head -n 1 | cut -d: -f1)"
-[ -n "$dump_line" ] && [ -n "$photos_line" ] && [ "$dump_line" -lt "$photos_line" ] || { cat "$state/calls"; echo "FAIL Immich's database was not dumped before its photos were copied"; exit 1; }
-echo "ok   media and Immich: libraries copied, films and series as metadata only, Immich dumped before its photos, without thumbs and encoded video"
+[ ! -e "$s1/immich.sql.gz" ] && [ ! -e "$s1/media/photos" ] && [ ! -e "$s1/volumes/immich-pgdata" ] || { echo "FAIL an Immich leftover was backed up"; exit 1; }
+echo "ok   media: libraries copied, films and series as metadata only, nothing of Immich"
 echo "ok   Home: its databases and Books' library copied, Media's cache and Books' covers cache and downloads left out, never the AI models"
 
 ### A second night: hard links for what did not change, deletions stay recoverable
@@ -364,10 +349,10 @@ echo gone >"$state/backup/media/podcasts/Show/old.mp3"
 echo tar >"$state/backup/apps/2026-10-14/jellyfin-config.tar.gz"
 echo old | gzip -c >"$state/backup/postgres/2026-10-14.sql.gz"
 old_inode="$(inode "$state/backup/media/books/novel.epub")"
-echo 1 >"$state/immich-pg.rc"
-expect_failed "a failed first snapshot" "FAILED: pg_dumpall of the immich-postgres container failed"
+echo 1 >"$state/pg.rc"
+expect_failed "a failed first snapshot" "FAILED: pg_dumpall of the postgresql container failed"
 [ -f "$state/backup/media/books/novel.epub" ] && [ -d "$state/backup/apps/2026-10-14" ] || { echo "FAIL the old layout was removed before a complete snapshot existed"; exit 1; }
-rm "$state/immich-pg.rc"
+rm "$state/pg.rc"
 expect_ok "the first snapshot over the old layout"
 [ "$(inode "$(snap 2026-10-15)/media/books/novel.epub")" = "$old_inode" ] || { echo "FAIL the first snapshot copied the old mirror instead of linking to it"; exit 1; }
 [ ! -e "$state/backup/media" ] && [ ! -e "$state/backup/apps" ] && [ -f "$state/backup/postgres/2026-10-14.sql.gz" ] ||
@@ -380,12 +365,11 @@ echo "ok   migration: the first snapshot links to the old mirror; media/ and app
 ### Failures
 
 new_state
-rm "$state/running/immich-postgres"
-expect_ok "a host with Immich retired"
-grep -q "immich-postgres is not running (Immich is retired); its data folder is copied as the volume immich-pgdata" "$work/out" &&
-  [ ! -e "$(snap 2026-10-15)/immich.sql.gz" ] && [ -f "$(snap 2026-10-15)/volumes/immich-pgdata/data.db" ] ||
-  { cat "$work/out"; echo "FAIL a retired Immich was not skipped, or its data folder not copied"; exit 1; }
-echo "ok   Immich: retired, so no dump; its data folder is copied as a volume"
+rm "$state/running/postgresql"
+expect_ok "a home server whose database moved away"
+grep -q "postgresql is not running here" "$work/out" && [ ! -e "$(snap 2026-10-15)/postgres.sql.gz" ] ||
+  { cat "$work/out"; echo "FAIL a missing postgresql was not skipped"; exit 1; }
+echo "ok   postgresql gone: no dump, the rest is backed up"
 
 new_state
 fake_snapshot 2026-10-14
@@ -421,7 +405,7 @@ new_state
 echo 1 >"$state/start.rc"
 expect_failed "a container that does not start again" "FAILED: beszel could not be started again; sudo docker start beszel"
 new_state
-rm -rf "$state/volumes/kavita-config" "$state/volumes/hypernova_prizm-storage"
+rm -rf "$state/volumes/kavita-config" "$state/volumes/portfolio-media"
 expect_ok "a host without some volumes yet"
 grep -q "the volume kavita-config does not exist yet; skipped" "$work/out" || { cat "$work/out"; echo "FAIL a missing volume was not reported"; exit 1; }
 echo "ok   a container that cannot start again fails the run; a volume that does not exist yet is skipped"

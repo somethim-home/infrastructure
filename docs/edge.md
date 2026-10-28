@@ -1,116 +1,107 @@
-# The edge: Cloudflare Tunnel and Traefik
+# The edge: Cloudflare in front of Traefik on the hetzner host
 
-The server publishes no port to the internet or the LAN. The public reaches the sites through
-a **Cloudflare Tunnel**: a `cloudflared` container on the host dials out to Cloudflare's edge
-and keeps those connections open, Cloudflare sends each request for a public hostname down
-one of them, and `cloudflared` hands it to Traefik on the Docker network. Traefik routes it
-by `Host` header to whichever stack claims that domain.
+The public site runs on the **hetzner host** (a small Hetzner Cloud server, CAX class, Arm64). The
+home server has no public site any more and no edge at all: Home and its services are on the
+tailnet only, behind their own Traefik, `home-tls` ([stacks.md](stacks.md#media)).
+
+On the hetzner host, Traefik is the only public entry: it publishes `80` and `443`, and only
+Cloudflare may reach them. Cloudflare proxies every public name (orange cloud), terminates the
+visitor's TLS and connects to the origin over TLS again, SSL/TLS mode **Full (strict)**. Traefik
+serves a **Cloudflare Origin CA certificate** and requires **Cloudflare's client certificate**
+(Authenticated Origin Pulls) on every TLS connection, then routes by `Host` to the portfolio.
 
 ```
-visitor ──HTTPS──▶ Cloudflare edge ◀══ outbound tunnel ══ cloudflared ──HTTP──▶ edge-traefik:80 ──▶ portfolio / prizm-web / prizm-provider
-                   (TLS, HTTP→HTTPS,                       (stack/tunnel,       (roles/edge,
-                    CF-Connecting-IP)                       edge network)        edge network)
+visitor ──HTTPS──▶ Cloudflare edge ──HTTPS + client cert──▶ :443 edge-traefik ──HTTP──▶ portfolio:3000 ──▶ postgresql
+                   (TLS, CF-Connecting-IP)  (Full (strict),      (roles/edge;        (edge network)      (data network,
+                                             AOP)                 Cloudflare's ranges                      never published)
+                                                                  only: Hetzner Cloud
+                                                                  Firewall, ufw, DOCKER-USER)
 ```
 
-Two pieces, owned by different paths:
+Until plan 023 (2026-10-28) the sites ran on the home server behind a Cloudflare Tunnel. There is
+no tunnel any more: Cloudflare reaches the hetzner host's public address directly.
 
 | Piece | What | Owned by | Changes with |
 | --- | --- | --- | --- |
-| `cloudflared` | `cloudflare/cloudflared` (pinned by digest), `tunnel --no-autoupdate --metrics 0.0.0.0:2000 run`, token from `TUNNEL_TOKEN` | the release bundle (`stack/tunnel`, project `tunnel`) | a `release` |
-| `edge-traefik` | `traefik:v3.7.13` (pinned by digest) and its socket proxy | provisioning (`roles/edge`, project `edge` in `/opt/edge`) | `provision.yml --tags edge` |
+| `edge-traefik` | `traefik:v3.7.13` (multi-arch, pinned by digest) and its socket proxy, ports 80 and 443 | provisioning (`roles/edge`, project `edge` in `/opt/edge`) | `provision.yml -e infra_host=hetzner --tags edge` |
+| `/opt/edge/.env` | `CLOUDFLARE_IPS`, Cloudflare's ranges, the only forwarders Traefik trusts | provisioning (`tasks/cloudflare-ips.yml`) | any hetzner provisioning run |
+| `/opt/edge/dynamic/tls.yml` | the Origin CA certificate and key, and the client-certificate rule | every hetzner release (`edge/tls.yml` in the bundle, written by `infra-apply`) | a `release` |
 
-## Why the tunnel is a release stack
+## Only Cloudflare reaches Traefik
 
-`cloudflared` needs one secret, the tunnel token, and nothing else from the host: no port, no
-mount, no socket, no privilege. That fits the release model exactly, so it lives in the bundle
-like an app: the token is the `CF_TUNNEL_TOKEN` secret of the `production` Environment,
-`release.yml` renders it into `tunnel/tunnel.env`, the only file `cloudflared` reads and that
-no other container reads, and **rotating the token is a normal release**
-([RUNBOOK.md](../RUNBOOK.md#rotating-a-secret)). Provisioning never sees it (provisioning
-holds no secrets; `ci/check_access.py` rule 6). The compose guard holds the `tunnel` stack to
-the edge network, the `cloudflared` container name, `tunnel.env`, a digest-pinned image, no
-volume and only the `autoheal` label; `infra-apply` refuses a `tunnel.env` that sets anything
-but `TUNNEL_TOKEN`.
+Three layers, each enough on its own:
 
-Traefik stays in provisioning: it needs the Docker API (through its socket proxy), which a
-release may never mount.
+- **The Hetzner Cloud Firewall** (set by the owner in the Hetzner console, RUNBOOK.md, "Hetzner
+  host"): ICMP from anywhere, TCP 80 and 443 from Cloudflare's ranges only, nothing else inbound.
+  SSH arrives over Tailscale, which dials out.
+- **The host itself**, which does not count on the cloud firewall. Docker publishes Traefik's
+  ports past ufw, so `infra-firewall` (roles/host) filters them in the `DOCKER-USER` chain: on the
+  public interface a new connection reaches only the ports in `PUBLIC_PORTS` (`80,443`), and
+  only from the IPv4 ranges in `PUBLIC_SOURCES`, both in `/etc/infra/host.env`. IPv6 reaches
+  Traefik through `docker-proxy` on the host (the Docker networks are IPv4-only), which ufw does
+  see: provisioning adds one `ufw allow proto tcp from <range> to any port 80,443` per Cloudflare
+  range, v4 and v6, and ufw denies the rest.
+- **Authenticated Origin Pulls.** Even from a Cloudflare address, a TLS client must present the
+  certificate Cloudflare signs with its origin-pull CA (`stack/edge/origin-pull-ca.pem`, public,
+  valid until 2029-11-01). Another Cloudflare customer pointing a record at this address gets no
+  further than the handshake. Port 80 only ever redirects to https.
 
-The tunnel is **remotely managed**: its routes, the Public Hostnames, are stored in
-Cloudflare, not in a file on the host. They must be exactly:
-
-| Public hostname | Service |
-| --- | --- |
-| `arbikullakshi.com` | `http://edge-traefik:80` |
-| `www.arbikullakshi.com` | `http://edge-traefik:80` |
-| `hypernova.arbikullakshi.com` | `http://edge-traefik:80` |
-
-with the default `http_status:404` for anything else, and no origin option changed:
-cloudflared keeps the request's own `Host`, which is what Traefik routes on. Each hostname's
-DNS record is a proxied `CNAME` to `<tunnel id>.cfargotunnel.com`. A new public domain is a
-new Public Hostname and a new router label; nothing on the host changes
-([RUNBOOK.md](../RUNBOOK.md#6-cloudflare-tunnel)).
-
-The server's own public IP is irrelevant: it can change at any time, and nothing points at
-it.
-
-## Only the tunnel reaches Traefik
-
-Traefik has **one entrypoint, `web`, on :80 inside the container, and publishes no host
-port.** It is reachable only at its address on the `edge` network, from containers on that
-network and from the host itself. That is the whole lock, and it holds in layers:
-
-- No compose file publishes a port (`ci/check_templates.py` rule 9; the compose guard refuses
-  `ports:` in every release stack), and provisioning reads back that `edge-traefik` has no
-  port bindings (`roles/edge/tasks/verify.yml`).
-- ufw admits nothing inbound but 22 on `tailscale0`, and `INFRA-PUBLIC` drops every new
-  connection forwarded from the LAN-facing interface to any container
-  ([host.md](host.md#firewall)), so even a mistakenly published port would be unreachable.
-- The router forwards no port to the server.
-
-The only thing on the `edge` network that carries outside requests is `cloudflared`, and it
-only accepts them from Cloudflare's edge, authenticated by the tunnel token. That replaces
-the old Cloudflare-IP allowlist: there is no origin address left to bypass Cloudflare with.
+**Cloudflare's ranges** come from <https://www.cloudflare.com/ips-v4> and
+<https://www.cloudflare.com/ips-v6>, fetched by every hetzner provisioning run
+(`tasks/cloudflare-ips.yml`). When the fetch fails or returns something that is not a list of
+ranges, the run uses `production.yml`'s `cloudflare_ips_pinned` and says so; when the fetched
+lists differ from the pinned ones it says to re-pin them. The ranges feed ufw, `PUBLIC_SOURCES`
+and Traefik's `CLOUDFLARE_IPS`. A range Cloudflare drops keeps its ufw rule until deleted by hand.
 
 ### Client addresses and forwarded headers
 
 Cloudflare sets `CF-Connecting-IP` to the visitor's address and overwrites any value a client
-sent; `cloudflared` passes it, `X-Forwarded-For` and `X-Forwarded-Proto: https` through to
-Traefik. Traefik leaves `CF-Connecting-IP` alone, and keeps the `X-Forwarded-*` headers
-because `--entrypoints.web.forwardedHeaders.trustedIPs` lists the private ranges Docker draws
-its bridge networks from (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`): only containers on
-this host can reach the entrypoint at all. So the apps see the real visitor
-(`CLIENT_IP_SOURCE=Cloudflare` in the portfolio, [stacks.md](stacks.md#portfolio)) and know the
-request was HTTPS.
+sent. Traefik keeps the `X-Forwarded-*` headers only from `CLOUDFLARE_IPS`
+(`forwardedHeaders.trustedIPs` on both entrypoints), and since nothing but Cloudflare can
+connect, the portfolio may trust `CF-Connecting-IP` (`CLIENT_IP_SOURCE=Cloudflare`,
+[stacks.md](stacks.md#portfolio)) for its rate limiter.
 
-That trust is what the no-published-port rule protects: publish :80 on the host and anyone
-on the LAN could send a forged `CF-Connecting-IP` and defeat the portfolio's rate limiter.
+## TLS
 
-## TLS and redirects
+- **Cloudflare ↔ visitor:** Cloudflare's own edge certificates.
+- **Cloudflare ↔ origin:** SSL/TLS **Full (strict)**. Traefik's default certificate is a
+  Cloudflare Origin CA certificate for `arbikullakshi.com` and `*.arbikullakshi.com` (15 years),
+  which only Cloudflare trusts, so no browser ever sees it. Never *Flexible*: Cloudflare would
+  talk plain http to the origin, Traefik would redirect to https, and every request would loop.
+- **The certificate and key** are the `CF_ORIGIN_CERT` and `CF_ORIGIN_KEY` secrets. A hetzner
+  release renders them, with the vendored origin-pull CA, into `edge/tls.yml`
+  (`stack/edge/tls.yml.j2`, inline PEM; 0600); `infra-apply` checks it holds a certificate and
+  the client-certificate rule and installs it atomically as `/opt/edge/dynamic/tls.yml`, and
+  Traefik's file provider picks it up without a restart. Rotating them is a normal release.
+- **The rule:** `tls.options.default` sets `clientAuthType: RequireAndVerifyClientCert` and TLS
+  1.2 or later; every router on `websecure` uses the default options.
+- Before the first hetzner release Traefik serves its own self-signed certificate and asks for no
+  client certificate; nothing routes there yet.
 
-Cloudflare terminates TLS with its own edge certificates; Traefik serves plain HTTP inside the
-host and holds no certificate, no ACME account and no volume. The HTTP → HTTPS redirect is
-Cloudflare's **Always Use HTTPS** zone setting (the release's public check asks for it);
-Traefik has no redirecting entrypoint. The `www.` → apex redirect stays in Traefik (below),
-because it is part of the portfolio's routing.
+**Redirects.** The `web` entrypoint (:80) redirects everything to `websecure` (:443). The `www.` →
+apex redirect is a `redirectregex` middleware on the portfolio's labels.
 
 ## Verifying it
 
-Every release ends with checks run on the host itself, after every container is healthy
+Every hetzner release ends with checks run on the host itself, after every container is healthy
 ([deploying.md](deploying.md#what-infra-apply-checks-in-order)):
 
-- **Routes**: `curl -H 'Host: <domain>' -H 'X-Forwarded-Proto: https' http://<edge-traefik's
-  edge address>:80<path>`, the request the tunnel makes, must answer `2xx` for
-  `arbikullakshi.com/api/health`, `hypernova.arbikullakshi.com/` and `/api/health`, and
-  `301`/`308` for `www.arbikullakshi.com/`. A `404` means no router serves that host; `502`,
-  `503` or `504` that the app behind it is unreachable.
-- **Tunnel**: `cloudflared`'s `/ready` on its metrics port (`:2000`, on the edge network,
-  never published) must answer `200`, which it does only while it holds at least one
-  connection to Cloudflare. A wrong or revoked token, or no outbound internet, fails here.
-  The container's healthcheck (`cloudflared tunnel ready`) asks the same question, so autoheal
-  restarts a tunnel that loses its connections for good.
+- **http redirects**: `curl -H 'Host: <name>' http://<edge-traefik's edge address>:80<path>` must
+  answer `301`, `307` or `308` for `arbikullakshi.com/api/health` and `www.arbikullakshi.com/`.
+- **https refuses a client without Cloudflare's certificate**: the same names over https, pinned
+  to Traefik's edge address, must fail in the TLS handshake (no HTTP status at all; curl exits 35,
+  55 or 56). An HTTP answer here means `tls.yml` is missing or not loaded and the origin would
+  serve anyone.
+- **Through Cloudflare** (the public check): `https://arbikullakshi.com/api/health` `2xx`,
+  `https://www.arbikullakshi.com/` and `http://arbikullakshi.com/api/health` a redirect, asked
+  from the host by name. This is the only check that proves the route to the portfolio, since
+  only Cloudflare can complete the handshake. A failure here leaves the release current and
+  verified and names the Cloudflare side (521/522 firewall or address, 525 Authenticated Origin
+  Pulls off, 526 not Full (strict) with the Origin CA certificate).
 
-Every release then asks the public hostnames through Cloudflare, from the host (`infra-apply`'s
-public check).
+Provisioning (`roles/edge/tasks/verify.yml`) reads back that `edge-traefik` publishes exactly 80
+and 443, and `roles/host/tasks/verify.yml` that no other container publishes anything
+(`public_bindings`).
 
 ## The socket proxy
 
@@ -127,56 +118,30 @@ what the log names.
 
 ## Routing by label
 
-Traefik reads its configuration from Docker labels on the containers themselves
-(`--providers.docker`, through the socket proxy), scoped to the `edge` network. An application
-declares its own routing in its own compose file, and **adding a project requires no change
-to the edge role**.
+Traefik reads its routes from Docker labels on the containers themselves (`--providers.docker`,
+through the socket proxy), scoped to the `edge` network, and its TLS settings from
+`/opt/edge/dynamic` (`--providers.file`). `exposedbydefault=false`: a container is invisible to
+Traefik until it opts in with `traefik.enable=true`. `traefik.docker.network=edge` is set on the
+portfolio because it is on two networks (`edge` and `data`).
 
-`--providers.docker.exposedbydefault=false` means a container is invisible to Traefik until it
-opts in with `traefik.enable=true`. That is why a container can sit on the `edge` network
-without being publicly reachable, and why `cloudflared`, which is on that network too, is never
-routed (the guard refuses Traefik labels on the tunnel stack).
+Conventions for a routed stack: router names unique across the host (prefixed with the stack:
+`portfolio-www`); `entrypoints=websecure` and no `tls` or `certresolver` labels (the entrypoint
+and the default TLS store do it); an explicit `loadbalancer.server.port`; the container on `edge`
+with no published port; the name proxied in Cloudflare (proxied `A` and `AAAA` records to the
+server) and added to `route_targets` in `infra-apply`.
 
-`traefik.docker.network=edge` is set on every routed container because several of them are
-attached to more than one network. Without it Traefik may pick the wrong address.
-
-### Conventions an app stack must follow
-
-- Router names must be **unique across the whole host**, not just within the stack. They
-  share one namespace. Prefixing with the stack name (`portfolio-www`, `hypernova-web`) is
-  enough.
-- `traefik.http.routers.<name>.entrypoints=web`: the only entrypoint. No `tls` or
-  `certresolver` labels: Cloudflare terminates TLS.
-- Set `traefik.http.services.<name>.loadbalancer.server.port` explicitly. Traefik guesses
-  otherwise, and guesses wrong on images that expose several ports.
-- Attach the container to `edge`, and publish no port.
-- Add the hostname to the tunnel's Public Hostnames and its proxied `CNAME`
-  ([RUNBOOK.md](../RUNBOOK.md#6-cloudflare-tunnel)), and to `route_targets` in `infra-apply`
-  so every release proves the route.
-
-### Priorities
-
-Traefik matches the most specific rule first, but ties are resolved by rule length, which is
-not something to rely on. Where two routers can match the same request, set `priority`
-explicitly.
-
-hypernova does this: `hypernova-provider` matches `Host(...) && PathPrefix(/api)` at priority
-100, and `hypernova-web` matches the same host at priority 1. The provider serves its API at
-the root, so a `stripprefix` middleware removes `/api` before forwarding.
-
-The portfolio uses a `redirectregex` middleware to send `www.` to the apex permanently, with
-`service=portfolio` so both routers share one backend. Its regex accepts `http` or `https`
-(`^https?://www\.…`): behind the tunnel the request reaches Traefik as plain HTTP, and the
-replacement always names `https://`.
+`production.yml`'s `preview_domain` adds a second name to the portfolio's router, for checking
+the hetzner host through Cloudflare before the real names move to it (RUNBOOK.md, "Hetzner
+host"); empty, the router names the apex twice.
 
 ## Timeouts
 
-`--entrypoints.web.transport.respondingTimeouts.readTimeout=1800s`
+`--entrypoints.websecure.transport.respondingTimeouts.readTimeout=1800s`
 
 Traefik v3 gives a request body 60 seconds by default. A large video upload to the portfolio
 admin exceeds that, and Traefik cuts the connection with nothing on the origin to explain
-it — the application sees a truncated request and logs nothing useful. Cloudflare limits a
-request body to 100 MB on the Free plan regardless.
+it. Cloudflare limits a request body to 100 MB on the Free plan regardless, and waits at most
+100 seconds for the origin's answer (HTTP 524).
 
 It is bounded at 30 minutes rather than disabled with `0`, because `0` means a held-open
 request costs nothing to keep and a slow-loris becomes free.
@@ -184,29 +149,26 @@ request costs nothing to keep and a slow-loris becomes free.
 ## Logs
 
 `--log.level=ERROR`. Traefik at `INFO` narrates every router change, which on a host where
-Watchtower recreates containers regularly buries anything worth reading. `cloudflared` logs
-at `info`: connection registrations and errors, never request bodies
-(`sudo docker logs cloudflared`).
+Watchtower recreates containers regularly buries anything worth reading.
 
 ## The down page
 
-When the server is off (a poweroff from Home, a power cut, a reboot) or `cloudflared` is not
-connected, Cloudflare itself answers the public sites with its own error 1033 page. Instead,
-a **Cloudflare Worker** on the three public hostnames answers with a page of our own:
-`cloudflare/down-page/`, Rust with [workers-rs](https://github.com/cloudflare/workers-rs)
+When the hetzner host is off or Traefik does not answer, Cloudflare itself answers with its own
+521/522 error page. Instead, a **Cloudflare Worker** on the public hostnames answers with a page
+of our own: `cloudflare/down-page/`, Rust with [workers-rs](https://github.com/cloudflare/workers-rs)
 (`worker` 0.8.7, built by `worker-build` 0.8.7, both pinned), deployed by the owner with
 wrangler ([RUNBOOK.md](../RUNBOOK.md#the-down-page)). It is not part of a release or of
 provisioning, holds no secret and has no binding.
 
 ```
-visitor ──▶ Cloudflare edge ──▶ down-page Worker ──fetch(request)──▶ tunnel ──▶ Traefik ──▶ app
+visitor ──▶ Cloudflare edge ──▶ down-page Worker ──fetch(request)──▶ Traefik ──▶ portfolio
                                    │ the origin's response, untouched (streamed)
                                    └ or, when the origin cannot be reached: 503 + the down page
 ```
 
 | Route (zone `arbikullakshi.com`) | |
 | --- | --- |
-| `arbikullakshi.com/*`, `www.arbikullakshi.com/*`, `hypernova.arbikullakshi.com/*` | every request goes through the Worker |
+| `arbikullakshi.com/*`, `www.arbikullakshi.com/*` | every request goes through the Worker |
 
 **What it decides** (`src/decision.rs`, unit-tested with `cargo test`). The Worker forwards the
 request as it came (method, headers, cookies, body; redirects are not followed) and looks only
@@ -215,8 +177,8 @@ at the response's status:
 | Origin's answer | Worker returns |
 | --- | --- |
 | the fetch itself failed | the down page |
-| `530` (the tunnel has no connector: error 1033), `520`–`527` (Cloudflare's own origin errors) | the down page |
-| `502` / `504` whose body is a gateway's: empty (cloudflared), `error code: <n>`, Cloudflare's HTML error page, or Traefik's exact `Bad Gateway` / `Gateway Timeout` (the app's container is not up) | the down page |
+| `520`–`527` (Cloudflare's own origin errors: 521/522 while the server is off), `530` | the down page |
+| `502` / `504` whose body is a gateway's: empty, `error code: <n>`, Cloudflare's HTML error page, or Traefik's exact `Bad Gateway` / `Gateway Timeout` (the portfolio's container is not up) | the down page |
 | `502` / `504` from the app (JSON, an event stream, any other text, or longer than 16 KiB) | the origin's response |
 | anything else (`2xx`, redirects, `4xx`, other `5xx`, `101` WebSocket upgrades) | the origin's response |
 
@@ -238,11 +200,11 @@ Cloudflare nor a browser nor a crawler keeps it.
 off (`[observability] enabled = false`); there is no `workers.dev` address and no preview URL.
 It never caches anything itself and never changes a private response.
 
-**Free plan limits.** 100,000 Worker requests a day per account (every page view and asset of
-the three hosts counts, cached or not), 10 ms of CPU per request (waiting on the origin is not
-CPU; the Worker uses well under 1 ms), 3 MB compressed per Worker. Past the daily limit the
-routes follow the Worker's *request limit failure mode*: set it to **fail open** so requests
-then go straight to the origin, without the down page, instead of failing (RUNBOOK.md).
+**Free plan limits.** 100,000 Worker requests a day per account (every page view and asset
+counts, cached or not), 10 ms of CPU per request (waiting on the origin is not CPU; the Worker
+uses well under 1 ms), 3 MB compressed per Worker. Past the daily limit the routes follow the
+Worker's *request limit failure mode*: set it to **fail open** so requests then go straight to
+the origin, without the down page, instead of failing (RUNBOOK.md).
 
 **Checked in CI** (`.github/workflows/checks.yml`, job *Down page Worker*): `cargo fmt`,
 `cargo test`, clippy for the host and `wasm32-unknown-unknown`, `cargo build --release --target

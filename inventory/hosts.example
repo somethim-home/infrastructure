@@ -1,7 +1,13 @@
-# Copy to inventory/hosts (gitignored) and edit. One host in [server].
-# Runs reach it over the tailnet by its tailnet name. The first run, before the
-# host has joined the tailnet, sets ansible_host to its LAN address instead
-# (RUNBOOK.md, "First provision over the LAN"):
+# Copy to inventory/hosts (gitignored) and edit. One host per group; the group
+# is the infra_host every provision run names (-e infra_host=home|hetzner).
+# Runs reach a host over the tailnet by its tailnet name (production.yml,
+# infra_hosts). The first run, before the host has joined the tailnet, sets
+# ansible_host to its LAN address (home) or public address (hetzner) instead
+# (RUNBOOK.md, "First provision over the LAN" and "Hetzner host"):
 #   infra-host ansible_host=192.168.1.50
-[server]
+#   infra-hetzner ansible_host=203.0.113.10
+[home]
 infra-host ansible_host=infra-host
+
+[hetzner]
+infra-hetzner ansible_host=infra-hetzner

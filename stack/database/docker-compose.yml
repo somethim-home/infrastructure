@@ -1,6 +1,8 @@
-# The shared PostgreSQL. See docs/database.md.
+# The portfolio's PostgreSQL, on the hetzner host. See docs/database.md.
 # infra-apply brings this stack up first (--wait), runs provision.sql through
-# the local socket, and only then starts portfolio and hypernova.
+# the local socket, and only then starts the portfolio. backup.env is not read
+# by this stack: infra-pg-backup (roles/host) hands it to the rclone container
+# that streams the daily dump to R2.
 # Never label the database for Watchtower or autoheal.
 name: database
 

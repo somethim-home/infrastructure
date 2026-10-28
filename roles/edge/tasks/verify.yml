@@ -8,14 +8,17 @@
   changed_when: false
   failed_when: false
 
-- name: Require Traefik to publish no host port, so only the tunnel reaches it
+- name: Require Traefik to publish exactly 80 and 443, which the firewalls admit from Cloudflare alone
+  vars:
+    bindings: "{{ traefik_ports.stdout | trim | from_json | default({}, true) }}"
   ansible.builtin.assert:
     that:
-      - (traefik_ports.stdout | trim) in ['{}', 'null']
+      - bindings.keys() | sort == ['443/tcp', '80/tcp']
+      - bindings['80/tcp'] | map(attribute='HostPort') | unique | list == ['80']
+      - bindings['443/tcp'] | map(attribute='HostPort') | unique | list == ['443']
     fail_msg: >-
-      edge-traefik publishes host ports ({{ traefik_ports.stdout | trim }}). Nothing may reach Traefik but the
-      cloudflared container on the edge network; remove ports: from roles/edge/files/docker-compose.yml and
-      run provisioning with --tags edge (docs/edge.md).
+      edge-traefik publishes {{ traefik_ports.stdout | trim }}, not exactly 80 and 443. Fix ports: in
+      roles/edge/files/docker-compose.yml and run provisioning with --tags edge (docs/edge.md).
     quiet: true
   when: traefik_ports.rc == 0
 
@@ -40,7 +43,7 @@
       - "'true false' in ep_state.stdout"
     fail_msg: >-
       edge-socket-proxy is not running, so Traefik cannot read container labels
-      and no Docker-provider route (portfolio, hypernova) is served.
+      and no Docker-provider route (the portfolio) is served.
       `docker logs edge-socket-proxy` on the host shows why (a bad -allow rule
       refuses to start).
     quiet: true

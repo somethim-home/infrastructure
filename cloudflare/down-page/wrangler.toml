@@ -13,7 +13,6 @@ preview_urls = false
 routes = [
   { pattern = "arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
   { pattern = "www.arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
-  { pattern = "hypernova.arbikullakshi.com/*", zone_name = "arbikullakshi.com" },
 ]
 
 # Workers Logs and Logpush stay off: no request (address, path, cookie) is kept.

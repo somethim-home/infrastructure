@@ -1,17 +1,20 @@
 ---
-# Renders the release bundle on the GitHub runner (never on the host).
-# build-bundle.sh runs it with the production Environment's secrets as extra
-# vars, then checksums and packs the directory it writes; the host checks the
-# bundle again before anything changes (roles/common/files/infra-apply).
+# Renders the release bundle of one host on the GitHub runner (never on the
+# host). build-bundle.sh runs it with the production Environment's secrets as
+# extra vars, then checksums and packs the directory it writes; the host checks
+# the bundle again before anything changes (roles/common/files/infra-apply).
 #
-#   ansible-playbook -i localhost, -c local release.yml -e @extra-vars.json -e bundle_dir=/abs/new/dir
+#   ansible-playbook -i localhost, -c local release.yml -e @extra-vars.json -e infra_host=home|hetzner -e bundle_dir=/abs/new/dir
 #
-# Each secret lands only in the env file of the container that reads it:
+# The bundle holds only that host's stacks (production.yml, infra_hosts):
+# hetzner database and portfolio, and edge/tls.yml for its Traefik; home ai,
+# media and home. Only that host's secrets are required. Each secret lands only
+# in the file of the container that reads it:
 #   database/postgres.env   superuser password      (postgresql)
-#   database/provision.sql  role passwords          (psql, run by infra-apply)
-#   portfolio/portfolio.env DSN, TOTP, admin, mail  (portfolio)
-#   hypernova/provider.env  DSN, session, admin     (prizm-provider)
-#   tunnel/tunnel.env       Cloudflare Tunnel token (cloudflared)
+#   database/provision.sql  role password           (psql, run by infra-apply)
+#   database/backup.env     R2 backup key           (rclone, run by infra-pg-backup)
+#   portfolio/portfolio.env DSN, TOTP, admin, mail, R2 key (portfolio)
+#   edge/tls.yml            origin certificate and key (edge-traefik, installed by infra-apply)
 #   media/home-tls.env      Cloudflare DNS token    (home-tls, for its certificate)
 #   media/beszel.env        dashboard password      (beszel, the hub: the owner's login)
 #   media/beszel-pair.env   password, agent token   (beszel-pair, registers the token)
@@ -37,16 +40,20 @@
       - ghcr_username
       - ghcr_token
       - postgres_superuser_password
-      - prizm_db_password
       - portfolio_db_password
       - portfolio_totp_encryption_key
       - portfolio_admin_password
       - portfolio_resend_api_key
       - portfolio_google_client_id
       - portfolio_google_client_secret
-      - hypernova_session_secret
-      - hypernova_admin_password
-      - cf_tunnel_token
+      - r2_account_id
+      - r2_access_key_id
+      - r2_secret_access_key
+      - r2_public_bucket
+      - r2_private_bucket
+      - media_public_base
+      - r2_backup_access_key_id
+      - r2_backup_secret_access_key
       - home_tls_cf_dns_token
       - beszel_password
       - beszel_agent_token
@@ -64,43 +71,62 @@
       - home_beszel_password
 
   pre_tasks:
+    - name: Require the host this bundle is for
+      ansible.builtin.assert:
+        that:
+          - infra_host | default('') in infra_hosts
+        fail_msg: "Pass -e infra_host=home or -e infra_host=hetzner (build-bundle.sh --host does)."
+        quiet: true
+
     - name: Require deploy secrets
       ansible.builtin.assert:
         that:
           - ghcr_username | default('') is match('^[A-Za-z0-9-]+$')
           - ghcr_token | default('') is match('^[A-Za-z0-9_]+$')
-          - postgres_superuser_password | default('') is match('^[A-Za-z0-9]{32,}$')
-          - prizm_db_password | default('') is match('^[A-Za-z0-9]{32,}$')
-          - portfolio_db_password | default('') is match('^[A-Za-z0-9]{32,}$')
-          - "[postgres_superuser_password, prizm_db_password, portfolio_db_password] | unique | length == 3"
-          - portfolio_totp_encryption_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
-          - portfolio_admin_password | default('') | length > 0
-          - hypernova_session_secret | default('') | length > 0
-          - hypernova_admin_password | default('') | length > 0
-          - cf_tunnel_token | default('') is match('^eyJ[A-Za-z0-9+/_-]{40,}={0,2}$')
-          - home_tls_cf_dns_token | default('') is match('^[A-Za-z0-9_-]{40,}$')
-          - beszel_password | default('') is match('^[A-Za-z0-9]{16,}$')
-          - beszel_agent_token | default('') is match('^[A-Za-z0-9-]{32,}$')
-          - garage_rpc_secret | default('') is match('^[0-9a-f]{64}$')
-          - garage_admin_token | default('') is match('^[A-Za-z0-9]{32,}$')
-          - garage_owner_access_key_id | default('') is match('^GK[0-9a-f]{24}$')
-          - garage_owner_secret_key | default('') is match('^[0-9a-f]{64}$')
-          - files_password | default('') is match('^[A-Za-z0-9]{16,}$')
-          - home_secret_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
-          - home_data_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
-          - home_secret_key != home_data_key
-          - home_resend_api_key | default('') is match('^[A-Za-z0-9_-]{16,}$')
+          - infra_host != 'hetzner' or postgres_superuser_password | default('') is match('^[A-Za-z0-9]{32,}$')
+          - infra_host != 'hetzner' or portfolio_db_password | default('') is match('^[A-Za-z0-9]{32,}$')
+          - infra_host != 'hetzner' or postgres_superuser_password != portfolio_db_password
+          - infra_host != 'hetzner' or portfolio_totp_encryption_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
+          - infra_host != 'hetzner' or portfolio_admin_password | default('') | length > 0
+          - infra_host != 'hetzner' or r2_account_id | default('') is match('^[0-9a-f]{32}$')
+          - infra_host != 'hetzner' or r2_access_key_id | default('') is match('^[0-9a-f]{32}$')
+          - infra_host != 'hetzner' or r2_secret_access_key | default('') is match('^[0-9a-f]{64}$')
+          - infra_host != 'hetzner' or r2_backup_access_key_id | default('') is match('^[0-9a-f]{32}$')
+          - infra_host != 'hetzner' or r2_backup_secret_access_key | default('') is match('^[0-9a-f]{64}$')
+          - infra_host != 'hetzner' or r2_backup_access_key_id != r2_access_key_id
+          - infra_host != 'hetzner' or r2_public_bucket | default('') is match('^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$')
+          - infra_host != 'hetzner' or r2_private_bucket | default('') is match('^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$')
+          - infra_host != 'hetzner' or r2_public_bucket != r2_private_bucket
+          - infra_host != 'hetzner' or media_public_base | default('') is match('^https://[a-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$')
+          - infra_host != 'hetzner' or cf_origin_cert | default('') | trim is match('(?s)^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+\n-----END CERTIFICATE-----$')
+          - infra_host != 'hetzner' or cf_origin_key | default('') | trim is match('(?s)^-----BEGIN (RSA |EC )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+\n-----END (RSA |EC )?PRIVATE KEY-----$')
+          - infra_host != 'home' or home_tls_cf_dns_token | default('') is match('^[A-Za-z0-9_-]{40,}$')
+          - infra_host != 'home' or beszel_password | default('') is match('^[A-Za-z0-9]{16,}$')
+          - infra_host != 'home' or beszel_agent_token | default('') is match('^[A-Za-z0-9-]{32,}$')
+          - infra_host != 'home' or garage_rpc_secret | default('') is match('^[0-9a-f]{64}$')
+          - infra_host != 'home' or garage_admin_token | default('') is match('^[A-Za-z0-9]{32,}$')
+          - infra_host != 'home' or garage_owner_access_key_id | default('') is match('^GK[0-9a-f]{24}$')
+          - infra_host != 'home' or garage_owner_secret_key | default('') is match('^[0-9a-f]{64}$')
+          - infra_host != 'home' or files_password | default('') is match('^[A-Za-z0-9]{16,}$')
+          - infra_host != 'home' or home_secret_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
+          - infra_host != 'home' or home_data_key | default('') is match('^[A-Za-z0-9+/]{43}=$')
+          - infra_host != 'home' or home_secret_key != home_data_key
+          - infra_host != 'home' or home_resend_api_key | default('') is match('^[A-Za-z0-9_-]{16,}$')
         fail_msg: >-
-          Missing or invalid deploy secrets: the GHCR login, three distinct database passwords of at least
-          32 letters and digits, PORTFOLIO_TOTP_ENCRYPTION_KEY as base64 of 32 bytes, the portfolio and
-          hypernova admin passwords and session secret, CF_TUNNEL_TOKEN as the token Cloudflare shows for
-          the tunnel (base64, starting eyJ), HOME_TLS_CF_DNS_TOKEN as the Cloudflare API token that may edit
-          the zone's DNS (40 or more letters, digits, _ and -), BESZEL_PASSWORD of at least 16 letters and digits, BESZEL_AGENT_TOKEN
-          of at least 32 letters, digits and -, GARAGE_RPC_SECRET as 64 hex digits, GARAGE_ADMIN_TOKEN of at
-          least 32 letters and digits, GARAGE_OWNER_ACCESS_KEY_ID as GK and 24 hex digits and
-          GARAGE_OWNER_SECRET_KEY as 64 hex digits, FILES_PASSWORD of at least 16 letters and digits,
-          HOME_SECRET_KEY and HOME_DATA_KEY as two different base64 values of 32 bytes (openssl rand -base64 32)
-          and HOME_RESEND_API_KEY as the Resend API key (RUNBOOK.md, "Rotating a secret").
+          Missing or invalid deploy secrets: the GHCR login; for hetzner two distinct database passwords of at
+          least 32 letters and digits, PORTFOLIO_TOTP_ENCRYPTION_KEY as base64 of 32 bytes, the portfolio admin
+          password, R2_ACCOUNT_ID (32 hex digits), two different R2 keys (R2_ACCESS_KEY_ID and
+          R2_BACKUP_ACCESS_KEY_ID, 32 hex digits, with their secrets R2_SECRET_ACCESS_KEY and
+          R2_BACKUP_SECRET_ACCESS_KEY, 64 hex digits), the variables R2_PUBLIC_BUCKET and R2_PRIVATE_BUCKET (two
+          different bucket names) and MEDIA_PUBLIC_BASE (an https URL), and CF_ORIGIN_CERT and CF_ORIGIN_KEY as
+          the PEM certificate and private key of the Cloudflare Origin CA certificate; for home
+          HOME_TLS_CF_DNS_TOKEN as the Cloudflare API token that may edit the zone's DNS (40 or more letters,
+          digits, _ and -), BESZEL_PASSWORD of at least 16 letters and digits, BESZEL_AGENT_TOKEN of at least
+          32 letters, digits and -, GARAGE_RPC_SECRET as 64 hex digits, GARAGE_ADMIN_TOKEN of at least 32
+          letters and digits, GARAGE_OWNER_ACCESS_KEY_ID as GK and 24 hex digits and GARAGE_OWNER_SECRET_KEY as
+          64 hex digits, FILES_PASSWORD of at least 16 letters and digits, HOME_SECRET_KEY and HOME_DATA_KEY as
+          two different base64 values of 32 bytes (openssl rand -base64 32) and HOME_RESEND_API_KEY as the
+          Resend API key (RUNBOOK.md, "Rotating a secret").
         quiet: true
 
     - name: Refuse deploy values the Compose env files would rewrite
@@ -122,6 +148,7 @@
         deploy_key_file: "{{ playbook_dir }}/roles/common/files/deploy_key.pub"
 
     - name: Require Home's owner, Files pool, Status card and power key settings
+      when: infra_host == 'home'
       ansible.builtin.assert:
         that:
           - home_owner_email | default('') is match('^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$')
@@ -143,6 +170,7 @@
         quiet: true
 
     - name: Require the AI models Home lists and llama-server serves
+      when: infra_host == 'home'
       ansible.builtin.assert:
         that:
           - home_ai_models is sequence and home_ai_models is not string and home_ai_models | length > 0
@@ -160,20 +188,16 @@
           and may not be day_only.
         quiet: true
 
-    - name: Require one https name per tailnet service under the links page's name
+    - name: Require Home's https name
+      when: infra_host == 'home'
       ansible.builtin.assert:
         that:
           - home_domain is string and home_domain is match('^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$')
-          - home_hosts is mapping
-          - home_hosts.keys() | sort == ['files', 's3', 'status']
-          - home_hosts.values() | map('string') | select('match', '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') | list | length == 3
-          - home_hosts.values() | unique | length == 3
-        fail_msg: >-
-          production.yml's home_hosts must map exactly files, s3 and status to distinct single DNS labels (each becomes <label>.{{ home_domain }}, covered by the
-          *.{{ home_domain }} certificate), and home_domain must be a DNS name.
+        fail_msg: production.yml's home_domain must be a DNS name.
         quiet: true
 
     - name: Require the GPU the ai and media stacks reserve
+      when: infra_host == 'home'
       ansible.builtin.assert:
         that:
           - gpu_enabled | bool
@@ -197,43 +221,30 @@
         path: "{{ item }}"
         state: directory
         mode: "0700"
-      loop:
-        - "{{ bundle_dir }}"
-        - "{{ bundle_dir }}/database"
-        - "{{ bundle_dir }}/portfolio"
-        - "{{ bundle_dir }}/hypernova"
-        - "{{ bundle_dir }}/tunnel"
-        - "{{ bundle_dir }}/ai"
-        - "{{ bundle_dir }}/media"
-        - "{{ bundle_dir }}/home"
+      loop: "{{ [bundle_dir] + (host_dirs | map('regex_replace', '^', bundle_dir ~ '/') | list) }}"
+      vars:
+        host_dirs: "{{ infra_hosts[infra_host].stacks + (['edge'] if infra_host == 'hetzner' else []) }}"
 
     - name: Copy the stack files into the bundle
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/stack/{{ item }}/docker-compose.yml"
         dest: "{{ bundle_dir }}/{{ item }}/docker-compose.yml"
         mode: "0600"
-      loop:
-        - database
-        - portfolio
-        - hypernova
-        - tunnel
-        - ai
-        - media
-        - home
+      loop: "{{ infra_hosts[infra_host].stacks }}"
 
     - name: Render the env files into the bundle
       ansible.builtin.template:
         src: "{{ playbook_dir }}/stack/{{ item.src }}"
         dest: "{{ bundle_dir }}/{{ item.dest }}"
         mode: "0600"
+      when: item.dest.split('/')[0] in infra_hosts[infra_host].stacks + ['ghcr.env'] or (infra_host == 'hetzner' and item.dest == 'edge/tls.yml')
       loop:
         - { src: database/postgres.env.j2, dest: database/postgres.env }
         - { src: database/provision.sql.j2, dest: database/provision.sql }
+        - { src: database/backup.env.j2, dest: database/backup.env }
         - { src: portfolio/env.j2, dest: portfolio/.env }
         - { src: portfolio/portfolio.env.j2, dest: portfolio/portfolio.env }
-        - { src: hypernova/env.j2, dest: hypernova/.env }
-        - { src: hypernova/provider.env.j2, dest: hypernova/provider.env }
-        - { src: tunnel/tunnel.env.j2, dest: tunnel/tunnel.env }
+        - { src: edge/tls.yml.j2, dest: edge/tls.yml }
         - { src: ai/env.j2, dest: ai/.env }
         - { src: media/env.j2, dest: media/.env }
         - { src: media/home-tls.env.j2, dest: media/home-tls.env }

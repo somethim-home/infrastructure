@@ -14,6 +14,23 @@ tailnet_ports:
   - { container: garage, port: 3900 }
   - { container: sftpgo, port: 8091 }
 
+# The hetzner host's only public bindings, as docker ps prints them: Traefik's
+# web ports on every address. infra-firewall and ufw admit Cloudflare alone.
+public_bindings:
+  - edge-traefik 0.0.0.0:80->80/tcp
+  - edge-traefik [::]:80->80/tcp
+  - edge-traefik 0.0.0.0:443->443/tcp
+  - edge-traefik [::]:443->443/tcp
+
+# The shared Docker networks each host's stacks join (main.yml).
+host_networks:
+  home:
+    - { name: home-llm, internal: true }
+    - { name: media, internal: false }
+  hetzner:
+    - { name: edge, internal: false }
+    - { name: data, internal: false }
+
 # Accounts the hardened stacks run as (no login, no home), and the external
 # volumes they own: provisioning creates each volume once and hands its root to
 # the account (0700), so the containers never need root to write their data.
@@ -22,8 +39,8 @@ service_accounts:
   - { name: ai, uid: "{{ ai_uid }}", gid: "{{ ai_gid }}" }
   - { name: media, uid: "{{ media_uid }}", gid: "{{ media_gid }}" }
   - { name: home-server, uid: "{{ home_uid }}", gid: "{{ home_gid }}" }
-# open-webui-data, comfyui-data, jellyfin-*, audiobookshelf-*, kavita-config and
-# immich-* belong to apps retired on 2026-10-20: no stack mounts them any more,
+# open-webui-data, comfyui-data, jellyfin-*, audiobookshelf-* and kavita-config
+# belong to apps retired on 2026-10-20: no stack mounts them any more,
 # but they stay listed (and backed up) until the owner has audited their data.
 service_volumes:
   # Home's AI models (GGUF files for llama-server), downloaded by the owner.
@@ -42,8 +59,6 @@ service_volumes:
   - { name: sftpgo-data, account: media }
   - { name: home-data, account: home-server }
   - { name: home-keys, account: home-server }
-  - { name: immich-pgdata, account: media }
-  - { name: immich-ml-cache, account: media }
 
 # The disks, by filesystem UUID (production.yml): the internal HDD with the
 # library, and the external USB HDD the nightly backup writes to. Mounted with

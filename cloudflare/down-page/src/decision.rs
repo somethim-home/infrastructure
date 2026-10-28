@@ -9,12 +9,11 @@ pub enum Verdict {
     Inspect,
 }
 
-/// Cloudflare and the tunnel answer for an origin they cannot reach with these
-/// statuses. 530 is the tunnel's: with no connector connected (the server off,
-/// cloudflared stopped) Cloudflare returns 530 with error 1033. 520 to 527 are
-/// Cloudflare's own origin errors; the apps never send them. 502 and 504 come
-/// from Cloudflare, cloudflared or Traefik when what is behind them does not
-/// answer, but an app (hypernova's API in front of a slow model) may send them
+/// Cloudflare answers for an origin it cannot reach with these statuses. 520
+/// to 527 are Cloudflare's own origin errors (521 or 522 while the server is
+/// off); the app never sends them. 530 is a Cloudflare Tunnel's, kept from when
+/// the site was served through one. 502 and 504 come from Cloudflare or
+/// Traefik when what is behind them does not answer, but an app may send them
 /// too, so those are only the down page when the body is a gateway's.
 pub fn verdict_for_status(status: u16) -> Verdict {
     match status {

@@ -1,15 +1,25 @@
 name: Deploy
 
-# The release path. The runner renders the bundle from the production
+# The release path, for one host per run: hetzner (the portfolio) or home
+# (Home). The runner renders that host's bundle from the production
 # Environment's secrets (release.yml via build-bundle.sh), joins the tailnet as
-# an ephemeral tag:infra-ci node and streams the bundle to the forced-command
-# deploy user, which can only run `release` or `status` (infra-deploy-gate).
+# an ephemeral tag:infra-ci node and streams the bundle to the host's
+# forced-command deploy user, which can only run `release` or `status`
+# (infra-deploy-gate).
 # Provisioning is separate: provision.yml from the owner's machine.
 # See RUNBOOK.md.
 
 on:
   workflow_dispatch:
     inputs:
+      host:
+        description: "The host: hetzner runs the portfolio and its database, home runs Home."
+        type: choice
+        options:
+          - hetzner
+          - home
+        required: true
+        default: hetzner
       action:
         description: "release renders the bundle and brings the stacks up on :latest; resume is a release that
           follows :latest again after a rollback; rollback pins app images to digests (auto-updates pause for
@@ -22,23 +32,9 @@ on:
           - status
         required: true
         default: release
-      portfolio:
-        description: "rollback only: previous, current, latest, a 40-character commit sha or sha256:<digest>."
-        type: string
-        required: false
-        default: previous
-      hypernova_provider:
-        description: "rollback only: previous, current, latest or sha256:<digest>."
-        type: string
-        required: false
-        default: previous
-      hypernova_web:
-        description: "rollback only: previous, current, latest or sha256:<digest>."
-        type: string
-        required: false
-        default: previous
-      home:
-        description: "rollback only: previous, current, latest or sha256:<digest>."
+      target:
+        description: "rollback only, the host's app image (hetzner the portfolio, home Home): previous, current,
+          latest, sha256:<digest>, or for the portfolio a 40-character commit sha."
         type: string
         required: false
         default: previous
@@ -56,16 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     concurrency:
-      group: deploy
+      group: deploy-${{ inputs.host }}
       cancel-in-progress: false
     steps:
       - name: Refuse any branch but master and any malformed input
         env:
+          HOST: ${{ inputs.host }}
           ACTION: ${{ inputs.action }}
-          PORTFOLIO: ${{ inputs.portfolio }}
-          HYPERNOVA_PROVIDER: ${{ inputs.hypernova_provider }}
-          HYPERNOVA_WEB: ${{ inputs.hypernova_web }}
-          HOME_TARGET: ${{ inputs.home }}
+          TARGET: ${{ inputs.target }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -73,23 +67,23 @@ jobs:
             echo "::error::Run Deploy from master (Use workflow from: master), not ${GITHUB_REF}."
             exit 1
           fi
+          case "$HOST" in hetzner | home) ;; *) echo "::error::host must be hetzner or home."; exit 1 ;; esac
           case "$ACTION" in release | resume | rollback | status) ;; *) echo "::error::action must be release, resume, rollback or status."; exit 1 ;; esac
           if [ "$ACTION" != rollback ]; then
-            if [ "$PORTFOLIO" != previous ] || [ "$HYPERNOVA_PROVIDER" != previous ] || [ "$HYPERNOVA_WEB" != previous ] || [ "$HOME_TARGET" != previous ] || [ "$DRY_RUN" = true ]; then
-              echo "::error::portfolio, hypernova_provider, hypernova_web, home and dry_run only apply to rollback; leave them at their defaults for ${ACTION}."
+            if [ "$TARGET" != previous ] || [ "$DRY_RUN" = true ]; then
+              echo "::error::target and dry_run only apply to rollback; leave them at their defaults for ${ACTION}."
               exit 1
             fi
           fi
-          if ! [[ "$PORTFOLIO" =~ ^(latest|current|previous|[0-9a-f]{40}|sha256:[0-9a-f]{64})$ ]]; then
-            echo "::error::portfolio must be previous, current, latest, a 40-character commit sha or sha256:<64 hex>."
+          if [ "$HOST" = hetzner ]; then
+            pattern='^(latest|current|previous|[0-9a-f]{40}|sha256:[0-9a-f]{64})$'
+          else
+            pattern='^(latest|current|previous|sha256:[0-9a-f]{64})$'
+          fi
+          if ! [[ "$TARGET" =~ $pattern ]]; then
+            echo "::error::target must be previous, current, latest, sha256:<64 hex> or, for the portfolio (hetzner), a 40-character commit sha."
             exit 1
           fi
-          for value in "$HYPERNOVA_PROVIDER" "$HYPERNOVA_WEB" "$HOME_TARGET"; do
-            if ! [[ "$value" =~ ^(latest|current|previous|sha256:[0-9a-f]{64})$ ]]; then
-              echo "::error::hypernova_provider, hypernova_web and home must be previous, current, latest or sha256:<64 hex>."
-              exit 1
-            fi
-          done
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -140,11 +134,12 @@ jobs:
       - name: Pin the server's host key
         env:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          SERVER_SSH_HOST: ${{ vars.SERVER_SSH_HOST }}
+          # home: SERVER_SSH_HOST (infra-host); hetzner: HETZNER_SSH_HOST (infra-hetzner).
+          SERVER_SSH_HOST: ${{ inputs.host == 'hetzner' && vars.HETZNER_SSH_HOST || vars.SERVER_SSH_HOST }}
         run: |
           set -euo pipefail
           if [ -z "$SERVER_SSH_HOST" ]; then
-            echo "::error::The SERVER_SSH_HOST variable is not set. Set it to the server's tailnet name, infra-host (RUNBOOK.md, \"What you need\")."
+            echo "::error::The host's tailnet name is not set: the HETZNER_SSH_HOST variable (infra-hetzner) for hetzner, SERVER_SSH_HOST (infra-host) for home (RUNBOOK.md, \"What you need\")."
             exit 1
           fi
           if [ -z "$SSH_KNOWN_HOSTS" ]; then
@@ -154,7 +149,7 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "${RUNNER_TEMP}/known_hosts"
           chmod 600 "${RUNNER_TEMP}/known_hosts"
           if ! ssh-keygen -F "$SERVER_SSH_HOST" -f "${RUNNER_TEMP}/known_hosts" >/dev/null; then
-            echo "::error::SSH_KNOWN_HOSTS has no key for ${SERVER_SSH_HOST}. Its line must name the tailnet name SERVER_SSH_HOST holds (RUNBOOK.md, \"Record the host key\")."
+            echo "::error::SSH_KNOWN_HOSTS has no key for ${SERVER_SSH_HOST}. It holds one line per host, each naming that host's tailnet name (RUNBOOK.md, \"Record the host key\")."
             exit 1
           fi
           {
@@ -179,16 +174,14 @@ jobs:
           username: ${{ vars.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Resolve the rollback targets to digest-pinned images
+      - name: Resolve the rollback target to a digest-pinned image
         if: inputs.action == 'rollback'
         env:
-          PORTFOLIO: ${{ inputs.portfolio }}
-          HYPERNOVA_PROVIDER: ${{ inputs.hypernova_provider }}
-          HYPERNOVA_WEB: ${{ inputs.hypernova_web }}
-          HOME_TARGET: ${{ inputs.home }}
+          HOST: ${{ inputs.host }}
+          TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          ./release-images.sh resolve "$PORTFOLIO" "$HYPERNOVA_PROVIDER" "$HYPERNOVA_WEB" "$HOME_TARGET" <"${RUNNER_TEMP}/status.txt" >"${RUNNER_TEMP}/pins.env"
+          ./release-images.sh resolve "$HOST" "$TARGET" <"${RUNNER_TEMP}/status.txt" >"${RUNNER_TEMP}/pins.env"
           cat "${RUNNER_TEMP}/pins.env"
 
       - name: Build extra-vars file from secrets
@@ -197,16 +190,22 @@ jobs:
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           POSTGRES_SUPERUSER_PASSWORD: ${{ secrets.POSTGRES_SUPERUSER_PASSWORD }}
-          PRIZM_DB_PASSWORD: ${{ secrets.PRIZM_DB_PASSWORD }}
           PORTFOLIO_DB_PASSWORD: ${{ secrets.PORTFOLIO_DB_PASSWORD }}
           PORTFOLIO_ADMIN_PASSWORD: ${{ secrets.PORTFOLIO_ADMIN_PASSWORD }}
           PORTFOLIO_RESEND_API_KEY: ${{ secrets.PORTFOLIO_RESEND_API_KEY }}
           PORTFOLIO_TOTP_ENCRYPTION_KEY: ${{ secrets.PORTFOLIO_TOTP_ENCRYPTION_KEY }}
           PORTFOLIO_GOOGLE_CLIENT_ID: ${{ vars.PORTFOLIO_GOOGLE_CLIENT_ID }}
           PORTFOLIO_GOOGLE_CLIENT_SECRET: ${{ secrets.PORTFOLIO_GOOGLE_CLIENT_SECRET }}
-          HYPERNOVA_SESSION_SECRET: ${{ secrets.HYPERNOVA_SESSION_SECRET }}
-          HYPERNOVA_ADMIN_PASSWORD: ${{ secrets.HYPERNOVA_ADMIN_PASSWORD }}
-          CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_PUBLIC_BUCKET: ${{ vars.R2_PUBLIC_BUCKET }}
+          R2_PRIVATE_BUCKET: ${{ vars.R2_PRIVATE_BUCKET }}
+          MEDIA_PUBLIC_BASE: ${{ vars.MEDIA_PUBLIC_BASE }}
+          R2_BACKUP_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+          R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+          CF_ORIGIN_CERT: ${{ secrets.CF_ORIGIN_CERT }}
+          CF_ORIGIN_KEY: ${{ secrets.CF_ORIGIN_KEY }}
           HOME_TLS_CF_DNS_TOKEN: ${{ secrets.HOME_TLS_CF_DNS_TOKEN }}
           BESZEL_PASSWORD: ${{ secrets.BESZEL_PASSWORD }}
           BESZEL_AGENT_TOKEN: ${{ secrets.BESZEL_AGENT_TOKEN }}
@@ -227,16 +226,22 @@ jobs:
             ghcr_username: env.GHCR_USERNAME,
             ghcr_token: env.GHCR_TOKEN,
             postgres_superuser_password: env.POSTGRES_SUPERUSER_PASSWORD,
-            prizm_db_password: env.PRIZM_DB_PASSWORD,
             portfolio_db_password: env.PORTFOLIO_DB_PASSWORD,
             portfolio_admin_password: env.PORTFOLIO_ADMIN_PASSWORD,
             portfolio_resend_api_key: env.PORTFOLIO_RESEND_API_KEY,
             portfolio_totp_encryption_key: env.PORTFOLIO_TOTP_ENCRYPTION_KEY,
             portfolio_google_client_id: env.PORTFOLIO_GOOGLE_CLIENT_ID,
             portfolio_google_client_secret: env.PORTFOLIO_GOOGLE_CLIENT_SECRET,
-            hypernova_session_secret: env.HYPERNOVA_SESSION_SECRET,
-            hypernova_admin_password: env.HYPERNOVA_ADMIN_PASSWORD,
-            cf_tunnel_token: env.CF_TUNNEL_TOKEN,
+            r2_account_id: env.R2_ACCOUNT_ID,
+            r2_access_key_id: env.R2_ACCESS_KEY_ID,
+            r2_secret_access_key: env.R2_SECRET_ACCESS_KEY,
+            r2_public_bucket: env.R2_PUBLIC_BUCKET,
+            r2_private_bucket: env.R2_PRIVATE_BUCKET,
+            media_public_base: env.MEDIA_PUBLIC_BASE,
+            r2_backup_access_key_id: env.R2_BACKUP_ACCESS_KEY_ID,
+            r2_backup_secret_access_key: env.R2_BACKUP_SECRET_ACCESS_KEY,
+            cf_origin_cert: env.CF_ORIGIN_CERT,
+            cf_origin_key: env.CF_ORIGIN_KEY,
             home_tls_cf_dns_token: env.HOME_TLS_CF_DNS_TOKEN,
             beszel_password: env.BESZEL_PASSWORD,
             beszel_agent_token: env.BESZEL_AGENT_TOKEN,
@@ -258,13 +263,14 @@ jobs:
       - name: Render the release bundle on the runner
         if: inputs.action != 'status' && !(inputs.action == 'rollback' && inputs.dry_run)
         env:
+          HOST: ${{ inputs.host }}
           ACTION: ${{ inputs.action }}
         run: |
           set -euo pipefail
           if [ "$ACTION" = rollback ]; then
-            ./build-bundle.sh --pin "${RUNNER_TEMP}/pins.env" "${RUNNER_TEMP}/extra-vars.json" "${RUNNER_TEMP}/bundle.tgz"
+            ./build-bundle.sh --host "$HOST" --pin "${RUNNER_TEMP}/pins.env" "${RUNNER_TEMP}/extra-vars.json" "${RUNNER_TEMP}/bundle.tgz"
           else
-            ./build-bundle.sh "${RUNNER_TEMP}/extra-vars.json" "${RUNNER_TEMP}/bundle.tgz"
+            ./build-bundle.sh --host "$HOST" "${RUNNER_TEMP}/extra-vars.json" "${RUNNER_TEMP}/bundle.tgz"
           fi
           rm -f "${RUNNER_TEMP}/extra-vars.json"
 

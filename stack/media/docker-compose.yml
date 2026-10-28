@@ -3,8 +3,8 @@
 # plain-http links page, for the owner over the tailnet only. See docs/stacks.md.
 # Each publishes one port on the host's Tailscale address and nowhere else
 # (TAILSCALE_IP comes from /etc/infra/host.env, which infra-apply exports);
-# never through the tunnel or the edge Traefik (nothing here is for the
-# public; home-tls is its own Traefik on the tailnet address). Garage's
+# never to the public (nothing here is for the public; home-tls is its own
+# Traefik on the tailnet address). Garage's
 # objects are on the media disk (/srv/media/s3), bind-mounted. Every container runs as the media account (.env, from
 # production.yml), with no capability and no new privileges. No Watchtower
 # label: the images are pinned and move only with a reviewed re-pin and a
@@ -19,12 +19,10 @@
 name: media
 
 services:
-  # The plain-http page at http://infra-host/: it sends the browser on to Home
-  # (https://home.<domain>, home-server in stack/home), and /files.html lists
-  # the other ways into the files bucket (WebDAV, rclone, S3 apps), also at
-  # https://home.<domain>/files.html through home-tls. busybox httpd serves both
-  # pages from tmpfs; they are HOME_HTML and FILES_HTML below (no host file, no
-  # bind mount). Port 80 needs no capability: Docker lets any user bind low
+  # The plain-http page at http://infra-host/: it links Home
+  # (https://home.<domain>, home-server in stack/home) and the tailnet-only
+  # services at their ports. busybox httpd serves it from tmpfs; it is
+  # HOME_HTML below (no host file, no bind mount). Port 80 needs no capability: Docker lets any user bind low
   # ports inside a container's own network namespace. No data, so nothing to
   # back up.
   home:
@@ -42,13 +40,13 @@ services:
     command:
       - sh
       - -c
-      - mkdir -p /tmp/www && printf '%s' "$$HOME_HTML" >/tmp/www/index.html && printf '%s' "$$FILES_HTML" >/tmp/www/files.html && exec httpd -f -p 80 -h /tmp/www
+      - mkdir -p /tmp/www && printf '%s' "$$HOME_HTML" >/tmp/www/index.html && exec httpd -f -p 80 -h /tmp/www
     ports:
       - "${TAILSCALE_IP}:80:80"
     environment:
-      # Home took over https://home.<domain> from the links page; old
-      # bookmarks of http://infra-host/ land there, and the file manager and
-      # the status dashboard keep their own names.
+      # Home is https://home.<domain>; the file manager, the status dashboard
+      # and S3 have no https name (the *.home.<domain> record is gone) and are
+      # reached at http://<server>:<port> over the tailnet.
       HOME_HTML: |
         <!doctype html>
         <html lang="en">
@@ -60,67 +58,8 @@ services:
         <title>Home</title>
         </head>
         <body>
-        <p><a href="https://${HOME_DOMAIN}/">Home</a> &middot; <a href="https://${HOST_FILES}/web/client">File manager</a> &middot;
-        <a href="https://${HOST_STATUS}/">Status</a> &middot; <a href="/files.html">Other ways into the files bucket</a></p>
-        </body>
-        </html>
-      # The other ways into the files bucket, besides the web file manager
-      # (sftpgo, https://files.<home domain>): WebDAV, rclone and S3 apps.
-      FILES_HTML: |
-        <!doctype html>
-        <html lang="en">
-        <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-        <meta name="color-scheme" content="light dark">
-        <title>Files</title>
-        <style>
-        :root { --bg: #f3f4f6; --tile: #ffffff; --text: #111827; --muted: #6b7280; --edge: #e5e7eb; }
-        @media (prefers-color-scheme: dark) {
-          :root { --bg: #0b0d10; --tile: #171a1f; --text: #f3f4f6; --muted: #9ca3af; --edge: #262a31; }
-        }
-        * { box-sizing: border-box; }
-        body { margin: 0; background: var(--bg); color: var(--text);
-          font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-          padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
-                   max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
-        main { max-width: 44rem; margin: 0 auto; }
-        section { background: var(--tile); border: 1px solid var(--edge); border-radius: 16px; padding: 4px 18px; margin: 12px 0; }
-        h1 { font-size: 1.5rem; margin: 8px 0 4px; } h2 { font-size: 1.05rem; margin: 14px 0 6px; }
-        p, li { color: var(--muted); } b { color: var(--text); }
-        pre { overflow-x: auto; background: var(--bg); border: 1px solid var(--edge); border-radius: 10px; padding: 10px; font-size: 0.85rem; color: var(--text); }
-        a { color: #c9a227; }
-        </style>
-        </head>
-        <body>
-        <main>
-        <p><a href="https://${HOME_DOMAIN}/">&larr; Home</a></p>
-        <h1>Files</h1>
-        <p>Your files live in the <b>files</b> bucket on the server, reachable over Tailscale only. The easiest way in is the
-        <a href="https://${HOST_FILES}/web/client">file manager</a> (upload, folders, preview, share links). These are the other ways in.</p>
-        <section>
-        <h2>Mount it as a drive (WebDAV)</h2>
-        <ul>
-        <li><b>Address:</b> https://${HOST_FILES}/dav</li>
-        <li><b>User:</b> owner &middot; <b>Password:</b> 1Password, &ldquo;infra production secrets&rdquo;, field FILES_PASSWORD</li>
-        <li><b>Linux file manager:</b> Other Locations &rarr; <b>davs://${HOST_FILES}/dav</b></li>
-        <li><b>Android:</b> a WebDAV-capable file manager (Material Files, Solid Explorer&hellip;) with the address above</li>
-        </ul>
-        </section>
-        <section>
-        <h2>rclone (laptop)</h2>
-        <pre>rclone config create home s3 provider=Other endpoint=https://${HOST_S3} \
-          region=garage force_path_style=true \
-          access_key_id="$$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_ACCESS_KEY_ID --reveal)" \
-          secret_access_key="$$(op item get 'infra production secrets' --vault "Home Server" --fields label=GARAGE_OWNER_SECRET_KEY --reveal)"
-        rclone copy ~/Documents/report.pdf home:files/
-        rclone mount home:files ~/Files --vfs-cache-mode writes --daemon</pre>
-        </section>
-        <section>
-        <h2>S3 apps</h2>
-        <p>Any S3 client works (Cyberduck, S3 Files, FolderSync&hellip;): choose <b>Amazon S3 / S3-compatible</b>, server <b>${HOST_S3}</b>, port <b>443</b> with <b>TLS</b>, path-style addressing, region <b>garage</b>, and the key in 1Password (GARAGE_OWNER_ACCESS_KEY_ID and GARAGE_OWNER_SECRET_KEY).</p>
-        </section>
-        </main>
+        <p><a href="https://${HOME_DOMAIN}/">Home</a> &middot; <a href="http://${SERVER_NAME}:8091/web/client">File manager</a> &middot;
+        <a href="http://${SERVER_NAME}:8090/">Status</a> &middot; S3: http://${SERVER_NAME}:3900 (path-style, region garage)</p>
         </body>
         </html>
     networks:
@@ -135,12 +74,12 @@ services:
       - autoheal=true
 
   # https://home.arbikullakshi.com (Home: home-server, stack/home, on the media
-  # network) and one https name per tailnet service under it
-  # (<label>.home.arbikullakshi.com, production.yml's home_hosts): the apps'
-  # clipboard, microphone, passkeys and install features need https. A second Traefik (the edge image) terminates TLS on the Tailscale
+  # network), and the file manager's WebDAV at /dav on the same name: Home's
+  # clipboard, microphone, passkeys and install features need https. The other
+  # tailnet services have no https name (plan 023: the *.home record is gone). A second Traefik (the edge image) terminates TLS on the Tailscale
   # address and routes each name to its container over the media network: no buffering, no compression, no
   # read or write deadline, so big uploads and streams pass. One certificate
-  # covers home.<domain> and *.home.<domain>; it comes from Let's Encrypt by DNS-01 through
+  # for home.<domain> alone (no wildcard) comes from Let's Encrypt by DNS-01 through
   # Cloudflare's API (home-tls.env: a token that may edit only this zone's DNS),
   # so nothing on the internet has to reach the host. No Docker socket: the
   # static and dynamic configuration are written to tmpfs from the variables
@@ -217,20 +156,8 @@ services:
                 certResolver: letsencrypt
                 domains:
                   - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
-            # The page of other ways into the files bucket, from the links
-            # page's days; Home has no such path.
-            home-files-page:
-              rule: "Host(`${HOME_DOMAIN}`) && Path(`/files.html`)"
-              entryPoints: [websecure]
-              service: links
-              tls:
-                certResolver: letsencrypt
-                domains:
-                  - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
             # WebDAV for the files bucket (sftpgo) on Home's name (home-server
-            # has no /dav), kept for mounts made before files.<home domain> existed.
+            # has no /dav): sftpgo's WebDAV port 8092 is on the media network only.
             home-dav:
               rule: "Host(`${HOME_DOMAIN}`) && PathPrefix(`/dav`)"
               entryPoints: [websecure]
@@ -239,69 +166,15 @@ services:
                 certResolver: letsencrypt
                 domains:
                   - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
-            files:
-              rule: "Host(`${HOST_FILES}`)"
-              entryPoints: [websecure]
-              service: files
-              tls:
-                certResolver: letsencrypt
-                domains:
-                  - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
-            status:
-              rule: "Host(`${HOST_STATUS}`)"
-              entryPoints: [websecure]
-              service: status
-              tls:
-                certResolver: letsencrypt
-                domains:
-                  - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
-            s3:
-              rule: "Host(`${HOST_S3}`)"
-              entryPoints: [websecure]
-              service: s3
-              tls:
-                certResolver: letsencrypt
-                domains:
-                  - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
-            # WebDAV under the file manager's own name.
-            files-dav:
-              rule: "Host(`${HOST_FILES}`) && PathPrefix(`/dav`)"
-              entryPoints: [websecure]
-              service: files-dav
-              tls:
-                certResolver: letsencrypt
-                domains:
-                  - main: "${HOME_DOMAIN}"
-                    sans: ["*.${HOME_DOMAIN}"]
           services:
             home-server:
               loadBalancer:
                 servers:
                   - url: "http://home-server:8080"
-            links:
-              loadBalancer:
-                servers:
-                  - url: "http://home:80"
             files-dav:
               loadBalancer:
                 servers:
                   - url: "http://sftpgo:8092"
-            files:
-              loadBalancer:
-                servers:
-                  - url: "http://sftpgo:8091"
-            status:
-              loadBalancer:
-                servers:
-                  - url: "http://beszel:8090"
-            s3:
-              loadBalancer:
-                servers:
-                  - url: "http://garage:3900"
     volumes:
       # The ACME account and certificate (acme.json, 0600), so a restart does
       # not ask Let's Encrypt again. Not backed up: a lost one is reissued.
@@ -321,7 +194,7 @@ services:
     labels:
       - autoheal=true
 
-  # Beszel, the status dashboard (https://status.<home domain>, also http://infra-host:8090): CPU, memory, disks,
+  # Beszel, the status dashboard (http://infra-host:8090, over the tailnet): CPU, memory, disks,
   # temperatures, the GPU and every container's usage, with history. The hub
   # stores its data in beszel-data. On its first start it creates the owner's
   # login from BESZEL_HUB_USER_EMAIL (.env) and _PASSWORD (beszel.env), so
@@ -341,7 +214,7 @@ services:
     env_file: beszel.env
     environment:
       BESZEL_HUB_USER_EMAIL: "${STATUS_OWNER_EMAIL}"
-      BESZEL_HUB_APP_URL: "https://${HOST_STATUS}"
+      BESZEL_HUB_APP_URL: "http://${SERVER_NAME}:8090"
       BESZEL_HUB_CHECK_UPDATES: "false"
       GOMEMLIMIT: 160MiB
     ports:
@@ -531,7 +404,7 @@ services:
     networks:
       - media
 
-  # Garage, S3-compatible storage (https://s3.<home domain> or http://infra-host:3900, region garage,
+  # Garage, S3-compatible storage (http://infra-host:3900 over the tailnet, region garage,
   # path-style). Objects live on the media disk (/srv/media/s3, the media
   # account's, 0700); the metadata (SQLite) on the SSD in garage-meta. The
   # admin API (3903) and RPC (3901) stay on the media network.
@@ -665,7 +538,7 @@ services:
     networks:
       - media
 
-  # SFTPGo, the file manager for the files bucket (https://files.<home domain>, also http://infra-host:8091):
+  # SFTPGo, the file manager for the files bucket (http://infra-host:8091/web/client, over the tailnet):
   # a web client to upload (drag and drop), make folders, rename, move,
   # delete, preview, download and share files, and WebDAV for mounting it as
   # a drive, served at https://<home domain>/dav through home-tls

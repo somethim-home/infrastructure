@@ -1,16 +1,18 @@
 # Operations
 
-The procedures — first setup of the home server, the DNS switch-over, releases, rollback,
+The procedures — first setup of the home server and of the hetzner host, releases, rollback,
 rotating a secret, a lockout, re-pinning an image — are in [RUNBOOK.md](../RUNBOOK.md). This page keeps the short recipes
-that are not part of a procedure. Every command runs as `admin` over the tailnet
-(`ssh admin@infra-host`).
+that are not part of a procedure. Every command runs as `admin` over the tailnet, on the host it
+names (`ssh admin@infra-host` for Home, `ssh admin@infra-hetzner` for the portfolio and its
+database).
 
 | Situation | Where |
 | --- | --- |
 | A release failed, or an app must go back a version | [RUNBOOK.md, Releases, status, rollback, resume](../RUNBOOK.md#releases-status-rollback-resume) |
-| A secret must change (the tunnel token too) | [RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret) |
+| A secret must change (the origin certificate and R2 keys too) | [RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret) |
 | SSH does not let you in | [RUNBOOK.md, Locked out](../RUNBOOK.md#locked-out) |
-| The sites are down but the server is up | [RUNBOOK.md, The sites are down but the server is up](../RUNBOOK.md#the-sites-are-down-but-the-server-is-up) |
+| The site is down but the hetzner host is up | [RUNBOOK.md, The site is down but the hetzner host is up](../RUNBOOK.md#the-site-is-down-but-the-hetzner-host-is-up) |
+| The portfolio's database must come back | [RUNBOOK.md, Restoring the portfolio database](../RUNBOOK.md#restoring-the-portfolio-database) |
 | The "server is down" page must be deployed or changed | [RUNBOOK.md, The down page](../RUNBOOK.md#the-down-page) |
 | Home's power button does nothing | [RUNBOOK.md, Home's power control](../RUNBOOK.md#homes-power-control) |
 | A third-party image must move | [RUNBOOK.md, Re-pinning third-party images](../RUNBOOK.md#re-pinning-third-party-images) |
@@ -19,7 +21,7 @@ that are not part of a procedure. Every command runs as `admin` over the tailnet
 
 ## Getting into PostgreSQL
 
-The image trusts connections over the local Unix socket, so a lost superuser password is not
+On the hetzner host. The image trusts connections over the local Unix socket, so a lost superuser password is not
 a lockout:
 
 ```bash
@@ -40,7 +42,15 @@ Old releases need no cleanup: `infra-apply` keeps only `current` and `previous`.
 
 ## Backups
 
-`infra-backup.timer` runs `/usr/local/sbin/infra-backup` (`roles/host/files/infra-backup`)
+**The hetzner host**: `infra-pg-backup.timer` dumps the portfolio's database to R2 every day
+([database.md](database.md#backups)):
+
+```bash
+ssh admin@infra-hetzner systemctl list-timers infra-pg-backup.timer
+ssh admin@infra-hetzner journalctl -u infra-pg-backup --since -2d     # "dumped to portfolio-backups/…" each day
+```
+
+**The home server**: `infra-backup.timer` runs `/usr/local/sbin/infra-backup` (`roles/host/files/infra-backup`)
 every night at `backup_time` (02:30 UTC, plus up to 15 minutes of jitter), at least an hour
 before the 04:00 reboot window and clear of the Sunday 03:00 image prune; a night missed while
 the server was off runs at the next boot. The run falls inside quiet hours, and the backup disk
@@ -49,14 +59,12 @@ is audible; the owner keeps it there ([host.md](host.md#quiet-hours)). It writes
 
 | Path | What |
 | --- | --- |
-| `snapshots/<date>/postgres.sql.gz` | `pg_dumpall` of the shared PostgreSQL (every role and database), mode 0600 |
-| `snapshots/<date>/immich.sql.gz` | `pg_dumpall --clean --if-exists` of Immich's own PostgreSQL (`immich-postgres`), mode 0600, only while it runs; since Immich was retired its stopped data folder is copied as the volume `immich-pgdata` instead |
-| `snapshots/<date>/volumes/<volume>/` | `portfolio-media`, `hypernova_prizm-storage`, `beszel-data` (the dashboard's history and alerts), `garage-meta` (Garage's configuration and metadata), `sftpgo-data` (the file manager's database: share links, sessions), `home-data` (Home's SQLite databases: `home.db` with accounts, sessions, factors and the audit log, `media.db` with Media's catalogue, progress and lists, `ai.db` with the chats, sealed; and Books' library in `books/`: `books.db`, the EPUBs, covers; without `media-cache/`, Media's pictures, trickplay and HLS cache, and Books' `catalog-covers/` and `.tmp/`, which come back by themselves), and the kept volumes of the apps retired on 2026-10-20 ([stacks.md](stacks.md#retired-apps-2026-10-20)): `jellyfin-config` (without logs, cache and transcodes), `audiobookshelf-config`, `audiobookshelf-metadata` (without its cache, logs, streams), `kavita-config` (without cache, temp, logs), `open-webui-data` (without its model cache) and `immich-pgdata`, as plain trees |
+| `snapshots/<date>/postgres.sql.gz` | `pg_dumpall` of the old shared PostgreSQL, mode 0600, only while a `postgresql` container still runs on the home server (until RUNBOOK section 15's clean-up) |
+| `snapshots/<date>/volumes/<volume>/` | `portfolio-media` while it exists (until RUNBOOK section 15's clean-up), `beszel-data` (the dashboard's history and alerts), `garage-meta` (Garage's configuration and metadata), `sftpgo-data` (the file manager's database: share links, sessions), `home-data` (Home's SQLite databases: `home.db` with accounts, sessions, factors and the audit log, `media.db` with Media's catalogue, progress and lists, `ai.db` with the chats, sealed; and Books' library in `books/`: `books.db`, the EPUBs, covers; without `media-cache/`, Media's pictures, trickplay and HLS cache, and Books' `catalog-covers/` and `.tmp/`, which come back by themselves), and the kept volumes of the apps retired on 2026-10-20 ([stacks.md](stacks.md#retired-apps-2026-10-20)): `jellyfin-config` (without logs, cache and transcodes), `audiobookshelf-config`, `audiobookshelf-metadata` (without its cache, logs, streams), `kavita-config` (without cache, temp, logs), and `open-webui-data` (without its model cache), as plain trees |
 | `snapshots/<date>/media/s3/` | Garage's objects (`/srv/media/s3`), copied in the same stop of Garage as `garage-meta`, so the two match |
 | `snapshots/<date>/media/home-files/` | Home Files' ciphertext (`/srv/media/home-files`), copied in the same stop of `home-server` as `home-data`, so the two match. `home-keys` (Home's keys) is never copied: the keys stay out of the backups, in the GitHub secrets and 1Password |
 | `snapshots/<date>/media/{movies,shows}/` | Home's film and series library, **metadata only**: every folder, with the `.nfo` files, pictures (`jpg`, `jpeg`, `png`, `webp`, `tbn`) and subtitle files (`srt`, `ass`, `ssa`, `vtt`) Home and the owner keep next to the videos, never the videos themselves (they would not fit) nor Home's uploads in progress (`.home-uploads/`). The edits people made in Home (titles, matches, pictures) survive a lost disk; the films have to be copied in again |
 | `snapshots/<date>/media/{audiobooks,books,podcasts}/` | those library folders of the retired apps, kept |
-| `snapshots/<date>/media/photos/` | Immich's `/srv/media/photos`, kept (originals, profile pictures, Immich's own database dumps in `backups/`), without `thumbs/` and `encoded-video/` |
 | `snapshots/latest` | a symlink to the newest complete snapshot |
 
 **Snapshots, not a mirror.** Every tree is copied with `rsync --link-dest` against the
@@ -85,7 +93,8 @@ and `immich/` dumps once 14 snapshots exist.
 Not copied: the AI models (Home's `llama-models`; they download again,
 [RUNBOOK.md](../RUNBOOK.md#homes-ai-models)), `home-keys` (Home's keys), the videos in `movies`
 and `shows` (they would not fit; their metadata is copied), and of the retired apps' kept data
-`comfyui-data`, `immich-ml-cache` and `jellyfin-cache` (downloads and caches).
+`comfyui-data` and `jellyfin-cache` (downloads and caches), and nothing of Immich (no photo
+or device backup of any kind: the files bucket and Home Files hold only what is put there on purpose).
 
 - **No disk, no writes.** If `/srv/backup` is not a mountpoint (the disk is unplugged, or
   `backup_disk_uuid` is empty) the script logs a warning and exits 0 without writing
@@ -103,8 +112,7 @@ and `shows` (they would not fit; their metadata is copied), and of the retired a
   copy could start it again mid-copy. A container that was not running is neither stopped nor
   started. If the script dies mid-run (killed, or its 6-hour limit), its exit trap starts
   whatever it had stopped. The retired apps' volumes have no container any more and are copied
-  as they are. The public sites are never stopped: PostgreSQL is dumped live (`pg_dumpall` is
-  consistent), and their file volumes are copied as they are.
+  as they are.
 - **No empty library over a full backup.** A library folder that is missing, or empty while
   the last snapshot of it is not (a disk that did not mount), fails the night instead of being
   backed up empty.
@@ -118,25 +126,22 @@ and `shows` (they would not fit; their metadata is copied), and of the retired a
   ssh admin@infra-host sudo systemctl start infra-backup.service     # a run now
   ```
 
-The portfolio's `media` table is a ledger of what is on `portfolio-media`: restore the
-database and that volume from the same night, or the site works with broken images, the
-failure that goes unnoticed longest. Restoring is in
-[RUNBOOK.md](../RUNBOOK.md#restoring-from-the-backup-disk).
+Restoring is in [RUNBOOK.md](../RUNBOOK.md#restoring-from-the-backup-disk).
 
 The backup disk sits next to the server: it covers a dead SSD or HDD and a bad upgrade, not a
 fire or a burglary. For that, copy the newest snapshot's dumps and app volumes off-site now
 and then (they are small), for example to the laptop over the tailnet:
 
 ```bash
-ssh admin@infra-host sudo tar -C /srv/backup/snapshots/latest/ -czf - postgres.sql.gz volumes > infra-backup-$(date +%F).tgz
+ssh admin@infra-host sudo tar -C /srv/backup/snapshots/latest/ -czf - volumes > infra-backup-$(date +%F).tgz
 ```
 
 ## A major PostgreSQL upgrade
 
-Never by editing the image tag — the on-disk formats are incompatible and the server will
-refuse to start.
+On the hetzner host. Never by editing the image tag — the on-disk formats are incompatible and
+the server will refuse to start.
 
-1. Stop every writer: `sudo docker stop portfolio prizm-provider prizm-web` (not the database).
+1. Stop the writer: `sudo docker stop portfolio` (not the database).
    Watchtower revives stopped labelled containers, so stop it first:
    `sudo docker stop watchtower`.
 2. `pg_dumpall` from the running container.
@@ -163,24 +168,23 @@ version too old" error means the pinned image must move
 Remember that Watchtower only updates containers that already exist, and never one pinned by
 a rollback. A missing app container comes back from a `release`.
 
-## The tunnel
+## The public site
+
+On the hetzner host:
 
 ```bash
-sudo docker logs --tail 50 cloudflared                   # "Registered tunnel connection" x4 when healthy
-sudo docker inspect cloudflared --format '{{.State.Health.Status}}'
+sudo docker ps --format '{{.Names}} {{.Status}}'          # edge-traefik, portfolio, postgresql
+sudo docker logs --tail 50 edge-traefik
+sudo ls -l /opt/edge/dynamic/tls.yml                     # written by every release, 0600
 ```
 
-The Cloudflare dashboard (Zero Trust → Networks → Tunnels) shows the same: **Healthy** with
-connections, or **Down**. A tunnel that is down while the server is up is almost always the
-token (deleted or refreshed tunnel: store the new `CF_TUNNEL_TOKEN`, run `release`) or the home
-internet line. A hostname that answers `530`/error 1033 has no Public Hostname on the tunnel;
-`502` means cloudflared cannot reach `edge-traefik:80` (is `edge-traefik` running, on `edge`?).
+A `521`/`522` from Cloudflare means it cannot reach the server (the Hetzner Cloud Firewall, the
+records' addresses, or Traefik down); `525` a failed handshake (Authenticated Origin Pulls off,
+or `tls.yml` missing: run `release`); `526` a certificate Full (strict) does not accept
+([edge.md](edge.md#verifying-it)).
 
 ## A site is up but hung
 
 Autoheal restarts containers that report `unhealthy`, but only those labelled `autoheal=true`
-that define a healthcheck. `prizm-web` has neither, so a hang there needs:
-
-```bash
-sudo docker restart prizm-web
-```
+that define a healthcheck: the portfolio does both. Anything else that hangs needs a
+`sudo docker restart <container>`.

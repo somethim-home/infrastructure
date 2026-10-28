@@ -1,0 +1,32 @@
+---
+# Cloudflare's current address ranges, the only sources the hetzner host's
+# ports 80 and 443 admit (ufw in roles/common, infra-firewall in roles/host)
+# and the only forwarders Traefik trusts (roles/edge). Fetched from Cloudflare
+# on every run; production.yml's cloudflare_ips_pinned is used when the fetch
+# fails or returns something that is not a list of CIDR ranges.
+- name: Fetch Cloudflare's IPv4 and IPv6 ranges
+  ansible.builtin.uri:
+    url: "https://www.cloudflare.com/ips-{{ item }}"
+    return_content: true
+    timeout: 20
+  loop: [v4, v6]
+  register: cloudflare_fetch
+  failed_when: false
+  check_mode: false
+
+- name: Note the ranges this run uses
+  vars:
+    fetched: "{{ cloudflare_fetch.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 200)
+      | map(attribute='content') | join('\n') | split('\n') | map('trim') | select | list }}"
+    cidr_v4: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+    cidr_v6: '^[0-9a-f:]+/[0-9]{1,3}$'
+    usable: "{{ fetched | length > 0 and (fetched | select('match', cidr_v4) | list | length) > 0
+      and (fetched | select('match', cidr_v6) | list | length) > 0
+      and (fetched | reject('match', cidr_v4) | reject('match', cidr_v6) | list | length) == 0 }}"
+  ansible.builtin.set_fact:
+    cloudflare_ips: "{{ fetched if usable else cloudflare_ips_pinned }}"
+    cloudflare_ips_source: "{{ 'fetched from cloudflare.com' if usable else 'production.yml (the fetch failed)' }}"
+
+- name: Say where the ranges came from
+  ansible.builtin.debug:
+    msg: "Cloudflare's {{ cloudflare_ips | length }} address ranges, {{ cloudflare_ips_source }}{{ '' if cloudflare_ips | sort == cloudflare_ips_pinned | sort else '; they differ from production.yml cloudflare_ips_pinned, re-pin it' }}."

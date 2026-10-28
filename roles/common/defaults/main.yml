@@ -8,8 +8,10 @@ deploy_user: deploy
 # (roles/host/defaults/main.yml, tailnet_ports: the http://infra-host/ redirect
 # on 80 and home-tls on 443, the https front of Home and every service, the Beszel status dashboard on 8090, Garage's S3 API
 # on 3900 and the SFTPGo file manager on 8091). LAN 22 is added or
-# removed separately in firewall.yml (ssh_outside_tailnet). No public web port:
-# the public arrives through the Cloudflare Tunnel, which dials out.
+# removed separately in firewall.yml (ssh_outside_tailnet). The hetzner host
+# also admits 80 and 443 from Cloudflare's ranges (firewall.yml); the home
+# server has no public web port. The tailnet rules below are the home server's
+# ports; on the hetzner host nothing listens there.
 ufw_allowed:
   - in on tailscale0 proto tcp to any port 22
   - in on tailscale0 proto tcp to any port 80

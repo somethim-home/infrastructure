@@ -55,7 +55,7 @@ case "$1" in
     [ "$2 $3 $4" = "-i postgresql psql" ] || { echo "fake docker: unsupported exec: $*" >&2; exit 2; }
     cat >"$state/psql.stdin"
     if [ -f "$state/psql.rc" ]; then
-      printf "psql:<stdin>:6: ERROR:  role \"prizm\" cannot be altered with password '%s'\n" "$(sed -n "s/^ALTER ROLE prizm WITH LOGIN PASSWORD '\\(.*\\)';$/\\1/p" "$state/psql.stdin")" >&2
+      printf "psql:<stdin>:6: ERROR:  role \"portfolio\" cannot be altered with password '%s'\n" "$(sed -n "s/^ALTER ROLE portfolio WITH LOGIN PASSWORD '\\(.*\\)';$/\\1/p" "$state/psql.stdin")" >&2
       exit "$(cat "$state/psql.rc")"
     fi
     ;;
@@ -150,10 +150,11 @@ case "$1" in
 esac
 SH
 
-# curl: a route check sends -H "Host: <host>" to Traefik's edge address and
-# gets state/curl.<host> (default 301 for www., else 200); the tunnel check
-# (no Host header) asks cloudflared's /ready and gets state/curl.ready
-# (default 200); the public check (a URL by name, no Host header) gets
+# curl: on hetzner, the http route check sends -H "Host: <host>" to Traefik's
+# edge address and gets state/curl.<host> (default 301, the redirect to https),
+# and the https check without a client certificate (--resolve
+# <name>:443:<edge address>) gets state/curl.mtls.<host> (default 000 with exit
+# status 56, the refused handshake); the public check (a URL by name, no Host header) gets
 # state/curl.public.<scheme>.<host> (default 301 for www. and plain http, else 200);
 # home-tls's certificate check (--resolve <name>:443:<tailnet ip>) gets
 # state/curl.tls.<host> (default 200), and its check of Home's web app (/app/)
@@ -176,7 +177,13 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-if [ -n "$resolve" ] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/app/$ ]]; then
+if [ -n "$resolve" ] && [[ "$resolve" != *":$FAKE_TAILSCALE_IP" ]] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/ ]]; then
+  # Traefik's TLS without Cloudflare's client certificate: refused in the handshake.
+  key="mtls.${BASH_REMATCH[1]}"
+  printf 'curl mtls %s %s\n' "$resolve" "$url" >>"$FAKE_STATE/calls"
+  if [ -f "$FAKE_STATE/curl.$key" ]; then cat "$FAKE_STATE/curl.$key"; else printf '000'; fi
+  exit "$(cat "$FAKE_STATE/curl.$key.rc" 2>/dev/null || echo 56)"
+elif [ -n "$resolve" ] && [[ "$url" =~ ^https://([a-z][a-z0-9.-]*)/app/$ ]]; then
   # home-tls's check of Home's web app.
   key="tls-app.${BASH_REMATCH[1]}"
   default=200
@@ -194,13 +201,11 @@ elif [ -z "$host" ] && [[ "$url" =~ ^(https?)://([a-z][a-z0-9.-]*)(/.*)?$ ]]; th
   printf 'curl public %s\n' "$url" >>"$FAKE_STATE/calls"
 elif [ -n "$host" ]; then
   key="$host"
-  default=200
-  case "$host" in www.*) default=301 ;; esac
+  default=301
   printf 'curl route %s %s\n' "$host" "$url" >>"$FAKE_STATE/calls"
 else
-  key=ready
-  default=200
-  printf 'curl ready %s\n' "$url" >>"$FAKE_STATE/calls"
+  echo "fake curl: unexpected call: $*" >&2
+  exit 2
 fi
 if [ -f "$FAKE_STATE/curl.$key" ]; then cat "$FAKE_STATE/curl.$key"; else printf '%s' "$default"; fi
 exit "$(cat "$FAKE_STATE/curl.$key.rc" 2>/dev/null || echo 0)"
@@ -215,8 +220,6 @@ SH
 chmod +x "$work/bin/docker" "$work/bin/curl" "$work/bin/sudo"
 
 readonly portfolio_repo=ghcr.io/somethim/portfolio
-readonly provider_repo=ghcr.io/hypernova3643725/hypernova-provider
-readonly web_repo=ghcr.io/hypernova3643725/hypernova-web
 readonly home_repo=ghcr.io/somethim-home/home-server
 readonly tailscale_ip=100.101.102.103
 d() { printf 'sha256:%064x' "$1"; }
@@ -229,33 +232,46 @@ tailnet_binding() {
 
 count=0
 state=""
+# new_state makes a fresh host of the kind fake_host names: home (default:
+# ai, media, home) or hetzner (database, portfolio, the edge Traefik).
 new_state() {
   local name
   count=$((count + 1))
   state="$work/state$count"
-  mkdir -p "$state/stack" "$state/edge" "$state/logs" "$state/running" "$state/docker" "$state/images" "$state/imageinfo" "$state/known" \
+  mkdir -p "$state/stack" "$state/edge/dynamic" "$state/logs" "$state/running" "$state/docker" "$state/images" "$state/imageinfo" "$state/known" \
     "$state/started" "$state/restarts" "$state/crashloop" "$state/vanished" "$state/vanished-once" "$state/ip" "$state/ports" "$state/oneshot" "$state/oneshot-missing"
-  printf 'name: edge\n' >"$state/edge/docker-compose.yml"
   # infra-apply points DOCKER_CONFIG at $state/docker, which hides a Compose plugin installed in
   # ~/.docker/cli-plugins (CI installs the host's pinned version there). Link it in so every case
   # resolves compose files with the same Compose the job pinned, not the runner's own.
   if [ -d "${HOME}/.docker/cli-plugins" ]; then
     ln -s "${HOME}/.docker/cli-plugins" "$state/docker/cli-plugins"
   fi
-  printf '%s\n' PUBLIC_INTERFACE=eth0 PUBLIC_PORTS= "TAILSCALE_IP=$tailscale_ip" AI_USER=2001:2001 MEDIA_USER=2000:2000 HOME_USER=65532:65532 \
-    "PORTFOLIO_IMAGE_REPO=$portfolio_repo" "HYPERNOVA_PROVIDER_IMAGE_REPO=$provider_repo" "HYPERNOVA_WEB_IMAGE_REPO=$web_repo" \
-    "HOME_IMAGE_REPO=$home_repo" >"$state/host.env"
+  for name in watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal; do
+    echo "true false" >"$state/running/$name"
+  done
+  if [ "${fake_host:-home}" = hetzner ]; then
+    printf 'name: edge\n' >"$state/edge/docker-compose.yml"
+    printf '%s\n' INFRA_HOST=hetzner PUBLIC_INTERFACE=eth0 PUBLIC_PORTS=80,443 PUBLIC_SOURCES=173.245.48.0/20,103.21.244.0/22 TAILNET_INTERFACE=tailscale0 \
+      "TAILSCALE_IP=$tailscale_ip" "PORTFOLIO_IMAGE_REPO=$portfolio_repo" >"$state/host.env"
+    printf '%s\n' \
+      "c1 /postgresql running always healthy database" \
+      "c2 /portfolio running always healthy portfolio" >"$state/containers"
+    for name in edge-socket-proxy edge-traefik; do
+      echo "true false" >"$state/running/$name"
+    done
+    echo 172.18.0.2 >"$state/ip/edge-traefik"
+    running_image portfolio "$portfolio_repo:latest" 11
+    : >"$state/calls"
+    return 0
+  fi
+  printf '%s\n' INFRA_HOST=home PUBLIC_INTERFACE=eth0 PUBLIC_PORTS= PUBLIC_SOURCES= TAILNET_INTERFACE=tailscale0 "TAILSCALE_IP=$tailscale_ip" \
+    AI_USER=2001:2001 MEDIA_USER=2000:2000 HOME_USER=65532:65532 "HOME_IMAGE_REPO=$home_repo" >"$state/host.env"
   # The power key provisioning made on the host; HOME_POWER_KEY in a bundle must match it.
   printf '%s\n' "${host_power_key:?}" >"$state/home-power.key"
   # beszel-pair, garage-config, garage-setup and home-keys are one-shots (restart: "no"):
   # verify does not wait for them to run, but checks that beszel-pair, garage-setup and home-keys
   # ended with status 0 (state/oneshot/<name>).
   printf '%s\n' \
-    "c1 /postgresql running always healthy database" \
-    "c2 /portfolio running always healthy portfolio" \
-    "c3 /prizm-provider running always healthy hypernova" \
-    "c4 /prizm-web running always none hypernova" \
-    "c5 /cloudflared running always healthy tunnel" \
     "c8 /llama running always healthy ai" \
     "c12 /home running always healthy media" \
     "c13 /home-tls running always healthy media" \
@@ -268,7 +284,7 @@ new_state() {
     "c24 /sftpgo running always healthy media" \
     "c25 /home-keys exited no none home" \
     "c26 /home-server running always healthy home" >"$state/containers"
-  for name in edge-socket-proxy edge-traefik watchtower-socket-proxy watchtower autoheal-socket-proxy autoheal beszel-socket-proxy cloudflared llama home home-tls beszel beszel-agent garage sftpgo home-server; do
+  for name in beszel-socket-proxy llama home home-tls beszel beszel-agent garage sftpgo home-server; do
     echo "true false" >"$state/running/$name"
   done
   tailnet_binding home 80
@@ -276,11 +292,6 @@ new_state() {
   tailnet_binding beszel 8090
   tailnet_binding garage 3900
   tailnet_binding sftpgo 8091
-  echo 172.18.0.2 >"$state/ip/edge-traefik"
-  echo 172.18.0.9 >"$state/ip/cloudflared"
-  running_image portfolio "$portfolio_repo:latest" 11
-  running_image prizm-provider "$provider_repo:latest" 21
-  running_image prizm-web "$web_repo:latest" 31
   running_image home-server "$home_repo:latest" 51
   : >"$state/calls"
 }
@@ -296,7 +307,7 @@ running_image() {
 run_apply() {
   local input="$1"
   shift
-  PATH="$work/bin:$PATH" FAKE_STATE="$state" \
+  PATH="$work/bin:$PATH" FAKE_STATE="$state" FAKE_TAILSCALE_IP="$tailscale_ip" \
     INFRA_APPLY_STACK_DIR="$state/stack" INFRA_APPLY_EDGE_DIR="$state/edge" INFRA_APPLY_DOCKER_CONFIG="$state/docker" \
     INFRA_APPLY_HOST_FILE="$state/host.env" INFRA_APPLY_GUARD="$guard" INFRA_APPLY_POWER_KEY_FILE="$state/home-power.key" \
     INFRA_APPLY_WAIT_SECONDS="${apply_wait_seconds:-1}" INFRA_APPLY_ROUTE_WAIT_SECONDS=1 INFRA_APPLY_PUBLIC_WAIT_SECONDS=1 INFRA_APPLY_HOME_TLS_WAIT_SECONDS=1 INFRA_APPLY_POLL_SECONDS=0.2 \

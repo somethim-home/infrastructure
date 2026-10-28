@@ -69,7 +69,8 @@ jobs:
       - name: Ansible syntax check
         run: |
           ansible-playbook --syntax-check -i localhost, release.yml
-          ansible-playbook --syntax-check -i inventory/hosts.example provision.yml
+          ansible-playbook --syntax-check -i inventory/hosts.example -e infra_host=hetzner provision.yml
+          ansible-playbook --syntax-check -i inventory/hosts.example -e infra_host=home provision.yml
 
       - name: Placeholder credential guards
         run: bash ci/placeholder-guards.sh
@@ -89,7 +90,8 @@ jobs:
           echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  ${RUNNER_TEMP}/shellcheck.tar.xz" | sha256sum --check --strict
           tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${RUNNER_TEMP}"
           "${RUNNER_TEMP}/shellcheck-v0.11.0/shellcheck" build-bundle.sh release-images.sh ci/*.sh \
-            roles/common/files/infra-deploy-gate roles/common/files/infra-apply roles/host/files/infra-firewall roles/host/files/infra-backup roles/quiet/files/infra-quiet
+            roles/common/files/infra-deploy-gate roles/common/files/infra-apply roles/host/files/infra-firewall roles/host/files/infra-backup \
+            roles/host/files/infra-pg-backup roles/quiet/files/infra-quiet
 
       - name: Install the Docker Compose the host runs
         run: |
@@ -131,7 +133,8 @@ jobs:
         run: |
           set -euo pipefail
           for role in edge watchtower autoheal beszel snowflake; do
-            out="$(docker compose --file "roles/${role}/files/docker-compose.yml" config --quiet 2>&1)" || { echo "$out"; exit 1; }
+            # The edge's only variable, from the .env provisioning writes beside it.
+            out="$(CLOUDFLARE_IPS=192.0.2.0/24 docker compose --file "roles/${role}/files/docker-compose.yml" config --quiet 2>&1)" || { echo "$out"; exit 1; }
             if grep -q 'variable is not set' <<<"$out"; then
               echo "$out"
               echo "::error::roles/${role}/files/docker-compose.yml interpolates a variable; role compose files take none"
@@ -145,18 +148,20 @@ jobs:
           set -euo pipefail
           printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeChecksFakeChecksFakeChecksFakeChecks01 ci-checks' >"${RUNNER_TEMP}/deploy_key.pub"
           rm -rf "${RUNNER_TEMP}/bundle"
-          ansible-playbook -i localhost, -c local release.yml -e @ci/sample-extra-vars.json \
-            -e "deploy_key_file=${RUNNER_TEMP}/deploy_key.pub" -e "bundle_dir=${RUNNER_TEMP}/bundle" </dev/null >"${RUNNER_TEMP}/render.log" 2>&1 ||
-            { cat "${RUNNER_TEMP}/render.log"; echo "::error::release.yml refused to render ci/sample-extra-vars.json"; exit 1; }
+          for host in hetzner home; do
+            ansible-playbook -i localhost, -c local release.yml -e @ci/sample-extra-vars.json -e "infra_host=${host}" \
+              -e "deploy_key_file=${RUNNER_TEMP}/deploy_key.pub" -e "bundle_dir=${RUNNER_TEMP}/bundle/${host}" </dev/null >"${RUNNER_TEMP}/render.log" 2>&1 ||
+              { cat "${RUNNER_TEMP}/render.log"; echo "::error::release.yml refused to render ci/sample-extra-vars.json for ${host}"; exit 1; }
+          done
           # TAILSCALE_IP comes from /etc/infra/host.env on the host (infra-apply exports it).
-          for stack in database portfolio hypernova tunnel ai media home; do
-            out="$(TAILSCALE_IP=100.64.0.7 docker compose --file "stack/${stack}/docker-compose.yml" --project-directory "${RUNNER_TEMP}/bundle/${stack}" config --quiet 2>&1)" ||
+          for stack in hetzner/database hetzner/portfolio home/ai home/media home/home; do
+            out="$(TAILSCALE_IP=100.64.0.7 docker compose --file "stack/${stack#*/}/docker-compose.yml" --project-directory "${RUNNER_TEMP}/bundle/${stack}" config --quiet 2>&1)" ||
               { echo "$out"; exit 1; }
             if grep -q 'variable is not set' <<<"$out"; then
               echo "$out"
-              echo "::error::stack/${stack}/docker-compose.yml interpolates a variable its rendered .env does not set"
+              echo "::error::stack/${stack#*/}/docker-compose.yml interpolates a variable its rendered .env does not set"
               exit 1
             fi
-            echo "ok   stack/${stack}/docker-compose.yml"
+            echo "ok   stack/${stack#*/}/docker-compose.yml"
           done
           rm -rf "${RUNNER_TEMP}/bundle"

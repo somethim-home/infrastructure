@@ -5,7 +5,7 @@
    The passwords are literal: release.yml only accepts [A-Za-z0-9]{32,}.
    See docs/database.md, Roles and databases. #}
 ALTER ROLE postgres WITH SUPERUSER LOGIN PASSWORD '{{ postgres_superuser_password }}';
-{% for consumer in [{'name': 'prizm', 'password': prizm_db_password}, {'name': 'portfolio', 'password': portfolio_db_password}] %}
+{% for consumer in [{'name': 'portfolio', 'password': portfolio_db_password}] %}
 
 SELECT 'CREATE ROLE {{ consumer.name }} LOGIN'
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ consumer.name }}')\gexec

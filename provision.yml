@@ -1,10 +1,24 @@
-# Provisions the one server, a dedicated home machine, from the owner's laptop.
-# Holds no app secrets. First run: over the LAN as the account the Ubuntu
-# installer created (-u <that account> --ask-become-pass, ansible_host = its
-# LAN address); every run after: -u admin --ask-become-pass over the tailnet
-# (RUNBOOK.md, "First provision over the LAN").
+# Provisions one of the two servers from the owner's laptop:
+#   ansible-playbook -e infra_host=home|hetzner -u admin --ask-become-pass provision.yml
+# Holds no app secrets. First run: over the LAN (home) or the public address
+# (hetzner) as the account the installer created, or root on Hetzner
+# (-u <that account> --ask-become-pass, ansible_host = that address); every run
+# after: -u admin --ask-become-pass over the tailnet (RUNBOOK.md, "First
+# provision over the LAN", "Hetzner host").
+- name: Require the host this run provisions
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require -e infra_host=home or -e infra_host=hetzner
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - infra_host | default('') in ['home', 'hetzner']
+        fail_msg: "Name the host: -e infra_host=home or -e infra_host=hetzner (the inventory group of the same name)."
+        quiet: true
+
 - name: Provision the server from the owner's machine
-  hosts: server
+  hosts: "{{ infra_host | default('none') }}"
   become: true
   # A failed run must still reload Docker and sshd for the config it already wrote.
   force_handlers: true
@@ -24,6 +38,11 @@
       tags: [always]
       ansible.builtin.import_tasks: tasks/provision-checks.yml
 
+    - name: Read Cloudflare's address ranges, the only sources the hetzner host's web ports admit
+      tags: [always]
+      ansible.builtin.import_tasks: tasks/cloudflare-ips.yml
+      when: infra_host == 'hetzner'
+
   roles:
     - role: common
       tags: [common]
@@ -33,20 +52,26 @@
       tags: [docker]
     - role: gpu
       tags: [gpu]
+      when: infra_host == 'home'
     - role: host
       tags: [host]
     - role: quiet
       tags: [quiet]
+      when: infra_host == 'home'
+    # The public entry of the hetzner host; the home server has no public site.
     - role: edge
       tags: [edge]
+      when: infra_host == 'hetzner'
     - role: watchtower
       tags: [watchtower]
     - role: autoheal
       tags: [autoheal]
     - role: beszel
       tags: [beszel]
+      when: infra_host == 'home'
     - role: snowflake
       tags: [snowflake]
+      when: infra_host == 'home'
 
   post_tasks:
     - name: Check account access and set the SSH login policy

@@ -22,12 +22,12 @@ Rules (each problem is printed as a ::error:: line):
      extra-vars keys; the step's env block sets exactly the variables its jq object reads.
   8. ci/sample-extra-vars.json sets exactly the extra-vars keys, with obviously fake values (never a
      real token prefix such as ghp_ or github_pat_).
-  9. No compose file publishes a host port (ports:, network_mode: host): the public arrives only
-     through the Cloudflare Tunnel, and Traefik is reachable only on the edge network. The only
-     exceptions are TAILNET_PORTS, each exactly "${TAILSCALE_IP}:<port>:<port>" (the host's Tailscale
+  9. No compose file publishes a host port (ports:, network_mode: host) but the hetzner host's
+     Traefik, exactly "80:80" and "443:443" (PUBLIC_PORTS: the firewalls admit Cloudflare alone).
+     The other exceptions are TAILNET_PORTS, each exactly "${TAILSCALE_IP}:<port>:<port>" (the host's Tailscale
      address), and HOST_NETWORK_SERVICES: the Snowflake proxy, which publishes nothing but needs the
-     host network for WebRTC NAT traversal and is fenced by uid in roles/snowflake. The tunnel token
-     reaches only tunnel/tunnel.env (rule 2) and only cloudflared reads it.
+     host network for WebRTC NAT traversal and is fenced by uid in roles/snowflake. The origin
+     certificate and key reach only edge/tls.yml (rule 2).
  10. home-tls, the Traefik in front of Home, passes Home through untouched: its entrypoint has no read
      or write deadline (Home's live updates are one long Server-Sent Events response, uploads are big),
      no middleware exists anywhere in its configuration (no buffering, which would hold the event
@@ -61,14 +61,17 @@ SECRETS_ASSERT = "Require deploy secrets"
 # Extra-vars key -> the bundle files it may be rendered into.
 SECRET_FILES = {
     "postgres_superuser_password": {"database/postgres.env", "database/provision.sql"},
-    "prizm_db_password": {"database/provision.sql", "hypernova/provider.env"},
     "portfolio_db_password": {"database/provision.sql", "portfolio/portfolio.env"},
+    # The R2 endpoint: the portfolio's media and the database dump's.
+    "r2_account_id": {"portfolio/portfolio.env", "database/backup.env"},
 }
 SECRET_PREFIX_FILES = {
     "portfolio_": {"portfolio/portfolio.env"},
-    "hypernova_": {"hypernova/provider.env"},
+    "r2_backup_": {"database/backup.env"},
+    "r2_": {"portfolio/portfolio.env"},
+    "media_public_base": {"portfolio/portfolio.env"},
     "ghcr_": {"ghcr.env"},
-    "cf_": {"tunnel/tunnel.env"},
+    "cf_origin_": {"edge/tls.yml"},
     "home_tls_": {"media/home-tls.env"},
     "beszel_password": {"media/beszel.env", "media/beszel-pair.env"},
     "beszel_agent_": {"media/beszel-pair.env", "media/beszel-agent.env"},
@@ -86,6 +89,12 @@ SECRET_PREFIX_FILES = {
 }
 # Set at apply time from /etc/infra/host.env (infra-apply exports them), never by a bundle file.
 HOST_VARIABLES = {"TAILSCALE_IP"}
+# Role compose variables, each from the .env its role writes beside the compose file.
+ROLE_VARIABLES = {("roles/edge/files/docker-compose.yml", "CLOUDFLARE_IPS")}
+# Extra vars that are PEM files rendered into a YAML file, never env values.
+PEM_VALUES = {"cf_origin_cert", "cf_origin_key"}
+# The only public ports: the hetzner host's Traefik, which the firewalls admit from Cloudflare alone.
+PUBLIC_PORTS = {("roles/edge/files/docker-compose.yml", "traefik"): ["80:80", "443:443"]}
 # The only published ports (the compose guard holds the same list): (stack, service) -> port.
 TAILNET_PORTS = {
     ("media", "home"): 80,
@@ -94,7 +103,7 @@ TAILNET_PORTS = {
     ("media", "garage"): 3900,
     ("media", "sftpgo"): 8091,
 }
-ANSIBLE_MAGIC = {"playbook_dir", "role_path", "inventory_hostname", "ansible_managed", "item"}
+ANSIBLE_MAGIC = {"playbook_dir", "role_path", "inventory_hostname", "ansible_managed", "item", "lookup"}
 SOCKET_PROXIES = {"edge-socket-proxy", "watchtower-socket-proxy", "autoheal-socket-proxy", "beszel-socket-proxy"}
 PINNED_IMAGE = re.compile(r"^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 APP_IMAGE = re.compile(r"^\$\{([A-Z][A-Z0-9_]*_IMAGE)\}$")
@@ -172,6 +181,8 @@ def jinja_env() -> jinja2.Environment:
     # An undefined variable renders empty here; rule 1 reports it by name.
     env = jinja2.Environment(keep_trailing_newline=True)
     env.tests.update({name: (lambda *_a, **_k: True) for name in ANSIBLE_TESTS})
+    env.filters["bool"] = lambda value: str(value).strip().lower() in ("true", "yes", "1", "on")
+    env.globals["lookup"] = lambda *_a, **_k: ""
     return env
 
 
@@ -282,7 +293,7 @@ def check_compose_env(root: pathlib.Path, rendered: dict[str, str]) -> list[str]
         body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
         for braced, modifier, bare in INTERPOLATION.findall(body):
             name = braced or bare
-            if name in HOST_VARIABLES and rel.startswith("stack/"):
+            if (name in HOST_VARIABLES and rel.startswith("stack/")) or (rel, name) in ROLE_VARIABLES:
                 continue
             if name not in defined and not modifier.lstrip(":").startswith("-"):
                 problems.append(f"rule 3: {rel}: ${{{name}}} is not set by {source if source in rendered else 'any env template'} "
@@ -401,10 +412,13 @@ def check_asserts(root: pathlib.Path, workflow_text: str, extra: dict[str, str])
     if len(asserts) != 1:
         return [f"rule 7: release.yml: expected exactly one pre_task named {SECRETS_ASSERT!r}"]
     asserted = assert_variables((asserts[0].get("ansible.builtin.assert") or {}).get("that") or [])
-    for name in sorted(asserted - set(extra)):
+    # infra_host is the host the run renders for (build-bundle.sh --host), not a secret.
+    for name in sorted(asserted - set(extra) - {"infra_host"}):
         problems.append(f"rule 7: release.yml: the {SECRETS_ASSERT!r} assert reads '{name}', which {WORKFLOW}'s extra-vars step never sets")
     listed = set((play.get("vars") or {}).get("env_file_values") or [])
-    for name in sorted(set(extra) - listed):
+    for name in sorted(listed & PEM_VALUES):
+        problems.append(f"rule 7: release.yml: env_file_values names '{name}', a PEM file whose line breaks it would refuse")
+    for name in sorted(set(extra) - listed - PEM_VALUES):
         problems.append(f"rule 7: release.yml: env_file_values lacks '{name}', so a $, quote or # in it would reach Compose unchecked")
     for name in sorted(listed - set(extra)):
         problems.append(f"rule 7: release.yml: env_file_values names '{name}', which {WORKFLOW}'s extra-vars step never sets")
@@ -445,12 +459,16 @@ def check_no_published_ports(root: pathlib.Path) -> list[str]:
         for name, service in services.items():
             port = TAILNET_PORTS.get((stack, name))
             want = [f"${{TAILSCALE_IP}}:{port}:{port}"]
-            if port is not None and service.get("ports") != want:
+            public = PUBLIC_PORTS.get((rel, name))
+            if public is not None:
+                if service.get("ports") != public:
+                    problems.append(f"rule 9: {rel}: service {name} publishes {service.get('ports')}; it may publish exactly {public}")
+            elif port is not None and service.get("ports") != want:
                 problems.append(f"rule 9: {rel}: service {name} publishes {service.get('ports')}; it may publish exactly {want}, "
                                 "on the host's Tailscale address only (docs/architecture.md)")
             elif port is None and service.get("ports"):
                 problems.append(f"rule 9: {rel}: service {name} publishes host ports {service['ports']}; nothing may be reachable "
-                                "but through the Cloudflare Tunnel, or for TAILNET_PORTS on the tailnet (docs/edge.md)")
+                                "but Traefik's 80 and 443 on the hetzner host (PUBLIC_PORTS), or TAILNET_PORTS on the tailnet (docs/edge.md)")
             if str(service.get("network_mode", "")) == "host" and (rel, name) not in HOST_NETWORK_SERVICES:
                 problems.append(f"rule 9: {rel}: service {name} uses network_mode: host, which listens on the host's interfaces")
     return problems
@@ -544,19 +562,21 @@ def self_test() -> None:
     dead_secret = both(
         edit(WORKFLOW, jq_last, jq_last.rstrip("\n") + ",\n            crm_db_password: env.CRM_DB_PASSWORD\n"),
         edit(WORKFLOW, env_last, env_last + "          CRM_DB_PASSWORD: ${{ secrets.CRM_DB_PASSWORD }}\n"),
-        edit(SAMPLE, '"hypernova_admin_password"', '"crm_db_password": "FakeCrm0000", "hypernova_admin_password"'),
-        edit("release.yml", "      - hypernova_admin_password\n", "      - hypernova_admin_password\n      - crm_db_password\n"),
+        edit(SAMPLE, '"portfolio_admin_password"', '"crm_db_password": "FakeCrm0000", "portfolio_admin_password"'),
+        edit("release.yml", "      - portfolio_admin_password\n", "      - portfolio_admin_password\n      - crm_db_password\n"),
     )
     cases = [
         ("1", "a template variable with no source", append("stack/portfolio/portfolio.env.j2", "CRM_URL={{ crm_url }}\n"), "'crm_url' has no source"),
         ("1", "a dead secret in the extra-vars step", dead_secret, "writes 'crm_db_password', which no template uses"),
-        ("2", "a hypernova secret rendered into portfolio.env", append("stack/portfolio/portfolio.env.j2", "SESSION={{ hypernova_session_secret }}\n"),
-         "renders 'hypernova_session_secret' into portfolio/portfolio.env"),
-        ("2", "a secret in an interpolation-only .env", append("stack/hypernova/env.j2", "TOKEN={{ ghcr_token }}\n"), "renders the secret 'ghcr_token' into hypernova/.env"),
-        ("2", "a database password in the wrong env file", append("stack/hypernova/provider.env.j2", "OTHER={{ portfolio_db_password }}\n"),
-         "renders 'portfolio_db_password' into hypernova/provider.env"),
+        ("2", "the backup key rendered into portfolio.env", append("stack/portfolio/portfolio.env.j2", "BACKUP={{ r2_backup_secret_access_key }}\n"),
+         "renders 'r2_backup_secret_access_key' into portfolio/portfolio.env"),
+        ("2", "a secret in an interpolation-only .env", append("stack/portfolio/env.j2", "TOKEN={{ ghcr_token }}\n"), "renders the secret 'ghcr_token' into portfolio/.env"),
+        ("2", "a database password in the wrong env file", append("stack/database/backup.env.j2", "OTHER={{ portfolio_db_password }}\n"),
+         "renders 'portfolio_db_password' into database/backup.env"),
         ("2", "a role password no longer set by provision.sql", edit("stack/database/provision.sql.j2", "PASSWORD '{{ consumer.password }}'", "PASSWORD NULL"),
-         "'prizm_db_password' must reach database/provision.sql, hypernova/provider.env"),
+         "'portfolio_db_password' must reach database/provision.sql, portfolio/portfolio.env"),
+        ("2", "the origin key rendered into portfolio.env", append("stack/portfolio/portfolio.env.j2", "KEY={{ cf_origin_key }}\n"),
+         "renders 'cf_origin_key' into portfolio/portfolio.env"),
         ("3", "a compose variable no env.j2 sets", edit("stack/portfolio/docker-compose.yml", "Host(`${WWW_DOMAIN}`)", "Host(`${OLD_DOMAIN}`)"),
          "${OLD_DOMAIN} is not set by stack/portfolio/env.j2"),
         ("3", "a role compose file that interpolates a variable", edit("roles/edge/files/docker-compose.yml", "      - --log.level=ERROR\n", "      - --log.level=${EDGE_LOG_LEVEL}\n"),
@@ -575,32 +595,32 @@ def self_test() -> None:
         ("5", "SSH_OPTIONS accepts new host keys", edit(WORKFLOW, "StrictHostKeyChecking=yes", "StrictHostKeyChecking=accept-new"), "SSH_OPTIONS must hold"),
         ("5", "an ssh call without SSH_OPTIONS", edit(WORKFLOW, 'ssh $SSH_OPTIONS "${DEPLOY_USER}@${SERVER_SSH_HOST}" release', 'ssh "${DEPLOY_USER}@${SERVER_SSH_HOST}" release'),
          "runs ssh without $SSH_OPTIONS"),
-        ("6", "Traefik mounts docker.sock", edit("roles/edge/files/docker-compose.yml", "    container_name: edge-traefik\n", "    container_name: edge-traefik\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n"),
+        ("6", "Traefik mounts docker.sock", edit("roles/edge/files/docker-compose.yml", "      - ./dynamic:/dynamic:ro\n", "      - ./dynamic:/dynamic:ro\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n"),
          "service traefik mounts docker.sock"),
         ("6", "a socket proxy mounts docker.sock read-write", edit("roles/watchtower/files/docker-compose.yml", "/var/run/docker.sock:/var/run/docker.sock:ro", "/var/run/docker.sock:/var/run/docker.sock"),
          "must mount docker.sock read-only"),
-        ("7", "an assert on a secret the workflow never sets", edit("release.yml", "          - hypernova_admin_password | default('') | length > 0\n",
-                                                                     "          - hypernova_admin_password | default('') | length > 0\n          - crm_token | default('') | length > 0\n"),
+        ("7", "an assert on a secret the workflow never sets", edit("release.yml", "          - infra_host != 'hetzner' or portfolio_admin_password | default('') | length > 0\n",
+                                                                     "          - infra_host != 'hetzner' or portfolio_admin_password | default('') | length > 0\n          - crm_token | default('') | length > 0\n"),
          "assert reads 'crm_token'"),
         ("7", "a secret left out of env_file_values", edit("release.yml", "      - portfolio_resend_api_key\n", ""), "env_file_values lacks 'portfolio_resend_api_key'"),
-        ("7", "a jq key whose env var is not set", edit(WORKFLOW, "          HYPERNOVA_SESSION_SECRET: ${{ secrets.HYPERNOVA_SESSION_SECRET }}\n", ""),
-         "reads env.HYPERNOVA_SESSION_SECRET, which the step's env block never sets"),
+        ("7", "a jq key whose env var is not set", edit(WORKFLOW, "          R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}\n", ""),
+         "reads env.R2_BACKUP_SECRET_ACCESS_KEY, which the step's env block never sets"),
+        ("7", "a PEM value run through the env-file check", edit("release.yml", "      - portfolio_resend_api_key\n", "      - portfolio_resend_api_key\n      - cf_origin_cert\n"),
+         "env_file_values names 'cf_origin_cert', a PEM file"),
         ("7", "an env var the jq object never reads", edit(WORKFLOW, env_last, env_last + "          CRM_TOKEN: ${{ secrets.CRM_TOKEN }}\n"),
          "sets CRM_TOKEN, which its jq object never reads"),
         ("8", "a sample value with a real token prefix", edit(SAMPLE, '"fake_ghcr_token_', '"ghp_ghcr_token_'), "'ghcr_token' looks like a real token"),
         ("8", "a sample missing a key", edit(SAMPLE, '"portfolio_resend_api_key": "fake-resend-key-0000",', ""), "keys differ from the extra-vars step"),
-        ("2", "the tunnel token rendered into the portfolio's env", append("stack/portfolio/portfolio.env.j2", "TUNNEL={{ cf_tunnel_token }}\n"),
-         "renders 'cf_tunnel_token' into portfolio/portfolio.env"),
-        ("9", "Traefik publishes 80 and 443 again", edit("roles/edge/files/docker-compose.yml", "    container_name: edge-traefik\n", "    container_name: edge-traefik\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n"),
-         "service traefik publishes host ports"),
-        ("9", "cloudflared on the host network", edit("stack/tunnel/docker-compose.yml", "    container_name: cloudflared\n", "    container_name: cloudflared\n    network_mode: host\n"),
-         "service cloudflared uses network_mode: host"),
+        ("9", "Traefik publishes another port", edit("roles/edge/files/docker-compose.yml", '      - "443:443"\n', '      - "443:443"\n      - "8080:8080"\n'),
+         "service traefik publishes ['80:80', '443:443', '8080:8080']; it may publish exactly ['80:80', '443:443']"),
+        ("9", "the database on the host network", edit("stack/database/docker-compose.yml", "    container_name: postgresql\n", "    container_name: postgresql\n    network_mode: host\n"),
+         "service postgres uses network_mode: host"),
         ("9", "another role service on the host network", edit("roles/autoheal/files/docker-compose.yml", "    container_name: autoheal\n", "    container_name: autoheal\n    network_mode: host\n"),
          "service autoheal uses network_mode: host"),
         ("9", "the Snowflake proxy publishes a port", edit("roles/snowflake/files/docker-compose.yml", "    container_name: snowflake-proxy\n", "    container_name: snowflake-proxy\n    ports: [\"8080:8080\"]\n"),
          "service snowflake-proxy publishes host ports"),
-        ("9", "a stack publishes a port", edit("stack/hypernova/docker-compose.yml", "    container_name: prizm-web\n", "    container_name: prizm-web\n    ports: [\"3000:3000\"]\n"),
-         "service web publishes host ports"),
+        ("9", "a stack publishes a port", edit("stack/portfolio/docker-compose.yml", "    container_name: portfolio\n", "    container_name: portfolio\n    ports: [\"3000:3000\"]\n"),
+         "service portfolio publishes host ports"),
         ("9", "the file manager published on every interface", edit("stack/media/docker-compose.yml", '      - "${TAILSCALE_IP}:8091:8091"\n', '      - "8091:8091"\n'),
          "service sftpgo publishes ['8091:8091']; it may publish exactly ['${TAILSCALE_IP}:8091:8091']"),
         ("9", "llama-server published on the tailnet", edit("stack/ai/docker-compose.yml", "    container_name: llama\n", "    container_name: llama\n    ports:\n      - \"${TAILSCALE_IP}:8080:8080\"\n"),
@@ -609,8 +629,8 @@ def self_test() -> None:
          "service beszel publishes ['192.168.1.50:8090:8090']; it may publish exactly ['${TAILSCALE_IP}:8090:8090']"),
         ("2", "the dashboard password rendered into the media .env", append("stack/media/env.j2", "BESZEL={{ beszel_password }}\n"),
          "renders the secret 'beszel_password' into media/.env"),
-        ("2", "the files password rendered into hypernova's env", append("stack/hypernova/provider.env.j2", "FILES={{ files_password }}\n"),
-         "renders 'files_password' into hypernova/provider.env"),
+        ("2", "the files password rendered into the portfolio's env", append("stack/portfolio/portfolio.env.j2", "FILES={{ files_password }}\n"),
+         "renders 'files_password' into portfolio/portfolio.env"),
         ("3", "an ai variable no env.j2 sets", edit("stack/ai/docker-compose.yml", '      LLAMA_MODELS: "${LLAMA_MODELS}"', '      LLAMA_MODELS: "${LLAMA_MODEL_FILES}"'),
          "${LLAMA_MODEL_FILES} is not set by stack/ai/env.j2"),
         ("2", "Home's data key rendered into home-server's settings", append("stack/home/home-server.env.j2", "KEY={{ home_data_key }}\n"),
@@ -629,7 +649,7 @@ def self_test() -> None:
         ("10", "a buffering middleware on Home's router", edit(HOME_TLS_COMPOSE, "              service: home-server\n",
                                                              "              service: home-server\n              middlewares: [buffer]\n"),
          "home-tls router home uses middlewares"),
-        ("10", "/app sent to the links page", edit(HOME_TLS_COMPOSE, "Path(`/files.html`)", "PathPrefix(`/app`)"),
+        ("10", "/app sent to the file manager's WebDAV", edit(HOME_TLS_COMPOSE, "PathPrefix(`/dav`)", "PathPrefix(`/app`)"),
          "/app and /api on Home's name are home-server's"),
     ]
     caught_rules = set()

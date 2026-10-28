@@ -137,6 +137,7 @@ scenario() {
   done
   printf 'time="2026-10-13T10:00:00Z" level=info msg="Watchtower 1.22.1"\n%s\n' "$session_ok" >"$work/state/watchtower.log"
   : >"$work/state/autoheal.log"
+  echo '{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"80"},{"HostIp":"::","HostPort":"80"}],"443/tcp":[{"HostIp":"0.0.0.0","HostPort":"443"},{"HostIp":"::","HostPort":"443"}]}' >"$work/state/edge-traefik.ports"
   echo "29.1.3" >"$work/state/docker.version"
   echo '{"io.containerd.runc.v2":{"path":"runc"},"nvidia":{"path":"nvidia-container-runtime"},"runc":{"path":"runc"}}' >"$work/state/docker.runtimes"
   printf '%s\n' '-N DOCKER-USER' "$hook" "$tailnet_hook" '-A DOCKER-USER -j RETURN' >"$work/state/docker-user.rules"
@@ -174,7 +175,7 @@ run() {
   local role="$1"
   shift
   PATH="$work/bin:$PATH" FAKE_DOCKER_STATE="$work/state" \
-    ansible-playbook -i localhost, -c local "$here/verify-tasks.yml" -e "verify_role=$role" \
+    ansible-playbook -i localhost, -c local "$here/verify-tasks.yml" -e "verify_role=$role" -e infra_host=home \
     -e '{"ansible_facts": {"default_ipv4": {"interface": "eth0"}}}' -e "tailscale_ipv4=$ts_ip" -e "dns_reboot_flag=$work/state/dns-reboot-pending" "$@" \
     </dev/null >"$work/out.log" 2>&1
 }
@@ -206,11 +207,19 @@ expect_fail "edge: proxy logged a blocked request" "GET URL=/v1.51/networks" edg
 
 scenario
 echo '{"80/tcp":[{"HostIp":"","HostPort":"80"}]}' >"$work/state/edge-traefik.ports"
-expect_fail "edge: Traefik publishes a host port" "edge-traefik publishes host ports" edge
+expect_fail "edge: Traefik without 443" "not exactly 80 and 443" edge
+
+scenario
+echo '{"80/tcp":[{"HostIp":"","HostPort":"80"}],"443/tcp":[{"HostIp":"","HostPort":"443"}],"8080/tcp":[{"HostIp":"","HostPort":"8080"}]}' >"$work/state/edge-traefik.ports"
+expect_fail "edge: Traefik publishes its dashboard port too" "not exactly 80 and 443" edge
+
+scenario
+echo '{"80/tcp":[{"HostIp":"","HostPort":"8080"}],"443/tcp":[{"HostIp":"","HostPort":"443"}]}' >"$work/state/edge-traefik.ports"
+expect_fail "edge: Traefik's 80 on another host port" "not exactly 80 and 443" edge
 
 scenario
 echo 'null' >"$work/state/edge-traefik.ports"
-expect_pass "edge: Traefik with no port bindings at all" edge
+expect_fail "edge: Traefik with no port bindings at all" "not exactly 80 and 443" edge
 
 scenario
 rm "$work/state/edge-socket-proxy.running" "$work/state/edge-traefik.running"
@@ -384,7 +393,7 @@ expect_fail "host: non-local binds off" "net.ipv4.ip_nonlocal_bind is 0" host
 
 scenario
 printf '%s\n' "sftpgo 0.0.0.0:8091->8091/tcp, [::]:8091->8091/tcp" >"$work/state/docker.ps"
-expect_fail "host: the file manager on every interface" "A container publishes a port that is not a tailnet-only one" host
+expect_fail "host: the file manager on every interface" "A container publishes a port that is not an allowed one" host
 
 scenario
 printf '%s\n' "sftpgo $ts_ip:8091->8091/tcp" "llama $ts_ip:8080->8080/tcp" >"$work/state/docker.ps"
@@ -401,6 +410,19 @@ expect_fail "host: an app container publishing a port" "portfolio 0.0.0.0:3000->
 scenario
 : >"$work/state/docker.ps"
 expect_pass "host: no container at all" host
+
+scenario
+printf '%s\n' "edge-traefik 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp" "portfolio 3000/tcp" "postgresql 5432/tcp" >"$work/state/docker.ps"
+rm "$work/state/ethtool" "$work/state/home-power.mount"
+expect_pass "host (hetzner): Traefik's web ports on every address, no home checks" host -e infra_host=hetzner
+
+scenario
+printf '%s\n' "edge-traefik 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp" "postgresql 0.0.0.0:5432->5432/tcp" >"$work/state/docker.ps"
+expect_fail "host (hetzner): the database published" "postgresql 0.0.0.0:5432->5432/tcp" host -e infra_host=hetzner
+
+scenario
+printf '%s\n' "edge-traefik 0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp" >"$work/state/docker.ps"
+expect_fail "host (home): Traefik's web ports on the home server" "edge-traefik 0.0.0.0:80->80/tcp" host
 
 scenario
 echo static >"$work/state/suspend.target.enabled"

@@ -5,14 +5,17 @@
 #   infra-apply release < bundle.tgz   validate, install, start and verify a release
 #   infra-apply status                 print the releases and the images that run
 #
+# This host's stacks follow INFRA_HOST in /etc/infra/host.env (provisioning):
+# hetzner runs database, provision.sql and portfolio, and installs the
+# release's edge/tls.yml for the edge Traefik; home runs ai, media and home.
 # A release is checked completely (size, file list, checksums, env files,
 # release.env, image references, the compose model of each stack) before
 # anything changes. It is then installed as /opt/infra/releases/<id>, the
-# stacks start in order database, provision.sql, portfolio, hypernova, tunnel,
-# ai, media, home, and the release is verified (containers healthy, Traefik routes each
-# domain to its app, the tunnel is connected, the tailnet-only ports are bound
-# to the Tailscale address alone, socket proxies) before it is marked
-# .verified. `previous` only ever points at a verified
+# stacks start in that order, and the release is verified (containers
+# healthy; on hetzner Traefik redirects to https and refuses a TLS client
+# without Cloudflare's certificate, and Cloudflare serves the site; on home the
+# tailnet-only ports are bound to the Tailscale address alone and home-tls
+# serves Home; socket proxies) before it is marked .verified. `previous` only ever points at a verified
 # release. Output lines start with "infra-apply: "; failures with
 # "infra-apply: FAILED: ". Never prints a secret.
 set -euo pipefail
@@ -46,43 +49,26 @@ readonly max_file_bytes=262144
 readonly releases_dir="$stack_dir/releases"
 readonly release_id_pattern='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$'
 readonly repo_pattern='^[a-z0-9.-]+(/[a-z0-9._-]+)+$'
-readonly stacks=(database portfolio hypernova tunnel ai media home)
-readonly bundle_files=(
-  manifest.sha256 release.env ghcr.env
-  database/docker-compose.yml database/postgres.env database/provision.sql
-  portfolio/docker-compose.yml portfolio/.env portfolio/portfolio.env
-  hypernova/docker-compose.yml hypernova/.env hypernova/provider.env
-  tunnel/docker-compose.yml tunnel/tunnel.env
-  ai/docker-compose.yml ai/.env
-  media/docker-compose.yml media/.env media/home-tls.env
-  media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
-  home/docker-compose.yml home/.env home/home-server.env home/home-keys.env
-)
-readonly env_files=(release.env ghcr.env database/postgres.env portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env
-  ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
-  home/.env home/home-server.env home/home-keys.env)
-readonly secret_files=(ghcr.env database/postgres.env database/provision.sql portfolio/.env portfolio/portfolio.env hypernova/.env hypernova/provider.env tunnel/tunnel.env
-  ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
-  home/.env home/home-server.env home/home-keys.env manifest.sha256)
-# The only published ports, "<container> <port>", each bound to the host's
-# Tailscale address alone (the compose guard's TAILNET_PORTS).
-readonly tailnet_ports=("home 80" "home-tls 443" "beszel 8090" "garage 3900" "sftpgo 8091")
-# One-shots whose work a release depends on: each must exit 0 (the dashboard's
-# pairing, Garage's layout, key and bucket, and Home's key files).
-readonly checked_one_shots=(beszel-pair garage-setup home-keys)
+# This host's layout, set by host_layout from INFRA_HOST: its stacks in start
+# order, the files its bundle holds, which are env files and which hold
+# secrets, its tailnet-only ports ("<container> <port>", each bound to the
+# host's Tailscale address alone: the compose guard's TAILNET_PORTS), the
+# one-shots whose work a release depends on (each must exit 0), its app images
+# ("<image key> <env file that sets it> <host.env key naming its repository>
+# <container>") and its socket proxies ("<proxy> <client>").
+infra_host=""
+stacks=()
+bundle_files=()
+env_files=()
+secret_files=()
+tailnet_ports=()
+checked_one_shots=()
+image_specs=()
+socket_clients=()
 readonly tailscale_ip_pattern='^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
 readonly service_user_pattern='^[1-9][0-9]*:[1-9][0-9]*$'
-# Traefik and cloudflared, by container name, on the shared edge network.
+# The hetzner host's Traefik, by container name, on the edge network.
 readonly traefik_container=edge-traefik
-readonly tunnel_container=cloudflared
-readonly tunnel_metrics_port=2000
-# image key, the env file that sets it, the host.env key naming its repository, its container
-readonly image_specs=(
-  "PORTFOLIO_IMAGE portfolio/.env PORTFOLIO_IMAGE_REPO portfolio"
-  "PROVIDER_IMAGE hypernova/.env HYPERNOVA_PROVIDER_IMAGE_REPO prizm-provider"
-  "WEB_IMAGE hypernova/.env HYPERNOVA_WEB_IMAGE_REPO prizm-web"
-  "HOME_IMAGE home/.env HOME_IMAGE_REPO home-server"
-)
 
 export DOCKER_CONFIG="${INFRA_APPLY_DOCKER_CONFIG:-/root/.docker}"
 
@@ -141,9 +127,48 @@ host_value() {
   sed -n "s/^$key=//p" "$host_file"
 }
 
+host_layout() {
+  case "$infra_host" in
+    hetzner)
+      stacks=(database portfolio)
+      bundle_files=(
+        manifest.sha256 release.env ghcr.env edge/tls.yml
+        database/docker-compose.yml database/postgres.env database/provision.sql database/backup.env
+        portfolio/docker-compose.yml portfolio/.env portfolio/portfolio.env
+      )
+      env_files=(release.env ghcr.env database/postgres.env database/backup.env portfolio/.env portfolio/portfolio.env)
+      secret_files=(ghcr.env edge/tls.yml database/postgres.env database/provision.sql database/backup.env portfolio/.env portfolio/portfolio.env
+        manifest.sha256)
+      image_specs=("PORTFOLIO_IMAGE portfolio/.env PORTFOLIO_IMAGE_REPO portfolio")
+      socket_clients=("edge-socket-proxy edge-traefik" "watchtower-socket-proxy watchtower" "autoheal-socket-proxy autoheal")
+      ;;
+    home)
+      stacks=(ai media home)
+      bundle_files=(
+        manifest.sha256 release.env ghcr.env
+        ai/docker-compose.yml ai/.env
+        media/docker-compose.yml media/.env media/home-tls.env
+        media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env media/garage-setup.env media/sftpgo.env
+        home/docker-compose.yml home/.env home/home-server.env home/home-keys.env
+      )
+      env_files=(release.env ghcr.env ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env
+        media/garage.env media/garage-setup.env media/sftpgo.env home/.env home/home-server.env home/home-keys.env)
+      secret_files=(ghcr.env ai/.env media/.env media/home-tls.env media/beszel.env media/beszel-pair.env media/beszel-agent.env media/garage.env
+        media/garage-setup.env media/sftpgo.env home/.env home/home-server.env home/home-keys.env manifest.sha256)
+      tailnet_ports=("home 80" "home-tls 443" "beszel 8090" "garage 3900" "sftpgo 8091")
+      checked_one_shots=(beszel-pair garage-setup home-keys)
+      image_specs=("HOME_IMAGE home/.env HOME_IMAGE_REPO home-server")
+      socket_clients=("watchtower-socket-proxy watchtower" "autoheal-socket-proxy autoheal" "beszel-socket-proxy beszel-agent")
+      ;;
+    *) fail "$host_file INFRA_HOST is neither home nor hetzner; run provisioning" ;;
+  esac
+}
+
 load_host() {
   local spec key file repo_key container repo
   [ -f "$host_file" ] || fail "$host_file does not exist; run provisioning"
+  infra_host="$(host_value INFRA_HOST)"
+  host_layout
   for spec in "${image_specs[@]}"; do
     read -r key file repo_key container <<<"$spec"
     repo="$(host_value "$repo_key")"
@@ -152,6 +177,7 @@ load_host() {
   done
   tailscale_ip="$(host_value TAILSCALE_IP)"
   [[ "$tailscale_ip" =~ $tailscale_ip_pattern ]] || fail "$host_file TAILSCALE_IP is not this host's Tailscale IPv4 (100.64.0.0/10); run provisioning"
+  [ "$infra_host" = home ] || return 0
   ai_user="$(host_value AI_USER)"
   [[ "$ai_user" =~ $service_user_pattern ]] || fail "$host_file AI_USER is not the <uid>:<gid> of the ai account; run provisioning"
   media_user="$(host_value MEDIA_USER)"
@@ -214,7 +240,7 @@ extract_bundle() {
   ) 2>/dev/null; then
     untouched "the bundle did not extract cleanly"
   fi
-  other="$(cd "$dest" && find . -mindepth 1 ! -type f ! \( -type d \( -path ./database -o -path ./portfolio -o -path ./hypernova -o -path ./tunnel -o -path ./ai -o -path ./media -o -path ./home \) \) -print -quit)"
+  other="$(cd "$dest" && find . -mindepth 1 ! -type f ! \( -type d \( -path ./database -o -path ./portfolio -o -path ./edge -o -path ./ai -o -path ./media -o -path ./home \) \) -print -quit)"
   [ -z "$other" ] || untouched "the bundle extracted to something other than regular files: $(printf '%q' "${other#./}")"
   [ -z "$(find "$dest" -type f -size +"${max_file_bytes}c" -print -quit)" ] || untouched "a file in the bundle is larger than $max_file_bytes bytes"
   (cd "$dest" && find . -mindepth 1 -type f -printf '%P\n' | LC_ALL=C sort) >"$found"
@@ -253,8 +279,13 @@ validate_env_files() {
     [ "$(grep -c . "$dir/ghcr.env")" -ne 2 ]; then
     untouched "ghcr.env must set exactly GHCR_USERNAME and GHCR_TOKEN"
   fi
-  if ! grep -qE '^TUNNEL_TOKEN=[A-Za-z0-9+/_=-]+$' "$dir/tunnel/tunnel.env" || [ "$(grep -c . "$dir/tunnel/tunnel.env")" -ne 1 ]; then
-    untouched "tunnel/tunnel.env must set exactly TUNNEL_TOKEN"
+  if [ "$infra_host" = hetzner ]; then
+    require_env "$dir" database/backup.env '^RCLONE_S3_PROVIDER=Cloudflare$' '^RCLONE_S3_ENDPOINT=https://[0-9a-f]{32}\.r2\.cloudflarestorage\.com$' \
+      '^RCLONE_S3_ACCESS_KEY_ID=[0-9a-f]{32}$' '^RCLONE_S3_SECRET_ACCESS_KEY=[0-9a-f]{64}$'
+    if ! grep -q '^ *-----BEGIN CERTIFICATE-----$' "$dir/edge/tls.yml" || ! grep -q '^ *clientAuthType: RequireAndVerifyClientCert$' "$dir/edge/tls.yml"; then
+      untouched "edge/tls.yml does not hold the origin certificate and the client-certificate rule"
+    fi
+    return 0
   fi
   if ! grep -qE '^CF_DNS_API_TOKEN=[A-Za-z0-9_-]{40,}$' "$dir/media/home-tls.env" || [ "$(grep -c . "$dir/media/home-tls.env")" -ne 1 ]; then
     untouched "media/home-tls.env must set exactly CF_DNS_API_TOKEN"
@@ -277,6 +308,7 @@ validate_env_files() {
 # every request Home signs would be refused. Compared, never printed.
 validate_power_key() {
   local dir="$1" bundle_key host_key=""
+  [ "$infra_host" = home ] || return 0
   bundle_key="$(sed -n 's/^HOME_POWER_KEY=//p' "$dir/home/home-keys.env")"
   [ -n "$bundle_key" ] || return 0
   if [ ! -f "$power_key_file" ]; then
@@ -292,7 +324,7 @@ validate_power_key() {
 require_env() {
   local dir="$1" file="$2" pattern names
   shift 2
-  names="$(printf '%s\n' "$@" | sed -E 's/^\^([A-Z_]+)=.*/\1/' | paste -sd ' ' -)"
+  names="$(printf '%s\n' "$@" | sed -E 's/^\^([A-Z0-9_]+)=.*/\1/' | paste -sd ' ' -)"
   for pattern in "$@"; do
     grep -qE "$pattern" "$dir/$file" || untouched "$file must set exactly $names"
   done
@@ -347,7 +379,6 @@ image_repository() {
 stack_repos() {
   case "$1" in
     portfolio) printf '%s\n' "${repo_of[PORTFOLIO_IMAGE]}" ;;
-    hypernova) printf '%s\n' "${repo_of[PROVIDER_IMAGE]}" "${repo_of[WEB_IMAGE]}" ;;
     home) printf '%s\n' "${repo_of[HOME_IMAGE]}" ;;
   esac
 }
@@ -462,7 +493,7 @@ provision_errors() {
 provision_database() {
   local release="$1" out="$work_dir/provision.out"
   if ! docker exec -i postgresql psql -v ON_ERROR_STOP=1 -U postgres -d postgres <"$release/database/provision.sql" >"$out" 2>&1; then
-    fail "before the app stacks changed, provision.sql failed (the database runs the new definition; portfolio and hypernova still run the previous one): $(provision_errors "$out")"
+    fail "before the app stacks changed, provision.sql failed (the database runs the new definition; the portfolio still runs the previous one): $(provision_errors "$out")"
   fi
   log "database roles, passwords and grants are in place"
 }
@@ -530,29 +561,32 @@ wait_for_stacks() {
 }
 
 # Prints "<host> <path> <expected status pattern>" for every public route:
-# portfolio's health check, the www -> apex redirect, the hypernova web app and
-# its provider API behind /api.
+# portfolio's health check and the www -> apex redirect.
 route_targets() {
-  local release="$1" apex www web
+  local release="$1" apex www
   apex="$(sed -n 's/^APEX_DOMAIN=//p' "$release/portfolio/.env")"
   www="$(sed -n 's/^WWW_DOMAIN=//p' "$release/portfolio/.env")"
-  web="$(sed -n 's/^WEB_DOMAIN=//p' "$release/hypernova/.env")"
-  printf '%s\n' "$apex /api/health ^2[0-9][0-9]$" "$www / ^30[18]$" "$web / ^[23][0-9][0-9]$" "$web /api/health ^2[0-9][0-9]$"
+  printf '%s\n' "$apex /api/health ^2[0-9][0-9]$" "$www / ^30[18]$"
 }
 
-# Prints a container's IPv4 address on the edge network. Traefik and
-# cloudflared publish no port, so verify reaches them there, from the host.
+# Prints a container's IPv4 address on the edge network, where verify reaches
+# Traefik from the host.
 edge_address() {
   local name="$1" address
   address="$(docker container inspect --format '{{with index .NetworkSettings.Networks "edge"}}{{.IPAddress}}{{end}}' "$name" 2>/dev/null || true)"
-  [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "$name has no address on the edge network; run provisioning (Traefik) or check the tunnel stack (cloudflared)"
+  [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || fail "$name has no address on the edge network; run provisioning (--tags edge)"
   printf '%s\n' "$address"
 }
 
-# Asks Traefik for every route the way the tunnel does (the public Host, https
-# in X-Forwarded-Proto) and requires the status the app answers with.
+# Traefik's two promises, asked from the host for every public name: plain
+# http only redirects to https, and https without Cloudflare's client
+# certificate is refused in the TLS handshake (Authenticated Origin Pulls, from
+# the release's edge/tls.yml) with no HTTP answer at all (curl exits 35, 55
+# or 56, depending on the TLS version and when the alert arrives).
+# Whether it routes each name to the portfolio is asked through Cloudflare
+# (check_public), the only client it serves.
 check_routes() {
-  local release="$1" target host path want code deadline traefik
+  local release="$1" target host path want code rc deadline traefik
   local -a targets hosts=()
   traefik="$(edge_address "$traefik_container")"
   mapfile -t targets < <(route_targets "$release")
@@ -561,38 +595,36 @@ check_routes() {
     [[ "$host" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "unexpected host name $(printf '%q' "$host") in the release's .env files"
     deadline=$((SECONDS + route_wait_seconds))
     while :; do
-      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $host" -H 'X-Forwarded-Proto: https' "http://$traefik:80$path" || true)"
-      if [[ "${code:-000}" =~ $want ]]; then
-        break
-      fi
+      code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $host" "http://$traefik:80$path" || true)"
+      [[ ! "${code:-000}" =~ ^30[178]$ ]] || break
       if [ "$SECONDS" -ge "$deadline" ]; then
-        fail "Traefik answered ${code:-000} for $host$path, expected $want (404: no router serves $host$path; 502, 503 or 504: the app behind it is unreachable)"
+        fail "Traefik answered ${code:-000} on http for $host$path, expected a redirect to https (000: Traefik does not answer; run provisioning with --tags edge)"
       fi
       sleep "$poll_seconds"
     done
+    rc=0
+    code="$(curl -s -k -o /dev/null -w '%{http_code}' --max-time 5 --resolve "$host:443:$traefik" "https://$host$path")" || rc=$?
+    if [ "${code:-000}" != 000 ] || ! [[ "$rc" =~ ^(35|55|56)$ ]]; then
+      fail "Traefik answered ${code:-000} (curl exit $rc) on https for $host$path without a client certificate; it must refuse the TLS handshake (Authenticated Origin Pulls): $edge_dir/dynamic/tls.yml is missing or Traefik did not load it (docker logs edge-traefik)"
+    fi
     hosts+=("$host$path")
   done
-  log "Traefik routes ${hosts[*]} to their apps"
+  log "Traefik redirects http to https and refuses https without Cloudflare's client certificate for ${hosts[*]}"
 }
 
-# cloudflared's /ready answers 200 only while it holds at least one connection
-# to Cloudflare's edge, that is, while the public hostnames can reach Traefik.
-check_tunnel() {
-  local address code deadline=$((SECONDS + route_wait_seconds))
-  address="$(edge_address "$tunnel_container")"
-  while :; do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$address:$tunnel_metrics_port/ready" || true)"
-    [ "$code" != 200 ] || break
-    if [ "$SECONDS" -ge "$deadline" ]; then
-      fail "cloudflared answered ${code:-000} on /ready: the tunnel holds no connection to Cloudflare (a revoked or wrong CF_TUNNEL_TOKEN, or no outbound internet); docker logs cloudflared on the host shows why"
-    fi
-    sleep "$poll_seconds"
-  done
-  log "the Cloudflare Tunnel is connected (cloudflared /ready answers 200)"
+# Writes the release's edge/tls.yml where the edge Traefik's file provider
+# watches ($edge_dir/dynamic), atomically and root-only.
+install_edge_tls() {
+  local release="$1"
+  [ -d "$edge_dir/dynamic" ] || fail "$edge_dir/dynamic does not exist; run provisioning with --tags edge"
+  cp -- "$release/edge/tls.yml" "$edge_dir/dynamic/.tls.yml.new"
+  chmod 0600 "$edge_dir/dynamic/.tls.yml.new"
+  mv -f "$edge_dir/dynamic/.tls.yml.new" "$edge_dir/dynamic/tls.yml"
+  log "the origin certificate and the client-certificate rule are in place for Traefik"
 }
 
 # Asks every public route the way a visitor does: from the host, by its public
-# name, through Cloudflare and the tunnel. From here, not from the CI runner,
+# name, through Cloudflare. From here, not from the CI runner,
 # because Cloudflare's bot protection answers data-centre addresses with 403.
 # It runs after the release is verified on the host, so a failure here leaves
 # a current, verified release and points at the Cloudflare side.
@@ -613,7 +645,7 @@ check_public() {
       fi
       if [ "$SECONDS" -ge "$deadline" ]; then
         failure_hint=""
-        fail "$url answered ${code:-000} through Cloudflare, expected $want; the release itself is current and verified on the host (530 or error 1033: the tunnel has no Public Hostname for $host; 502: the tunnel cannot reach http://edge-traefik:80; 403: a Cloudflare security rule blocks the request; 000: no DNS record, or the record is not proxied)"
+        fail "$url answered ${code:-000} through Cloudflare, expected $want; the release itself is current and verified on the host (521 or 522: Cloudflare cannot reach the server: the Hetzner Cloud Firewall or the DNS record's address; 525: the TLS handshake failed, Authenticated Origin Pulls is off for the zone; 526: the origin's certificate is not the Origin CA certificate Full (strict) trusts; 404: Traefik has no route for the name; 403: a Cloudflare security rule blocks the request; 000: no DNS record, or the record is not proxied)"
       fi
       sleep "$poll_seconds"
     done
@@ -622,21 +654,18 @@ check_public() {
   log "Cloudflare serves ${checked[*]}"
 }
 
-# home-tls answers https on the Tailscale address for Home's name and every
-# tailnet service's name under it (media/.env: HOME_DOMAIN and the HOST_* lines
-# from production.yml's home_hosts), with a certificate curl trusts: Let's
-# Encrypt has issued it through Cloudflare's DNS. Each is asked by name, pinned
-# to the tailnet address, the way a tailnet browser reaches it; Home must
-# answer 200 on /healthz (home-server's own, so the route reaches it) and on
-# /app/ (the web app's index.html, which Home's image carries: nothing in front
-# of it may strip that path), a service 2xx, 3xx, 401 or 403 on / (a login
-# redirect, or 403 from S3 without a key, proves the route reaches the app; a
-# 404 is Traefik without a route).
+# home-tls answers https on the Tailscale address for Home's name, its only
+# one (media/.env: HOME_DOMAIN), with a certificate curl trusts: Let's Encrypt
+# has issued it through Cloudflare's DNS. It is asked by name, pinned to the
+# tailnet address, the way a tailnet browser reaches it; Home must answer 200
+# on /healthz (home-server's own, so the route reaches it) and on /app/ (the
+# web app's index.html, which Home's image carries: nothing in front of it may
+# strip that path).
 check_home_tls() {
   local release="$1" name path code deadline want want_text
   local -a names checked=()
-  mapfile -t names < <(sed -n -e 's/^HOME_DOMAIN=//p' -e 's/^HOST_[A-Z0-9]*=//p' "$release/media/.env")
-  [ "${#names[@]}" -ge 2 ] || fail "media/.env names no https hosts (HOME_DOMAIN and HOST_* from production.yml's home_hosts)"
+  mapfile -t names < <(sed -n -e 's/^HOME_DOMAIN=//p' "$release/media/.env")
+  [ "${#names[@]}" -eq 1 ] || fail "media/.env does not name Home's https name exactly once (HOME_DOMAIN, production.yml's home_domain)"
   for name in "${names[@]}"; do
     [[ "$name" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || fail "unexpected https name $(printf '%q' "$name") in media/.env"
     path=/ want='^(2[0-9][0-9]|3[0-9][0-9]|401|403)$' want_text="2xx, 3xx, 401 or 403"
@@ -739,18 +768,18 @@ check_proxy() {
 }
 
 check_socket_clients() {
-  local started errors
-  check_proxy edge-socket-proxy edge-traefik
-  check_proxy watchtower-socket-proxy watchtower
-  check_proxy autoheal-socket-proxy autoheal
-  check_proxy beszel-socket-proxy beszel-agent
+  local started errors entry proxy client
+  for entry in "${socket_clients[@]}"; do
+    read -r proxy client <<<"$entry"
+    check_proxy "$proxy" "$client"
+  done
   started="$(docker container inspect --format '{{.State.StartedAt}}' watchtower)"
   errors="$(docker logs --since "$started" watchtower 2>&1 |
     grep -Ei 'too old|minimum supported API version|Cannot connect to the Docker daemon|Error response from daemon: (Forbidden|Method Not Allowed)' || true)"
   if [ -n "$errors" ]; then
     fail "Watchtower cannot use the Docker API: $(tail -n 3 <<<"$errors" | tr '\n' ' ')"
   fi
-  log "Traefik, Watchtower, autoheal and Beszel's agent reach Docker through their socket proxies with no refused calls"
+  log "${socket_clients[*]}: each client reaches Docker through its socket proxy with no refused calls"
 }
 
 # Prints "<ref>|<digest or unknown>|<created or unknown>" for a running container.
@@ -785,11 +814,13 @@ record_running_images() {
 verify_release() {
   local id="$1"
   wait_for_stacks
-  check_routes "$stack_dir/current"
-  check_tunnel
-  check_tailnet_ports
-  check_home_tls "$stack_dir/current"
-  check_one_shots
+  if [ "$infra_host" = hetzner ]; then
+    check_routes "$stack_dir/current"
+  else
+    check_tailnet_ports
+    check_home_tls "$stack_dir/current"
+    check_one_shots
+  fi
   check_socket_clients
   record_running_images "$id"
   touch "$releases_dir/$id/.verified"
@@ -824,10 +855,13 @@ install() {
   last_verified_note="${last_verified:+ (the last verified release was $last_verified: $(release_summary "$releases_dir/$last_verified"))}"
   current_note="no release is current yet"
   [ -z "$current" ] || current_note="current still names $current"
-  failure_hint="release $id is installed but not current; $current_note. A rollback cannot fix this: it only re-pins the app images and renders the database stack, provision.sql and the secrets from master again, so revert the stack/database or secret change on master and run release${last_verified_note}"
-  log "starting the database"
-  compose_in "$release/database" up -d --wait --remove-orphans || fail "before the app stacks changed, the database did not come up healthy"
-  provision_database "$release"
+  failure_hint="release $id is installed but not current; $current_note. A rollback cannot fix this: it only re-pins the app images and renders the database stack, provision.sql, edge/tls.yml and the secrets from master again, so revert that change on master and run release${last_verified_note}"
+  if [ "$infra_host" = hetzner ]; then
+    log "starting the database"
+    compose_in "$release/database" up -d --wait --remove-orphans || fail "before the app stacks changed, the database did not come up healthy"
+    provision_database "$release"
+    install_edge_tls "$release"
+  fi
 
   if [ -n "$current" ] && [ -e "$releases_dir/$current/.verified" ]; then
     previous="$current"
@@ -836,13 +870,14 @@ install() {
   link_release current "$id"
   prune_releases "$id" "$previous"
   failure_hint="release $id is current but not verified. Run the Deploy workflow with action rollback only if an app image causes the failure above: a rollback changes nothing but the app image references and renders every stack/ file, env file and secret from master again; for any other cause revert that change on master and run release${last_verified_note}"
-  for stack in portfolio hypernova tunnel ai media home; do
+  for stack in "${stacks[@]}"; do
+    [ "$stack" != database ] || continue
     log "starting $stack"
     compose_in "$stack_dir/current/$stack" up -d --remove-orphans || fail "$stack did not start"
   done
   start_watchtower
   verify_release "$id"
-  check_public "$stack_dir/current"
+  [ "$infra_host" != hetzner ] || check_public "$stack_dir/current"
   log "RELEASE OK: $id is current, $(release_summary "$release")${previous:+; $previous is kept as the previous release}"
 }
 
@@ -850,7 +885,9 @@ do_release() {
   require_root
   load_host
   take_lock
-  [ -f "$edge_dir/docker-compose.yml" ] || fail "$edge_dir/docker-compose.yml does not exist, so no Traefik routes the stacks; run provisioning first"
+  if [ "$infra_host" = hetzner ] && [ ! -f "$edge_dir/docker-compose.yml" ]; then
+    fail "$edge_dir/docker-compose.yml does not exist, so no Traefik routes the stacks; run provisioning first"
+  fi
   mkdir -p "$releases_dir"
   work_dir="$(mktemp -d "$stack_dir/.incoming.XXXXXX")"
   trap cleanup EXIT

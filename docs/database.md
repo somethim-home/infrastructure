@@ -1,8 +1,8 @@
-# The shared PostgreSQL
+# The portfolio's PostgreSQL
 
-One `postgres:18.6-alpine` container (pinned by digest), named `postgresql`, serving two
-applications. It is the **`database` stack** (`stack/database/`) and is owned by no
-application.
+One `postgres:18.6-alpine` container (pinned by its multi-arch digest), named `postgresql`, on
+the **hetzner host**, serving the portfolio alone (since plan 023 the home server has no database). It is the **`database` stack**
+(`stack/database/`) and is owned by no application.
 
 ## Why it is its own stack
 
@@ -44,7 +44,7 @@ The cluster's administrator is **`postgres`**, and it belongs to no application.
 administrator out of every application means retiring an application never means dropping
 the account that administers everyone else's databases.
 
-On a fresh volume (the home server started with one), `POSTGRES_USER=postgres` in the compose
+On a fresh volume (the hetzner host started with one), `POSTGRES_USER=postgres` in the compose
 file makes initdb create it as the bootstrap superuser. Once initdb has run, those variables
 are ignored; `provision.sql` re-asserts `postgres` as `SUPERUSER LOGIN` with the password
 from `POSTGRES_SUPERUSER_PASSWORD` on every release instead.
@@ -58,7 +58,7 @@ host.
 ### `migration_admin`
 
 `migration_admin` was the bootstrap superuser (OID 10) of the previous server's volume,
-initialised under it during a 17 → 18 upgrade. The home server started from an empty volume,
+initialised under it during a 17 → 18 upgrade. The later hosts started from an empty volume,
 so initdb made `postgres` the bootstrap superuser and `migration_admin` does not exist.
 `provision.sql` never demotes whichever role has OID 10. Whatever its name, never drop the
 bootstrap superuser of a cluster: it owns the system catalogs.
@@ -71,10 +71,9 @@ runs it once the database is healthy and before any application stack starts:
 
 | Database | Role | Privileges |
 | --- | --- | --- |
-| `prizm` | `prizm` | owner; `NOSUPERUSER NOCREATEDB NOCREATEROLE` |
-| `portfolio` | `portfolio` | owner; same |
+| `portfolio` | `portfolio` | owner; `NOSUPERUSER NOCREATEDB NOCREATEROLE` |
 
-Each gets a role, a database it owns, and nothing else. If the SQL fails, the release stops
+An application gets a role, a database it owns, and nothing else. If the SQL fails, the release stops
 before the app stacks change, and psql's error is shown with every quoted literal masked.
 
 ### Why it runs on every release
@@ -98,7 +97,7 @@ nothing runs.
 - **Connect privilege** — `REVOKE CONNECT … FROM PUBLIC`, then `CONNECT, TEMPORARY` granted
   back to the owner alone.
 
-That last one is what makes these roles neighbours rather than housemates. By default
+That last one keeps a future second application's role out of this one's database. By default
 PostgreSQL lets any role in the cluster open any database; without the revoke, least
 privilege stops at the door. Existing sessions are unaffected, so it is safe to apply under
 load.
@@ -114,8 +113,8 @@ DETAIL:  The bootstrap superuser must have the SUPERUSER attribute.
 ```
 
 Unguarded, that error would abort the release on any cluster whose volume an application
-initialised. Here the bootstrap role is `postgres` (initdb on an empty volume), so both
-application roles are demotable.
+initialised. Here the bootstrap role is `postgres` (initdb on an empty volume), so the
+application role is demotable.
 
 ## Connecting to it
 
@@ -144,8 +143,17 @@ a new major changes all three, plus the test fixtures in `ci/release-scripts.sh`
 
 ## Backups
 
-The nightly backup (`infra-backup`) dumps the whole cluster with `pg_dumpall` to the external
-disk and copies `portfolio-media` the same night. The portfolio's `media` table is a ledger of
-what is on the `portfolio-media` volume, so the database and that volume must be restored
-**together**, from the same night; a mismatch surfaces as broken images on a working site rather than
-as an error. See [operations.md](operations.md#backups).
+The portfolio's media is in Cloudflare R2, so the database is the hetzner host's only state.
+`infra-pg-backup` (roles/host, run daily at 02:30 UTC by `infra-pg-backup.timer`) streams
+`pg_dump --format=custom` of the `portfolio` database into the private R2 bucket
+`portfolio-backups` as `portfolio-<UTC time>.dump`, through a one-off rclone container (the
+image pinned by its multi-arch digest in the script). Nothing touches the disk on the way. A
+lifecycle rule on the bucket, set by the owner in Cloudflare, deletes dumps after 30 days.
+
+The R2 key it uses is its own (`R2_BACKUP_ACCESS_KEY_ID`, `R2_BACKUP_SECRET_ACCESS_KEY`), allowed
+to read and write that bucket alone, so the portfolio's own key cannot reach its backups. A
+release renders it into `database/backup.env` (0600, read by nothing in the stack); until the
+first release the timer's run fails and says so (`journalctl -u infra-pg-backup`).
+
+The dump holds the database only, not the media: R2 keeps those, and a restore from a day ago
+can name an object deleted since. Restoring: [RUNBOOK.md](../RUNBOOK.md#restoring-the-portfolio-database).

@@ -44,12 +44,12 @@
   ansible.builtin.set_fact:
     bootstrap_run: "{{ ssh_login_user.stdout != admin_user }}"
 
-- name: Require exactly one server in the inventory
+- name: Require exactly one server in the inventory group this run names
   tags: [always]
   ansible.builtin.assert:
     that:
-      - groups['server'] | default([]) | length == 1
-    fail_msg: "The inventory must name exactly one host in [server] (inventory/hosts.example)."
+      - groups[infra_host] | default([]) | length == 1
+    fail_msg: "The inventory must name exactly one host in [{{ infra_host }}] (inventory/hosts.example)."
     quiet: true
 
 - name: Require the Ubuntu release production.yml names

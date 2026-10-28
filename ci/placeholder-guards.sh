@@ -52,7 +52,7 @@ guard_task="$(sed -n 's/^- name: //p' "$root/tasks/placeholder-guards.yml" | hea
 for playbook in provision.yml release.yml; do
   inventory="localhost,"
   [ "$playbook" = provision.yml ] && inventory="$root/inventory/hosts.example"
-  ansible-playbook --list-tasks -i "$inventory" "$root/$playbook" </dev/null >"$work/tasks.log" 2>&1 ||
+  ansible-playbook --list-tasks -i "$inventory" -e infra_host=hetzner "$root/$playbook" </dev/null >"$work/tasks.log" 2>&1 ||
     { cat "$work/tasks.log"; echo "FAIL ansible-playbook --list-tasks $playbook"; exit 1; }
   grep -qF -- "$guard_task" "$work/tasks.log" || { cat "$work/tasks.log"; echo "FAIL $playbook does not run the placeholder guard"; exit 1; }
   echo "ok   $playbook runs the placeholder guard"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Renders and packs the release bundle on the runner:
+# Renders and packs the release bundle of one host on the runner:
 #
-#   build-bundle.sh [--pin <pins.env>] <extra-vars.json> <bundle.tgz>
+#   build-bundle.sh --host <home|hetzner> [--pin <pins.env>] <extra-vars.json> <bundle.tgz>
 #
 # release.yml renders the stack files and per-container env files from the
 # extra vars; this script refuses unpinned third-party images, applies the
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: build-bundle.sh [--pin <pins.env>] <extra-vars.json> <bundle.tgz>\n' >&2
+  printf 'usage: build-bundle.sh --host <home|hetzner> [--pin <pins.env>] <extra-vars.json> <bundle.tgz>\n' >&2
   exit 64
 }
 
@@ -22,8 +22,14 @@ fail() {
 
 here="$(cd "$(dirname "$0")" && pwd)"
 pins=""
+host=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --host)
+      [ "$#" -ge 2 ] || usage
+      host="$2"
+      shift 2
+      ;;
     --pin)
       [ "$#" -ge 2 ] || usage
       pins="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -35,7 +41,12 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$#" -eq 2 ] || usage
 
-readonly image_keys=(PORTFOLIO_IMAGE PROVIDER_IMAGE WEB_IMAGE HOME_IMAGE)
+# The app image each host runs; the other host's never reaches its bundle.
+case "$host" in
+  hetzner) readonly image_keys=(PORTFOLIO_IMAGE) ;;
+  home) readonly image_keys=(HOME_IMAGE) ;;
+  *) usage ;;
+esac
 readonly app_ref_pattern='^[a-z0-9.-]+(/[a-z0-9._-]+)+(:latest|:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64})$'
 extra_vars="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -47,7 +58,6 @@ bundle="$work/bundle"
 env_file_for() {
   case "$1" in
     PORTFOLIO_IMAGE) printf 'portfolio/.env\n' ;;
-    PROVIDER_IMAGE | WEB_IMAGE) printf 'hypernova/.env\n' ;;
     HOME_IMAGE) printf 'home/.env\n' ;;
   esac
 }
@@ -70,8 +80,8 @@ pin_value() {
 check_pins() {
   local key value digests=0
   [ -f "$pins" ] || fail "$pins does not exist"
-  [ "$(grep -c '' "$pins" || true)" -eq 5 ] ||
-    fail "$pins must hold exactly RELEASE_MODE=pinned and the PORTFOLIO_IMAGE, PROVIDER_IMAGE, WEB_IMAGE and HOME_IMAGE lines"
+  [ "$(grep -c '' "$pins" || true)" -eq 2 ] ||
+    fail "$pins must hold exactly RELEASE_MODE=pinned and the ${image_keys[*]} line"
   [ "$(pin_value RELEASE_MODE)" = pinned ] || fail "$pins must set RELEASE_MODE=pinned"
   for key in "${image_keys[@]}"; do
     value="$(pin_value "$key")"
@@ -143,7 +153,7 @@ else
 fi
 third_party_pins
 
-ansible-playbook -i localhost, -c local "$here/release.yml" -e "@$extra_vars" -e "bundle_dir=$bundle" </dev/null >"$work/render.log" 2>&1 || {
+ansible-playbook -i localhost, -c local "$here/release.yml" -e "@$extra_vars" -e "infra_host=$host" -e "bundle_dir=$bundle" </dev/null >"$work/render.log" 2>&1 || {
   # The play's own messages name the failed check, never a value.
   grep -E 'msg|FAILED|ERROR' "$work/render.log" >&2 || true
   fail "release.yml refused to render the bundle"
@@ -153,4 +163,4 @@ apply_pins
 printf 'RELEASE_MODE=%s\nRELEASE_COMMIT=%s\n' "$mode" "$commit" >"$bundle/release.env"
 chmod 0600 "$bundle/release.env"
 pack
-printf 'bundle: %s bytes, %s release for commit %s\n' "$(wc -c <"$output")" "$mode" "$commit"
+printf 'bundle: %s bytes, %s %s release for commit %s\n' "$(wc -c <"$output")" "$host" "$mode" "$commit"

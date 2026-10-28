@@ -1,9 +1,13 @@
-# The shared edge proxy. See docs/edge.md. Traefik reaches Docker only through
-# edge-socket-proxy (read-only, GET-only allowlist). It publishes no host port:
-# the only way in is the cloudflared container of the tunnel stack, on the edge
-# network, which reaches it at http://edge-traefik:80. Cloudflare terminates
-# TLS and redirects HTTP to HTTPS, so Traefik has one plain-HTTP entrypoint and
-# no certificates.
+# The hetzner host's public entry. See docs/edge.md. Traefik reaches Docker
+# only through edge-socket-proxy (read-only, GET-only allowlist). It publishes
+# 80 and 443, which the host firewall (infra-firewall, ufw) and the Hetzner
+# Cloud Firewall admit from Cloudflare's ranges alone: Cloudflare proxies every
+# public name (SSL/TLS Full (strict)). 80 only redirects to https; 443 serves
+# the Cloudflare Origin CA certificate and requires Cloudflare's client
+# certificate (Authenticated Origin Pulls), both in dynamic/tls.yml, which
+# every release writes (infra-apply). CLOUDFLARE_IPS in .env (provisioning,
+# from tasks/cloudflare-ips.yml) are the only forwarders whose X-Forwarded-*
+# headers Traefik keeps.
 name: edge
 
 services:
@@ -49,15 +53,22 @@ services:
       - --providers.docker.endpoint=tcp://edge-socket-proxy:2375
       - --providers.docker.network=edge
       - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/dynamic
+      - --providers.file.watch=true
       - --entrypoints.web.address=:80
-      # Only containers on this host reach :80 (no published port), and the
-      # tunnel is the only one that carries outside requests, so the
-      # X-Forwarded-* headers cloudflared sends (the real client in
-      # X-Forwarded-For, https in X-Forwarded-Proto) are kept. Docker's
-      # bridge networks are drawn from these private ranges.
-      - --entrypoints.web.forwardedHeaders.trustedIPs=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-      - --entrypoints.web.transport.respondingTimeouts.readTimeout=1800s
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.forwardedHeaders.trustedIPs=${CLOUDFLARE_IPS:?}
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --entrypoints.websecure.forwardedHeaders.trustedIPs=${CLOUDFLARE_IPS:?}
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=1800s
       - --log.level=ERROR
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./dynamic:/dynamic:ro
     networks:
       - edge
       - edge-socket

@@ -26,15 +26,17 @@ Read by both `provision.yml` and `release.yml`. No secrets.
 | `quiet_hours_*`, `quiet_gpu_power_limit_w`, `quiet_cpu_max_percent` | `true`, `"23:00"`, `"08:00"`, `Europe/London`, `130`, `70` | Quiet hours ([host.md](host.md#quiet-hours)) |
 | `swap_size` | `2G` | Swap file size |
 | `lan_interface` | `enp8s0` | The wired NIC (`ip -br link`) that Wake-on-LAN is set on |
-| `public_ports` | `[]` | Must stay empty: nothing is published to the LAN or internet |
-| `apex_domain`, `www_domain`, `hypernova_domain` | `example.com`, `www.example.com`, `hypernova.example.com` | The public sites behind the Cloudflare Tunnel |
-| `home_domain`, `home_hosts` | `home.example.com`, `{files: files, status: status, s3: s3}` | Tailnet-only https names served by `home-tls` |
+| `infra_hosts` | `{home: {server_name: infra-host, stacks: [ai, media, home]}, hetzner: {server_name: infra-hetzner, stacks: [database, portfolio]}}` | The two hosts: tailnet names and the stacks each bundle holds |
+| `public_ports` | `[]` on home, `[80, 443]` on hetzner | Docker-published ports the public interface may reach (hetzner: from Cloudflare only) |
+| `cloudflare_ips_pinned` | Cloudflare's ranges | The fallback when provisioning cannot fetch them |
+| `apex_domain`, `www_domain`, `preview_domain` | `example.com`, `www.example.com`, `""` | The public site on the hetzner host, and an optional second name for checking it before a switch |
+| `home_domain` | `home.example.com` | Home's tailnet-only https name, served by `home-tls` (the only one; no wildcard) |
 | `acme_email`, `status_owner_email` | `owner@example.com` | Let's Encrypt contact; the Beszel dashboard login |
 | `home_files_capacity`, `home_beszel_user` | `600G`, `""` | Home Files' storage pool; Home's read-only Beszel user |
 | `home_media_transcodes`, `home_media_transcodes_quiet` | `2`, `1` | Home's Media: HLS transcodes at once, by day and in quiet hours |
 | `home_ai_models` | `[{id: qwen3-8b, label: Qwen3 8B, about: …, file: Qwen3-8B-Q5_K_M.gguf, day_only: false}, …]` | Home's AI models: what Home lists (`HOME_AI_MODELS`) and the GGUF files llama-server serves (`LLAMA_MODELS`); the first is the default |
 | `dns_over_tls_enabled`, `dns_over_tls_servers` | `true`, `[1.1.1.1#cloudflare-dns.com, …]` | The host's encrypted DNS ([host.md](host.md#encrypted-dns)) |
-| `portfolio_image_repo`, `home_image_repo`, `hypernova_*_image_repo` | `ghcr.io/example/portfolio`, … | The app images Watchtower follows |
+| `portfolio_image_repo`, `home_image_repo` | `ghcr.io/example/portfolio`, … | The app images Watchtower follows |
 | `snowflake_enabled` | `true` | The Tor Snowflake proxy ([host.md](host.md#snowflake)) |
 
 ## `inventory/hosts` (gitignored)
@@ -60,14 +62,18 @@ format and where each value lands on the host). Secrets never appear in the repo
 | `SERVER_USER` | `deploy` | *(optional)* The forced-command account |
 | `TS_OAUTH_CLIENT_ID` | `k123…` | Tailscale OAuth client for the ephemeral CI node |
 | `GHCR_USERNAME` | `example` | Account of `GHCR_TOKEN` |
+| `HETZNER_SSH_HOST` | `infra-hetzner` | The hetzner host's tailnet name (`SERVER_SSH_HOST` is home's) |
+| `R2_PUBLIC_BUCKET`, `R2_PRIVATE_BUCKET` | `example-public`, `example-private` | The portfolio's media buckets |
+| `MEDIA_PUBLIC_BASE` | `https://media.example.com` | The public bucket's URL |
 | `PORTFOLIO_GOOGLE_CLIENT_ID` | `….apps.googleusercontent.com` | *(optional)* |
 | `HOME_OWNER_EMAIL` | `owner@example.com` | A repository variable: Home's owner account |
 
 Secrets: `SSH_PRIVATE_KEY`, `SSH_KNOWN_HOSTS`, `TS_OAUTH_SECRET`, `GHCR_TOKEN`,
-`CF_TUNNEL_TOKEN`, `HOME_TLS_CF_DNS_TOKEN`, `POSTGRES_SUPERUSER_PASSWORD`, `PRIZM_DB_PASSWORD`,
-`PORTFOLIO_DB_PASSWORD`, `PORTFOLIO_ADMIN_PASSWORD`, `PORTFOLIO_RESEND_API_KEY`,
-`PORTFOLIO_TOTP_ENCRYPTION_KEY`, `PORTFOLIO_GOOGLE_CLIENT_SECRET`, `HYPERNOVA_SESSION_SECRET`,
-`HYPERNOVA_ADMIN_PASSWORD`, `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN`, `GARAGE_RPC_SECRET`,
+`HOME_TLS_CF_DNS_TOKEN`, `POSTGRES_SUPERUSER_PASSWORD`, `PORTFOLIO_DB_PASSWORD`,
+`PORTFOLIO_ADMIN_PASSWORD`, `PORTFOLIO_RESEND_API_KEY`, `PORTFOLIO_TOTP_ENCRYPTION_KEY`,
+`PORTFOLIO_GOOGLE_CLIENT_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+`R2_BACKUP_ACCESS_KEY_ID`, `R2_BACKUP_SECRET_ACCESS_KEY`, `CF_ORIGIN_CERT`, `CF_ORIGIN_KEY`,
+`BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN`, `GARAGE_RPC_SECRET`,
 `GARAGE_ADMIN_TOKEN`, `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY`, `FILES_PASSWORD`,
 `HOME_SECRET_KEY`, `HOME_DATA_KEY`, `HOME_RESEND_API_KEY`, `HOME_POWER_KEY`,
 `HOME_TMDB_READ_TOKEN`, `HOME_BESZEL_PASSWORD`. [`ci/sample-extra-vars.json`](../ci/sample-extra-vars.json) shows each
@@ -87,7 +93,6 @@ edits them by hand:
 | --- | --- |
 | [`stack/portfolio/portfolio.env.j2`](../stack/portfolio/portfolio.env.j2) | the portfolio's origin, admin and sender addresses |
 | [`stack/portfolio/docker-compose.yml`](../stack/portfolio/docker-compose.yml) | the `www.` to apex redirect |
-| [`stack/hypernova/provider.env.j2`](../stack/hypernova/provider.env.j2) | hypernova's web origin |
 | [`stack/home/home-server.env.j2`](../stack/home/home-server.env.j2) | Home's `From` address |
 | [`cloudflare/down-page/wrangler.toml`](../cloudflare/down-page/wrangler.toml), `src/` | the Worker's routes and the hosts it answers for |
 | `ci/*.sh` | test expectations that use the real domains |

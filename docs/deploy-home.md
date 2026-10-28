@@ -1,12 +1,13 @@
 # Deploying Home: a clean-slate reinstall
 
-One ordered path from a blank machine to everything live: the public sites (portfolio,
-hypernova) through the tunnel, and on the tailnet Home (the web app at `/app`, sign-in, Files,
-Media, Books, AI with live updates, the power button), the status dashboard and Files (S3), the
-host's encrypted DNS and the nightly backup. The server is wiped and reinstalled: a fresh
-Ubuntu, no users, no data on the SSD. What lives in the cloud stays as it is and is reused: the
-Cloudflare Tunnel and its DNS records, the Tailscale policy and OAuth client, the GitHub
-`production` Environment, the GHCR images, Resend and TMDB.
+One ordered path from a blank machine to everything live on the **home server**, which runs
+only Home and what Home needs (plan 023): on the tailnet Home (the web app at `/app`, sign-in,
+Files, Media, Books, AI with live updates, the power button), the status dashboard and Files
+(S3), the host's encrypted DNS and the nightly backup. Nothing on it is public: the portfolio
+and its database run on the hetzner host ([RUNBOOK.md, 15](../RUNBOOK.md#15-hetzner-host)), and a
+home reinstall does not touch them. The server is wiped and reinstalled: a fresh Ubuntu, no
+users, no data on the SSD. What lives in the cloud stays as it is and is reused: the Tailscale
+policy and OAuth client, the GitHub `production` Environment, the GHCR images, Resend and TMDB.
 
 **What survives the wipe.** Only the SSD is reinstalled. The **1 TB internal HDD** (`/srv/media`:
 Garage's objects, Home Files' ciphertext, the films and series) and the **1 TB external USB HDD**
@@ -38,13 +39,8 @@ Make this choice before [step 5](#5-the-secrets), because it decides which keys 
 | You want back | Keep these secrets as they are | Restore in step 10 |
 | --- | --- | --- |
 | nothing (a truly clean slate) | none of the keys; every generated value can be new | nothing; the media disk's films and series are picked up again by Home's scan |
-| the portfolio (its database and uploads) | `PORTFOLIO_TOTP_ENCRYPTION_KEY` (else every enrolled TOTP is unreadable) | the `portfolio` database and `portfolio-media` |
-| hypernova's data | none (its session secret only signs sessions) | the `prizm` database and `hypernova_prizm-storage` |
 | Home (accounts, chats, Books, Media progress, Home Files) | `HOME_DATA_KEY` and `HOME_SECRET_KEY` | `home-data` and `/srv/media/home-files`, together |
 | Files (the S3 bucket) and the dashboard's history | none (the owner's S3 key is imported again) | `garage-meta` with `/srv/media/s3`, together; `beszel-data`, `sftpgo-data` |
-
-Database passwords can be new either way: every release sets each role's password from the
-secrets ([RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret)).
 
 ## The checklist
 
@@ -61,7 +57,7 @@ secrets ([RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret)).
 | 8 | [Home's first owner setup](#8-homes-first-owner-setup) | browser, on the tailnet | the owner has a password, a second step and recovery codes |
 | 9 | [First-run checks](#9-first-run-checks) | browser, laptop, server | every check below passes |
 | 10 | [Restore from the old server's backups](#10-restore-from-the-old-servers-backups) | on the server | only what you chose above, or nothing |
-| 11 | [The down-page Worker](#11-the-down-page-worker) | laptop (`wrangler`) | the sites answer, the page shows while the tunnel is down |
+| 11 | [The down-page Worker](#11-the-down-page-worker) | nothing | it belongs to the hetzner host's public site |
 | 12 | [Retire the old](#12-retire-the-old) | GitHub, 1Password, Tailscale | retired secrets and the old node gone |
 
 [Rollback](#rollback) says how to undo each part.
@@ -70,8 +66,8 @@ secrets ([RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret)).
 
 1. **Merge this change** into `master` on `somethim-home/infrastructure` and update your checkout
    (`git switch master && git pull --ff-only`). The Deploy workflow refuses any other branch.
-2. **A complete backup from today**, if anything on the SSD may be wanted later (the database,
-   Home, the dashboard's history; [step 10](#10-restore-from-the-old-servers-backups)). On the old
+2. **A complete backup from today**, if anything on the SSD may be wanted later (Home, the
+   dashboard's history; [step 10](#10-restore-from-the-old-servers-backups)). On the old
    server, it stops each app only while its own data is copied:
 
    ```bash
@@ -88,12 +84,11 @@ secrets ([RUNBOOK.md, Rotating a secret](../RUNBOOK.md#rotating-a-secret)).
    ```
 
 4. **The keys you decided to keep** are in 1Password ("infra production secrets" in the "Home
-   Server" vault: `HOME_DATA_KEY`, `HOME_SECRET_KEY`; `PORTFOLIO_TOTP_ENCRYPTION_KEY` was generated
-   straight into GitHub, so it is kept by simply not setting it again). A GitHub secret cannot be
-   read back, so 1Password is the only copy you can ever restore from.
+   Server" vault: `HOME_DATA_KEY`, `HOME_SECRET_KEY`). A GitHub secret cannot be read back, so
+   1Password is the only copy you can ever restore from.
 
-Then shut the old server down (`ssh -t admin@infra-host sudo poweroff`). The public sites show
-the down page (or Cloudflare's error) until [step 7](#7-release).
+Then shut the old server down (`ssh -t admin@infra-host sudo poweroff`). The public site, on the
+hetzner host, is not affected.
 
 ## 1. Install Ubuntu
 
@@ -178,7 +173,7 @@ steps 2 to 5, with these notes:
    ```bash
    ssh -t admin@infra-host sudo reboot
    # about a minute later:
-   ansible-playbook -u admin --ask-become-pass provision.yml --tags gpu,host
+   ansible-playbook -e infra_host=home -u admin --ask-become-pass provision.yml --tags gpu,host
    ssh admin@infra-host nvidia-smi                                    # the RTX 2060, 12288MiB, driver 580.x
    ssh admin@infra-host resolvectl dnsovertls                         # Global: yes
    ssh admin@infra-host resolvectl dns                                # Global: 1.1.1.1#cloudflare-dns.com …; the enp8s0 line has no server
@@ -201,14 +196,15 @@ Optional, to try Wake-on-LAN now: [RUNBOOK.md, Wake-on-LAN](../RUNBOOK.md#wake-o
 
 ## 5. The secrets
 
-The `production` Environment already holds every secret the Deploy workflow reads (28), from
-the old server. On a clean slate they fall into three groups:
+The `production` Environment already holds every secret the Deploy workflow reads, from the
+old server. The hetzner host's (`POSTGRES_*`, `PORTFOLIO_*`, `R2_*`, `CF_ORIGIN_*`) are not this
+server's: leave them. On a clean slate the home server's fall into three groups:
 
 | Group | Secrets | What to do |
 | --- | --- | --- |
 | **Must change**: they describe the old machine | `SSH_KNOWN_HOSTS`, `HOME_POWER_KEY` | below; a release fails without both (the host key check, "HOME_POWER_KEY is not this host's power key") |
-| **Keep as they are**: credentials for outside services, unchanged by a reinstall | `SSH_PRIVATE_KEY` (the deploy key; its public half is committed), `TS_OAUTH_SECRET`, `GHCR_TOKEN`, `CF_TUNNEL_TOKEN` (the same tunnel; the wiped server's connector is gone), `HOME_TLS_CF_DNS_TOKEN`, `HOME_RESEND_API_KEY`, `HOME_TMDB_READ_TOKEN`, `PORTFOLIO_RESEND_API_KEY`, `PORTFOLIO_GOOGLE_CLIENT_SECRET` | nothing; the variables (`TS_OAUTH_CLIENT_ID`, `SERVER_SSH_HOST`, `GHCR_USERNAME`, `PORTFOLIO_GOOGLE_CLIENT_ID`, the repository's `HOME_OWNER_EMAIL`) stay too |
-| **Fresh on a clean slate**: generated values that only guard this server's data, of which there is none yet | `POSTGRES_SUPERUSER_PASSWORD`, `PRIZM_DB_PASSWORD`, `PORTFOLIO_DB_PASSWORD`, `HYPERNOVA_SESSION_SECRET`, `HYPERNOVA_ADMIN_PASSWORD`, `PORTFOLIO_ADMIN_PASSWORD`, `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN`, `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY`, `FILES_PASSWORD`; and, **only if you restore none of their data**, `PORTFOLIO_TOTP_ENCRYPTION_KEY`, `HOME_SECRET_KEY`, `HOME_DATA_KEY` | below. Keeping the old values works too; fresh ones mean nothing from the old server opens the new one |
+| **Keep as they are**: credentials for outside services, unchanged by a reinstall | `SSH_PRIVATE_KEY` (the deploy key; its public half is committed), `TS_OAUTH_SECRET`, `GHCR_TOKEN`, `HOME_TLS_CF_DNS_TOKEN`, `HOME_RESEND_API_KEY`, `HOME_TMDB_READ_TOKEN` | nothing; the variables (`TS_OAUTH_CLIENT_ID`, `SERVER_SSH_HOST`, `GHCR_USERNAME`, the repository's `HOME_OWNER_EMAIL`) stay too |
+| **Fresh on a clean slate**: generated values that only guard this server's data, of which there is none yet | `BESZEL_PASSWORD`, `BESZEL_AGENT_TOKEN`, `GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`, `GARAGE_OWNER_ACCESS_KEY_ID`, `GARAGE_OWNER_SECRET_KEY`, `FILES_PASSWORD`; and, **only if you restore none of Home's data**, `HOME_SECRET_KEY`, `HOME_DATA_KEY` | below. Keeping the old values works too; fresh ones mean nothing from the old server opens the new one |
 
 `HOME_BESZEL_PASSWORD` is read only when `production.yml` names `home_beszel_user` (it is empty):
 leave it, or delete it ([RUNBOOK.md, Home](../RUNBOOK.md#home), "Status card", makes the
@@ -224,7 +220,7 @@ set_secret() { op item edit "$item" --vault "Home Server" "$1[password]=$2" >/de
 ```
 
 **`SSH_KNOWN_HOSTS`**, the new host key under the tailnet name the workflow connects to
-(`SERVER_SSH_HOST`, `infra-host`). Read it over the tailnet, and set it **only** if its
+(`SERVER_SSH_HOST`, `infra-host`), next to the hetzner host's line, which stays. Read it over the tailnet, and set it **only** if its
 fingerprint is the one you wrote down at the console in [step 1](#1-install-ubuntu): that
 comparison is what makes the key trustworthy, since `ssh-keyscan` itself trusts whatever answers.
 
@@ -232,18 +228,13 @@ comparison is what makes the key trustworthy, since `ssh-keyscan` itself trusts 
 ssh-keyscan -t ed25519 infra-host 2>/dev/null >/tmp/kh    # or the /tmp/kh of step 4
 cat /tmp/kh                                               # one line: infra-host ssh-ed25519 AAAA…
 ssh-keygen -lf /tmp/kh                                    # 256 SHA256:… infra-host (ED25519): must equal the console's
+ssh-keyscan -t ed25519 infra-hetzner 2>/dev/null >>/tmp/kh   # the hetzner host's line, unchanged (compare its fingerprint too)
 gh secret set SSH_KNOWN_HOSTS --env production -R "$R" </tmp/kh && rm /tmp/kh
 ```
 
-**The fresh values.** Nobody types the database passwords, the TOTP key or the session secret,
-so they go straight into GitHub; the rest also go to 1Password:
+**The fresh values**, to GitHub and 1Password:
 
 ```bash
-for name in POSTGRES_SUPERUSER_PASSWORD PRIZM_DB_PASSWORD PORTFOLIO_DB_PASSWORD HYPERNOVA_SESSION_SECRET; do
-  gh secret set "$name" --env production -R "$R" --body "$(openssl rand -hex 24)"
-done
-set_secret PORTFOLIO_ADMIN_PASSWORD "$(openssl rand -hex 16)"
-set_secret HYPERNOVA_ADMIN_PASSWORD "$(openssl rand -hex 16)"
 set_secret BESZEL_PASSWORD "$(openssl rand -hex 16)"
 set_secret BESZEL_AGENT_TOKEN "$(openssl rand -hex 24)"
 set_secret GARAGE_RPC_SECRET "$(openssl rand -hex 32)"
@@ -253,15 +244,11 @@ set_secret GARAGE_OWNER_SECRET_KEY "$(openssl rand -hex 32)"
 set_secret FILES_PASSWORD "$(openssl rand -hex 16)"
 ```
 
-`PORTFOLIO_ADMIN_PASSWORD` and `HYPERNOVA_ADMIN_PASSWORD` were echoed in [RUNBOOK.md,
-7](../RUNBOOK.md#7-the-production-environment); here they go to 1Password instead
-(`op item get "$item" --vault "Home Server" --fields label=PORTFOLIO_ADMIN_PASSWORD --reveal`
-when you sign in). A new S3 key means rclone and your S3 apps need the new pair.
+A new S3 key means rclone and your S3 apps need the new pair.
 
-**The three data keys**, only for the data you will **not** restore (the table at the top):
+**Home's two data keys**, only if you will **not** restore Home's data (the table at the top):
 
 ```bash
-gh secret set PORTFOLIO_TOTP_ENCRYPTION_KEY --env production -R "$R" --body "$(openssl rand -base64 32)"   # not if you restore the portfolio
 set_secret HOME_SECRET_KEY "$(openssl rand -base64 32)"                                                  # not if you restore Home
 set_secret HOME_DATA_KEY "$(openssl rand -base64 32)"                                                    # not if you restore Home
 ```
@@ -315,33 +302,28 @@ answer (llama-server logs "…is missing").
 
 ## 7. Release
 
-GitHub → **Actions → Deploy → Run workflow**, "Use workflow from" `master`, action `release`,
-every other input at its default. Or from the laptop:
+GitHub → **Actions → Deploy → Run workflow**, "Use workflow from" `master`, host `home`, action
+`release`, every other input at its default. Or from the laptop:
 
 ```bash
-gh workflow run deploy.yml -R somethim-home/infrastructure --ref master -f action=release
+gh workflow run deploy.yml -R somethim-home/infrastructure --ref master -f host=home -f action=release
 gh run watch -R somethim-home/infrastructure "$(gh run list -R somethim-home/infrastructure --workflow deploy.yml -L 1 --json databaseId -q '.[0].databaseId')"
 ```
 
-The first release on the new host creates everything that is not there yet: PostgreSQL
-initialises the empty `pgdata-v18` (`provision.sql` makes the `prizm` and `portfolio` roles and
-databases; the apps create their schemas; the portfolio can take up to 180 s to report healthy),
-Beszel creates its login, Garage its layout, the owner's key and the `files` bucket, and Home its
+The first release on the new host creates everything that is not there yet: Beszel creates its
+login, Garage its layout, the owner's key and the `files` bucket, and Home its
 databases. Expect in "Release on the server" the lines of [RUNBOOK.md, 9. First
 release](../RUNBOOK.md#9-first-release), among them:
 
 ```
 infra-apply: compose model accepted: 1 service(s) in the ai stack, …, the GPU only for llama, no Docker socket
 infra-apply: compose model accepted: 2 service(s) in the home stack, …, no bind mount but home-server /srv/media/home-files, home-server /run/home-power, home-server /srv/media/movies, home-server /srv/media/shows, the GPU only for home-server, no Docker socket, no extra group but home-server +media
-infra-apply: the Cloudflare Tunnel is connected (cloudflared /ready answers 200)
 infra-apply: home-tls serves https with a trusted certificate on 100.x.y.z for home.arbikullakshi.com …, and Home's web app at https://home.arbikullakshi.com/app/
 infra-apply: beszel-pair garage-setup home-keys finished: …, Home has its key files
-infra-apply: Cloudflare serves https://arbikullakshi.com/api/health https://www.arbikullakshi.com/ https://hypernova.arbikullakshi.com/ …
 infra-apply: RELEASE OK: <id> is current, following :latest, auto-updates on
 ```
 
-The DNS records already point at the tunnel, so the public check passes on this first release
-(RUNBOOK section 10 is not repeated). `home-tls` asks Let's Encrypt for a new certificate (its
+`home-tls` asks Let's Encrypt for a new certificate (its
 `home-tls-acme` volume is new); that takes a minute and is part of the release's wait.
 
 If it stops, the line before `FAILED` says why; the common ones:
@@ -375,18 +357,9 @@ owner account comes back with it and replaces this one.
 
 On a device on the tailnet. `H=https://home.arbikullakshi.com`.
 
-1. **The public sites** (from anywhere):
-
-   ```bash
-   curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health            # 200
-   curl -sS -o /dev/null -w '%{http_code} %{redirect_url}\n' https://www.arbikullakshi.com/ # 301 https://arbikullakshi.com/
-   curl -sS -o /dev/null -w '%{http_code}\n' https://hypernova.arbikullakshi.com/api/health  # 200
-   ```
-
-   Sign in at `https://arbikullakshi.com/admin` with `PORTFOLIO_ADMIN_PASSWORD` and enrol TOTP and
-   passkeys afresh, reconnect Google Calendar if you use it, and sign in to hypernova with
-   `HYPERNOVA_ADMIN_PASSWORD` (its AI assistant is off: Ollama was removed). Skip the portfolio
-   part if you will restore its database in step 10.
+1. **Nothing public**: `ssh admin@infra-host sudo docker ps --format '{{.Names}} {{.Ports}}'`
+   shows ports only on the Tailscale address (`100.x.y.z`), and no `portfolio`, `postgresql`,
+   `cloudflared` or `edge-traefik`.
 2. **Health**: `curl -fsS $H/healthz` prints `ok`.
 3. **The web app** and its caching (home-tls passes Home's headers untouched; nothing in front
    of it rewrites or compresses):
@@ -444,9 +417,9 @@ On a device on the tailnet. `H=https://home.arbikullakshi.com`.
    restart from there: type `restart`, the 10-second countdown runs, the server reboots and the
    page reloads when it is back (about 3 minutes). [RUNBOOK.md, Home's power control](../RUNBOOK.md#homes-power-control)
    has the signed test from the shell too.
-10. **The status dashboard and Files**: `https://status.home.arbikullakshi.com` (sign in with
+10. **The status dashboard and Files**: `http://infra-host:8090` (sign in with
     `status_owner_email` and the new `BESZEL_PASSWORD`; `infra-host` appears with the GPU and the
-    three disks) and `https://files.home.arbikullakshi.com/web/client` (the new `FILES_PASSWORD`).
+    three disks) and `http://infra-host:8091/web/client` (the new `FILES_PASSWORD`).
 11. **Encrypted DNS**: `ssh admin@infra-host resolvectl query www.themoviedb.org` answers, and
     `ssh admin@infra-host resolvectl statistics | grep -i transaction` counts up.
 12. **Tonight's backup** (or now, which stops `home-server` for the copy):
@@ -462,8 +435,7 @@ the server (`ssh -t admin@infra-host`), after the release (so every volume exist
 snapshot: the one [step 0](#0-before-you-wipe) made, the newest from before the wipe.
 
 **Where the old data is.** The backup disk (`/srv/backup`, root only) has kept every snapshot
-of the old server: `snapshots/<date>/postgres.sql.gz` (the whole database cluster) and
-`snapshots/<date>/volumes/<volume>/` (each app volume as a plain tree); the layout is in
+of the old server: `snapshots/<date>/volumes/<volume>/` (each app volume as a plain tree); the layout is in
 [RUNBOOK.md, Restoring from the backup disk](../RUNBOOK.md#restoring-from-the-backup-disk). The
 media disk was not touched at all: the films and series (the videos too, which are in no
 backup), Garage's objects in `s3` and Home Files' ciphertext in `home-files` are still on it,
@@ -484,31 +456,7 @@ Pick the snapshot first:
 ```bash
 sudo ls -l /srv/backup/snapshots/                       # one folder per night; the old server's newest is the one before the wipe
 s=/srv/backup/snapshots/<date>
-sudo gzip -cd "$s/postgres.sql.gz" | grep '^-- Database ".*" dump'   # the databases in it: portfolio, prizm, …
 ```
-
-**The portfolio** (its database and its uploads, from the same night; it needs the old
-`PORTFOLIO_TOTP_ENCRYPTION_KEY` you kept in step 5). The dump holds the whole cluster; this takes
-only the `portfolio` database out of it and puts it in place of the empty one the release made.
-The role and its password stay the current ones:
-
-```bash
-sudo docker stop watchtower portfolio
-sudo docker exec postgresql psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'DROP DATABASE portfolio WITH (FORCE)'
-sudo gzip -cd "$s/postgres.sql.gz" |
-  awk -v db=portfolio '/^-- Database ".*" dump$/ || /^-- PostgreSQL database cluster dump complete/ { p = ($0 == "-- Database \"" db "\" dump") } p' |
-  sudo docker exec -i postgresql psql -U postgres -d postgres -v ON_ERROR_STOP=1 -q
-v="$(sudo docker volume inspect --format '{{.Mountpoint}}' portfolio-media)"
-sudo rsync -a --delete --numeric-ids "$s/volumes/portfolio-media/" "$v/"
-sudo docker start portfolio watchtower
-curl -sS -o /dev/null -w '%{http_code}\n' https://arbikullakshi.com/api/health   # 200
-```
-
-Sign in at `/admin` with the old operator password and second factors (the restored account
-is the old one; `PORTFOLIO_ADMIN_PASSWORD` only makes an account that does not exist).
-**hypernova** the same way, with `prizm` for `portfolio` (in `DROP DATABASE` and `db=`),
-`hypernova_prizm-storage` for `portfolio-media`, and `prizm-provider prizm-web` for the
-`portfolio` container.
 
 **Home** (accounts, chats, Books, Media's progress and Home Files; it needs the old
 `HOME_DATA_KEY` and `HOME_SECRET_KEY` you kept in step 5): [RUNBOOK.md, Restoring from the backup
@@ -536,21 +484,8 @@ Restore what you want before then.
 
 ## 11. The down-page Worker
 
-The Worker answers the **public** sites (`arbikullakshi.com`, `www.`, `hypernova.`) with a
-"server is down" page while the tunnel is down. It runs in Cloudflare, so the reinstall did not
-touch it, and Home (tailnet only, never behind the tunnel) has nothing to do with it. If it is
-not deployed yet, or `cloudflare/down-page/` changed since, follow [RUNBOOK.md, The down
-page](../RUNBOOK.md#the-down-page):
-
-```bash
-cd cloudflare/down-page
-npx wrangler@4.147.0 login && npx wrangler@4.147.0 whoami
-npx wrangler@4.147.0 deploy
-```
-
-then set its request limit failure mode to **Fail open** in the dashboard, and check the sites
-(200, 301, 200) and, at a quiet moment, the page while `cloudflared` is stopped (`503 120`), as
-that section shows.
+Nothing to do: the Worker answers the public site, which runs on the hetzner host, and a home
+reinstall does not touch it ([RUNBOOK.md, The down page](../RUNBOOK.md#the-down-page)).
 
 ## 12. Retire the old
 

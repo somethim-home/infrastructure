@@ -23,7 +23,6 @@ const TEMPLATE: &str = include_str!("page.html");
 pub fn site_name(host: &str) -> &'static str {
     match host.to_ascii_lowercase().trim_end_matches('.') {
         "arbikullakshi.com" | "www.arbikullakshi.com" => "arbikullakshi.com",
-        "hypernova.arbikullakshi.com" => "Hypernova",
         _ => "This site",
     }
 }
@@ -41,15 +40,15 @@ mod tests {
     fn names_each_public_site() {
         assert_eq!(site_name("arbikullakshi.com"), "arbikullakshi.com");
         assert_eq!(site_name("WWW.arbikullakshi.com."), "arbikullakshi.com");
-        assert_eq!(site_name("hypernova.arbikullakshi.com"), "Hypernova");
+        assert_eq!(site_name("hypernova.arbikullakshi.com"), "This site");
         assert_eq!(site_name("<script>alert(1)</script>"), "This site");
         assert_eq!(site_name(""), "This site");
     }
 
     #[test]
     fn the_page_is_self_contained() {
-        let page = render("hypernova.arbikullakshi.com");
-        assert!(page.contains("<title>Hypernova is offline for a moment</title>"));
+        let page = render("www.arbikullakshi.com");
+        assert!(page.contains("<title>arbikullakshi.com is offline for a moment</title>"));
         assert!(!page.contains("{{"), "an unfilled placeholder");
         for external in [
             "http://", "https://", "//fonts", "@import", "url(", "<script", "<link", "src=",

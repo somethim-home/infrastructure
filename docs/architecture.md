@@ -1,44 +1,45 @@
 # Architecture
 
-## One deployer, three ways in
+## One deployer, two hosts, three ways in
 
-This repository is the only thing that configures the server, a dedicated PC on the owner's
-home LAN. The application repositories — `hypernova`, `portfolio`, `home` — are **build-only**: their
-CI builds an image, pushes it to GHCR, and stops there. None of them can deploy, and none of
-them knows how to reach the server.
+This repository is the only thing that configures the two servers (plan 023): **home**, a
+dedicated PC on the owner's home LAN that runs only Home and what Home needs, over the tailnet
+only; and **hetzner**, a Hetzner Cloud CAX server (Arm64) that runs the public portfolio and its
+PostgreSQL behind Traefik, which only Cloudflare reaches. Each provisioning run and each release
+names its host (`infra_host`), and a bundle holds only that host's stacks; the hosts share
+nothing at run time. The application repositories (`portfolio`, `home`) are **build-only**:
+their CI builds an image, pushes it to GHCR, and stops there. None of them can deploy, and none
+of them knows how to reach a server.
 
 ```
-                    visitors
-                       │ HTTPS
-                       ▼
-                Cloudflare edge  (TLS, HTTP→HTTPS, DNS: proxied CNAMEs → the tunnel)
-                       ▲
-                       │ outbound tunnel (cloudflared dials out; no inbound port anywhere)
-┌──────────────────────┼──────────────── home server (LAN, behind the router, no port forward) ──┐
-│  cloudflared ──HTTP──▶ edge-traefik:80 ──▶ portfolio · prizm-web · prizm-provider ──▶ postgresql │
-│  (stack/tunnel)        (roles/edge)        (stack/portfolio, stack/hypernova)     (stack/database)│
-│                                                                                                   │
-│  Watchtower ── sees a new :latest digest in GHCR → pull + recreate the app container              │
-│  sshd :22 ◀── tailscale0 only;  Home (stack/home), Beszel, Garage, SFTPGo ◀── home-tls on the     │
-│  Tailscale address only (stack/media);  media disk on /srv/media (HDD), backups on /srv/backup     │
-└──────────────────────────────────────▲────────────────────────────────────────────────────────────┘
-                                       │ Tailscale (SSH, tcp 22)
-          ┌────────────────────────────┴───────────────────────────────┐
-          │ provision.yml (owner's laptop, admin + sudo)                │
-          │ Deploy workflow → release bundle (deploy, forced command)   │
-          └──────────────────────── infra (this repo) ──────────────────┘
+              visitors                                    the owner's devices (tailnet)
+                 │ HTTPS                                               │ HTTPS
+                 ▼                                                     │
+          Cloudflare edge (proxied A/AAAA, Full (strict))              │
+                 │ HTTPS + Cloudflare's client certificate             │
+┌────────────────▼──── hetzner (80/443 from Cloudflare only) ┐  ┌──────▼──── home (no inbound port) ───────────────────┐
+│ edge-traefik ──▶ portfolio ──▶ postgresql                   │  │ home-tls ──▶ Home (home-server) ──▶ llama (GPU)       │
+│ (roles/edge)  (stack/portfolio) (stack/database)            │  │           └▶ Beszel, Garage, SFTPGo (stack/media)    │
+│ daily pg_dump ──▶ R2 (portfolio-backups); media in R2       │  │ media disk /srv/media, nightly backup /srv/backup    │
+│ Watchtower; sshd :22 on tailscale0 only                     │  │ Watchtower; sshd :22 on tailscale0 only              │
+└────────────────────────────▲────────────────────────────────┘  └───────────────────────▲──────────────────────────────┘
+                             └─────────────── Tailscale (SSH, tcp 22) ──────────────────┘
+          ┌───────────────────────────────────┴────────────────────────────────────┐
+          │ provision.yml -e infra_host=… (owner's laptop, admin + sudo)            │
+          │ Deploy workflow, host input → release bundle (deploy, forced command)   │
+          └───────────────────────────── infra (this repo) ─────────────────────────┘
 
-hypernova ─┐  build :latest → GHCR ┐   Watchtower (on the server) sees the new
-portfolio ─┘  build :latest → GHCR ┘   digest → docker pull + recreate container
+portfolio ─┐  build :latest → GHCR ┐   Watchtower (on each server) sees the new
+home ──────┘  build :latest → GHCR ┘   digest → docker pull + recreate container
 ```
 
-There are exactly three ways anything acts on the host, and one narrow request:
+There are exactly three ways anything acts on a host, and one narrow request (home only):
 
 | Who | How | Can do |
 | --- | --- | --- |
 | The owner | `admin` over the tailnet (or at the server's own console), sudo with a password | anything; runs `provision.yml` |
 | The Deploy workflow | `deploy` over the tailnet, one key forced to `infra-deploy-gate` | `release` (a bundle on stdin) or `status`, nothing else |
-| Watchtower | on the host, through a socket proxy, no login at all | pull a newer `:latest` of a labelled app container (`portfolio`, `prizm-provider`, `prizm-web`, `home-server`) and recreate it |
+| Watchtower | on each host, through a socket proxy, no login at all | pull a newer `:latest` of a labelled app container (`portfolio` on hetzner, `home-server` on home) and recreate it |
 | Home (`home-server`) | an HMAC-signed file in `/run/home-power`, read by the host's `home-power.path` | ask for `poweroff` or `reboot`, at most once per 10 minutes, nothing else ([host.md](host.md#power-requests-from-home)) |
 
 `deploy` is in no group (not `docker`), its `authorized_keys` is owned by root, and sudo
@@ -66,11 +67,13 @@ Do not confuse this removal with the `tag:infra-ci` access used by the retained 
 
 ## Provision and release
 
-- **`provision.yml`** runs the roles `common`, `tailscale`, `docker`, `gpu`, `host`, `edge`,
-  `watchtower`, `autoheal`, then the SSH login policy. Facts about the host (tailnet name,
-  Ubuntu release, Docker major, reboot time, swap, published ports (none), domains, app image
-  repositories) are in `production.yml`. The first run bootstraps a fresh Ubuntu install over
-  the LAN as the installer's account; every later one runs as `admin` over the tailnet
+- **`provision.yml -e infra_host=<host>`** runs the roles `common`, `tailscale`, `docker`,
+  `host`, `watchtower`, `autoheal` on both hosts, `gpu`, `quiet`, `beszel` and `snowflake` on
+  home, `edge` on hetzner, then the SSH login policy. Facts about the hosts (`infra_hosts`:
+  tailnet names and stacks; Ubuntu release, Docker major, reboot time, swap, published ports,
+  Cloudflare's ranges, domains, app image repositories) are in `production.yml`. The first run
+  bootstraps a fresh Ubuntu install over the LAN (home) or the public address (hetzner) as the
+  installer's account; every later one runs as `admin` over the tailnet
   ([host.md](host.md#the-bootstrap)). See [host.md](host.md), [edge.md](edge.md),
   [agents.md](agents.md).
 - **A release** is rendered on the GitHub runner by `release.yml` and `build-bundle.sh`, and
@@ -78,42 +81,39 @@ Do not confuse this removal with the `tag:infra-ci` access used by the retained 
 
 ## Stacks and their order
 
-A stack is a directory under `stack/` — `database`, `portfolio`, `hypernova`, `tunnel`, `ai`,
-`media`, `home` —
-holding a `docker-compose.yml` and the env templates `release.yml` renders. Each is its own
+A stack is a directory under `stack/` holding a `docker-compose.yml` and the env templates
+`release.yml` renders: on hetzner `database` and `portfolio` (and `stack/edge`, the template of
+Traefik's TLS settings, which is not a stack), on home `ai`, `media` and `home`. Each is its own
 Compose project with fixed project, container and volume names, so a release recreates
 containers in place and never moves data. On a fresh host the first release creates the
-volumes empty (`pgdata-v18` and the hardened stacks' volumes come from provisioning, the
-public apps' volumes from Compose) and the
+volumes empty (`pgdata-v18` and the hardened stacks' volumes come from provisioning) and the
 apps initialise them; nothing ever deletes one.
 
 `infra-apply` brings them up **in this order**:
 
 ```
-database (--wait) → provision.sql → portfolio → hypernova → tunnel → ai → media → home
+hetzner: database (--wait) → provision.sql → edge/tls.yml → portfolio
+home:    ai → media → home
 ```
 
-The tunnel goes after the apps so that by the time Cloudflare can send requests, the apps
-behind Traefik are starting; its own failure cannot hold back the apps. `ai`, `media` and
-`home`, which nothing public depends on, come last: the sites are up before their large images
-start. `home` follows `media`, whose `home-tls` routes to it; `home-tls` answers 502 for Home's
+On hetzner the order is load-bearing, and the reason is a limitation of Compose: `depends_on`
+is scoped to a single project, so nothing outside the `database` stack can declare a dependency
+on PostgreSQL. By the time `portfolio` starts, PostgreSQL is healthy and `provision.sql` has
+created its role and database, so its credentials work the first time it tries them, on a
+brand-new host. After that, `restart: always` handles a database that goes away and comes back.
+See [database.md](database.md#roles-and-databases).
+
+On home, `home` follows `media`, whose `home-tls` routes to it; `home-tls` answers 502 for Home's
 name for the seconds in between, and verify waits for both. `ai` comes before `home` too, so
 llama-server is already answering on `home-llm` when home-server starts (Home's AI card would
 otherwise say "Unavailable" for its first health check).
-
-The order is load-bearing, and the reason is a limitation of Compose: `depends_on` is scoped
-to a single project, so nothing outside the `database` stack can declare a dependency on
-PostgreSQL. By the time `portfolio` starts, PostgreSQL is healthy and `provision.sql` has
-created every role and database, so each application's credentials work the first time it
-tries them, on a brand-new host. After that, `restart: always` handles a database that goes
-away and comes back. See [database.md](database.md#roles-and-databases).
 
 ## Releases on the host
 
 ```
 /opt/infra/
   releases/<UTC time>-<sha12>/   one directory per release: the unpacked bundle
-    database/ … media/ home/     compose file and env files per stack
+    <stack>/ (edge/ on hetzner)  compose file and env files per stack
     release.env                  RELEASE_MODE=latest|pinned, RELEASE_COMMIT=<sha>
     running-images.env           the digest each app container ran when verified
     .verified                    present once the release passed every check
@@ -129,7 +129,7 @@ and the failure message names the last verified one. See
 ## Env files
 
 Each container reads its secrets from its own env file (`postgres.env`, `portfolio.env`,
-`provider.env`, `tunnel.env`, `sftpgo.env`, …), declared with `env_file:`, where the value
+`sftpgo.env`, …), declared with `env_file:`, where the value
 passes through untouched. Home's image reads its secrets only from files, so its one-shot
 `home-keys` reads `home-keys.env` and writes each value into a file in the `home-keys` volume
 for `home-server` ([stacks.md](stacks.md#home)). Each stack's `.env` is read by Compose only for `${VAR}`
@@ -147,15 +147,15 @@ refuses any env line that is not `KEY=value`.
 
 | Network | Created by | Members |
 | --- | --- | --- |
-| `edge` | `roles/host` | Traefik, `cloudflared`, plus every container that serves a public domain |
-| `data` | `roles/host` | PostgreSQL, plus every container that talks to it |
-| `home-llm` | `roles/host`, `--internal` | llama-server (`llama`, the `ai` stack) and Home's `home-server`, nothing else; no route out |
-| `media` | `roles/host` | `home`, `home-tls`, Beszel, Garage, SFTPGo (their tailnet ports, `home-tls`'s certificate), and `home-server` and `home-keys` of the `home` stack (`home-tls` reaches Home there; Home's mail goes out through it) |
+| `edge` | `roles/host` (hetzner) | Traefik and the portfolio |
+| `data` | `roles/host` (hetzner) | PostgreSQL and the portfolio (and the daily dump's rclone container, which needs the way out) |
+| `home-llm` | `roles/host` (home), `--internal` | llama-server (`llama`, the `ai` stack) and Home's `home-server`, nothing else; no route out |
+| `media` | `roles/host` (home) | `home`, `home-tls`, Beszel, Garage, SFTPGo (their tailnet ports, `home-tls`'s certificate), and `home-server` and `home-keys` of the `home` stack (`home-tls` reaches Home there; Home's mail goes out through it) |
 | `edge-socket`, `watchtower-socket`, `autoheal-socket` | their compose projects, `internal: true` | one agent and its socket proxy each |
 
 The stacks declare these networks `external: true`, and the compose guard refuses a release
 that adds or creates any other network, or puts a container on a network that is not its own
-(`hypernova`, `ai`, `media`, `home`; `home-server` is the one container in two stacks' networks,
+(`ai`, `media`, `home`; `home-server` is the one container in two stacks' networks,
 `media` and `home-llm`). They are created by provisioning so they exist before any stack
 or the edge proxy starts.
 
@@ -165,56 +165,57 @@ Two audiences, two ways in, and nothing else:
 
 | Service | Who | Way in | Address |
 | --- | --- | --- | --- |
-| portfolio (`arbikullakshi.com`, `www.`) | anyone | Cloudflare → tunnel → Traefik | the public hostnames |
-| hypernova (`hypernova.arbikullakshi.com`) | anyone | Cloudflare → tunnel → Traefik | the public hostname |
-| SSH | the owner (`admin`), the Deploy workflow (`deploy`) | Tailscale, tcp 22 | `infra-host` |
+| portfolio (`arbikullakshi.com`, `www.`) | anyone | Cloudflare → the hetzner host's Traefik (443, Cloudflare's client certificate) | the public hostnames |
+| the portfolio's media | anyone | Cloudflare R2's custom domain | `media.arbikullakshi.com` |
+| SSH | the owner (`admin`), the Deploy workflow (`deploy`) | Tailscale, tcp 22 | `infra-host`, `infra-hetzner` |
 | Home (`stack/home`, `home-server`, behind `home-tls`) | the owner (the grant below; family members need one of their own) | Tailscale, tcp 443 (`http://infra-host/` on 80 sends the browser there) | `https://home.arbikullakshi.com/` |
-| Beszel, the status dashboard (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8090) | `https://status.home.arbikullakshi.com` |
-| Garage, S3 storage (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 3900) | `https://s3.home.arbikullakshi.com` (S3, path-style, region `garage`) |
-| SFTPGo, the file manager on Garage's `files` bucket (`stack/media`) | the owner | Tailscale, tcp 443 through `home-tls` (and 8091) | `https://files.home.arbikullakshi.com/web/client`, WebDAV at `/dav` |
-| llama-server, PostgreSQL, Traefik | containers only | Docker networks (`home-llm`, `data`, `edge`) | none on the host |
+| Beszel, the status dashboard (`stack/media`) | the owner | Tailscale, tcp 8090 | `http://infra-host:8090` |
+| Garage, S3 storage (`stack/media`) | the owner | Tailscale, tcp 3900 | `http://infra-host:3900` (S3, path-style, region `garage`) |
+| SFTPGo, the file manager on Garage's `files` bucket (`stack/media`) | the owner | Tailscale, tcp 8091 (WebDAV: tcp 443 through `home-tls`) | `http://infra-host:8091/web/client`, WebDAV at `https://home.arbikullakshi.com/dav` |
+| llama-server (home), PostgreSQL (hetzner) | containers only | Docker networks (`home-llm`, `data`) | none on the host |
 
-Each tailnet service's https name is `<label>.home.arbikullakshi.com` (`home_hosts` in
-`production.yml`), all on one Let's Encrypt certificate for `home.` and `*.home.` that `home-tls`
-serves on the Tailscale address; DNS-only records point both at that address. The plain
-`http://infra-host:<port>` addresses still answer, for apps set up before the names existed.
+Home has the only https name, `home.arbikullakshi.com`, on a Let's Encrypt certificate for
+that name alone that `home-tls` serves on the Tailscale address; a DNS-only record points it
+there. The other services have no name (the `*.home` record was deleted in plan 023): they
+answer at `http://infra-host:<port>`.
 
 A tailnet-only service publishes its port on the host's **Tailscale IPv4 alone**
 (`"${TAILSCALE_IP}:<port>:<port>"`, the address provisioning reads with `tailscale ip -4` into
-`/etc/infra/host.env`), never `0.0.0.0` or the LAN address, and never through the tunnel or
-Traefik. The ports are an allowlist in five places that `ci/check_access.py` keeps equal: the
+`/etc/infra/host.env`), never `0.0.0.0` or the LAN address, and never through Cloudflare. The ports are an allowlist in five places that `ci/check_access.py` keeps equal: the
 compose guard's and `ci/check_templates.py`'s `TAILNET_PORTS`, `infra-apply`'s and
 `roles/host`'s `tailnet_ports`, and `ufw_allowed` (on `tailscale0` only). On the tailnet, the
 Tailscale policy grants these ports to the owner (`autogroup:admin`) alone
 ([RUNBOOK.md](../RUNBOOK.md#4-tailscale)). Plain HTTP is fine there: WireGuard encrypts every
-packet between the owner's devices and the server. Video in particular never goes through
-the tunnel: Cloudflare's terms rule it out, and it would be slower than the tailnet anyway.
+packet between the owner's devices and the server.
 
 ## No public ports
 
-**Nothing on the host is reachable from the internet, and nothing is reachable from the LAN
-but SSH until the tailnet takes over.** The public reaches the sites only through the
-Cloudflare Tunnel, an outbound connection from `cloudflared`; Traefik listens only on the
-`edge` network. Several layers make that true:
+**Nothing on the home server is reachable from the internet, and nothing is reachable from the
+LAN but SSH until the tailnet takes over. On the hetzner host only Cloudflare reaches Traefik's
+80 and 443** ([edge.md](edge.md#only-cloudflare-reaches-traefik)). Several layers make that
+true:
 
-- No container publishes a port but the tailnet-only ones, and those only on the Tailscale
-  address: the compose guard refuses any other `ports:` (and any other form or address for
-  those) in every release stack, `ci/check_templates.py` (rule 9) in every compose file,
-  `infra-apply` reads each binding back from Docker after the start, and provisioning reads
-  back that Traefik has no port bindings and that every published port on the host is an
-  allowlisted one on the Tailscale address.
+- No release container publishes a port but the tailnet-only ones, and those only on the
+  Tailscale address: the compose guard refuses any other `ports:` (and any other form or
+  address for those) in every release stack, `ci/check_templates.py` (rule 9) in every compose
+  file but the hetzner edge's, `infra-apply` reads each binding back from Docker after the
+  start, and provisioning reads back that every published port on the host is an allowlisted
+  one (on hetzner: Traefik's 80 and 443, nothing else).
 - ufw denies everything inbound except 22 and the tailnet-only ports on `tailscale0` (and LAN
-  22 only until the first run over the tailnet).
+  22 only until the first run over the tailnet), plus, on hetzner, 80 and 443 from Cloudflare's
+  ranges.
 - Docker's published ports bypass ufw (they are NAT rules), so `infra-firewall` hooks a chain
-  `INFRA-PUBLIC` first in `DOCKER-USER` that drops every new connection from the LAN-facing
-  interface to a container (`public_ports: []` in `production.yml`), and second for every new
+  `INFRA-PUBLIC` first in `DOCKER-USER` that drops every new connection from the public
+  interface to a container (home: `public_ports` empty; hetzner: all but 80 and 443 from
+  Cloudflare's IPv4 ranges), and second for every new
   connection to a published port (conntrack `DNAT`) that did not arrive on `tailscale0`. So a
   port bound wider by mistake is still unreachable from the LAN, Wi-Fi or anything but the
   tailnet.
-- The home router forwards no port to the server, and the server's public IP is not in DNS.
+- The home router forwards no port to the home server, and its public IP is not in DNS. The
+  Hetzner Cloud Firewall admits only ICMP and Cloudflare on 80 and 443 to the hetzner host.
 
 PostgreSQL publishes nothing and is reachable only from containers on `data`. See
-[edge.md](edge.md#only-the-tunnel-reaches-traefik) and [host.md](host.md#firewall).
+[edge.md](edge.md#only-cloudflare-reaches-traefik) and [host.md](host.md#firewall).
 
 ## Host keys and inventory
 
@@ -224,7 +225,8 @@ console), and the Deploy workflow connects with `StrictHostKeyChecking=yes` agai
 `SSH_KNOWN_HOSTS` secret. A reinstalled server gets a new key, and both must be updated on
 purpose ([RUNBOOK.md](../RUNBOOK.md#5-first-provision-over-the-lan)).
 
-The inventory names one host, `infra-host`, by its tailnet name; `inventory/hosts` is
-gitignored and `inventory/hosts.example` is the committed template. Only the bootstrap run
-points it at the LAN address. No address is committed, and the workflow only ever uses the
+The inventory names two hosts, each in a group of its own (`[home]` `infra-host`, `[hetzner]`
+`infra-hetzner`), by their tailnet names; `inventory/hosts` is gitignored and
+`inventory/hosts.example` is the committed template. Only a bootstrap run points one at its LAN
+or public address. No address is committed, and the workflow only ever uses the
 tailnet name.

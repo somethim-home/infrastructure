@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Turns rollback targets into the pins build-bundle.sh --pin applies:
+# Turns a rollback target into the pin build-bundle.sh --pin applies:
 #
-#   release-images.sh resolve <portfolio> <hypernova_provider> <hypernova_web> <home> < status.txt > pins.env
+#   release-images.sh resolve <home|hetzner> <target> < status.txt > pins.env
 #
 # status.txt is the output of `ssh deploy@<host> status` (infra-apply status).
-# Each target is one of:
+# Each host runs one app image: hetzner the portfolio, home Home's home-server.
+# The target is one of:
 #   latest           follow <repo>:latest (auto-updates stay on for it)
 #   current          pin the digest that runs now
 #   previous         pin the first digest that differs from the one running now,
@@ -13,12 +14,12 @@
 #   <40-hex sha>     portfolio only: its :<full commit sha> tag, by digest
 #   sha256:<digest>  that digest, after checking the registry has it
 # A digest is always pulled from GHCR, which keeps untagged versions.
-# Prints RELEASE_MODE=pinned and the four image lines; notes go to stderr.
+# Prints RELEASE_MODE=pinned and the host's image line; notes go to stderr.
 # The registry lookups need `docker login ghcr.io` first.
 set -euo pipefail
 
 usage() {
-  printf 'usage: release-images.sh resolve <portfolio> <hypernova_provider> <hypernova_web> <home> < status.txt > pins.env\n' >&2
+  printf 'usage: release-images.sh resolve <home|hetzner> <target> < status.txt > pins.env\n' >&2
   exit 64
 }
 
@@ -129,9 +130,9 @@ resolve_one() {
 }
 
 resolve() {
-  local portfolio="$1" provider="$2" web="$3" home="$4" portfolio_repo provider_repo web_repo home_repo out
-  if [ "$portfolio" = latest ] && [ "$provider" = latest ] && [ "$web" = latest ] && [ "$home" = latest ]; then
-    fail "every target is latest; that is not a rollback, use resume"
+  local host="$1" target="$2" out
+  if [ "$target" = latest ]; then
+    fail "the target is latest; that is not a rollback, use resume"
   fi
   status="$(mktemp)"
   trap 'rm -f "$status" "$status.pins"' EXIT
@@ -139,17 +140,14 @@ resolve() {
   [ -s "$status" ] || fail "no status output arrived on stdin"
   current_id="$(release_id current)"
   previous_id="$(release_id previous)"
-  portfolio_repo="$(repo_for portfolio_image_repo)"
-  provider_repo="$(repo_for hypernova_provider_image_repo)"
-  web_repo="$(repo_for hypernova_web_image_repo)"
-  home_repo="$(repo_for home_image_repo)"
   out="$status.pins"
   {
     printf 'RELEASE_MODE=pinned\n'
-    resolve_one PORTFOLIO_IMAGE portfolio "$portfolio_repo" "$portfolio" yes
-    resolve_one PROVIDER_IMAGE prizm-provider "$provider_repo" "$provider" no
-    resolve_one WEB_IMAGE prizm-web "$web_repo" "$web" no
-    resolve_one HOME_IMAGE home-server "$home_repo" "$home" no
+    case "$host" in
+      hetzner) resolve_one PORTFOLIO_IMAGE portfolio "$(repo_for portfolio_image_repo)" "$target" yes ;;
+      home) resolve_one HOME_IMAGE home-server "$(repo_for home_image_repo)" "$target" no ;;
+      *) usage ;;
+    esac
   } >"$out"
   cat "$out"
 }
@@ -157,8 +155,8 @@ resolve() {
 [ "$#" -ge 1 ] || usage
 case "$1" in
   resolve)
-    [ "$#" -eq 5 ] || usage
-    resolve "$2" "$3" "$4" "$5"
+    [ "$#" -eq 3 ] || usage
+    resolve "$2" "$3"
     ;;
   *) usage ;;
 esac

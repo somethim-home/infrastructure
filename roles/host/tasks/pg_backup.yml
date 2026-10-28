@@ -1,0 +1,24 @@
+---
+# See docs/database.md, "Backups". The hetzner host's only state is the
+# portfolio database (its media is in R2), dumped to R2 once a day. Until the
+# first release writes database/backup.env the run fails and says so.
+- name: Install the database dump script and its units
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: infra-pg-backup, dest: /usr/local/sbin/infra-pg-backup, mode: "0755" }
+    - { src: infra-pg-backup.service, dest: /etc/systemd/system/infra-pg-backup.service, mode: "0644" }
+    - { src: infra-pg-backup.timer, dest: /etc/systemd/system/infra-pg-backup.timer, mode: "0644" }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Dump the database every day
+  ansible.builtin.systemd:
+    name: infra-pg-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
